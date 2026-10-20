@@ -39,9 +39,9 @@ const refs = { riders: [], turnouts: [], fields: [], leases: [] };
 
 async function loadRefs() {
   const [riders, turnouts, fields, leases] = await Promise.all([
-    q(sb.from('ditch_riders').select('*').order('name')),
-    q(sb.from('turnouts').select('*').order('name')),
-    q(sb.from('fields').select('*').order('name')),
+    q(sb.from('ditch_riders').select('*').order('sort_order', { nullsFirst: false }).order('name')),
+    q(sb.from('turnouts').select('*').order('sort_order', { nullsFirst: false }).order('name')),
+    q(sb.from('fields').select('*').order('sort_order', { nullsFirst: false }).order('name')),
     q(sb.from('leases').select('*')),
   ]);
   Object.assign(refs, { riders, turnouts, fields, leases });
@@ -68,7 +68,7 @@ const fieldName = (id) => fieldById(id)?.name ?? '';
 // =====================================================================
 const CRUD = {
   fields: {
-    table: 'fields', pk: 'field_id', title: 'Fields', singular: 'field', order: 'name',
+    table: 'fields', pk: 'field_id', title: 'Fields', singular: 'field', order: ['sort_order', 'name'],
     search: true, refreshRefs: true,
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
@@ -101,7 +101,7 @@ const CRUD = {
     beforeSave(d) { if (d.parent_field_id) d.turnout_id = null; },
   },
   riders: {
-    table: 'ditch_riders', pk: 'rider_id', title: 'Ditch riders', singular: 'ditch rider', order: 'name',
+    table: 'ditch_riders', pk: 'rider_id', title: 'Ditch riders', singular: 'ditch rider', order: ['sort_order', 'name'],
     refreshRefs: true, allowDelete: true,
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
@@ -110,7 +110,7 @@ const CRUD = {
     ],
   },
   turnouts: {
-    table: 'turnouts', pk: 'turnout_id', title: 'Turnouts', singular: 'turnout', order: 'name',
+    table: 'turnouts', pk: 'turnout_id', title: 'Turnouts', singular: 'turnout', order: ['sort_order', 'name'],
     refreshRefs: true, allowDelete: true,
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
@@ -180,7 +180,9 @@ function display(c, r) {
 }
 
 async function renderCrud(cfg, el) {
-  const rows = await q(sb.from(cfg.table).select('*').order(cfg.order));
+  let req = sb.from(cfg.table).select('*');
+  for (const col of [].concat(cfg.order)) req = req.order(col, { nullsFirst: false });
+  const rows = await q(req);
   const cols = cfg.columns.filter((c) => c.list);
   el.innerHTML = `
     <div class="section-head"><h2>${esc(cfg.title)}</h2>
@@ -369,6 +371,24 @@ async function renderOrder(el) {
   drawOrder($('#order-body', el));
 }
 
+// A parent with split halves is on whenever any half is on. Bring older
+// saved orders into line with that (no "unsaved" flag — nothing changed).
+function syncHalves() {
+  const s = orderState;
+  for (const f of orderParents()) {
+    const subs = subunitsOf(f.field_id);
+    if (!subs.length) continue;
+    const l = lineFor(f);
+    const anyOn = subs.some((sf) => s.subs.get(sf.field_id));
+    if (l.is_on && !anyOn) subs.forEach((sf) => s.subs.set(sf.field_id, true));
+    if (!l.is_on && anyOn) subs.forEach((sf) => s.subs.set(sf.field_id, false));
+  }
+}
+
+const moveBtns = (kind, id) => `<span class="move">
+  <button class="icon" data-move="${kind}:${id}:-1" aria-label="Move up">↑</button>
+  <button class="icon" data-move="${kind}:${id}:1" aria-label="Move down">↓</button></span>`;
+
 function drawOrder(body) {
   const s = orderState;
   const parents = orderParents();
@@ -377,31 +397,46 @@ function drawOrder(body) {
       and at least one field assigned to that turnout. Add them under <b>Setup</b> and <b>Fields</b>.</div>`;
     return;
   }
+  syncHalves();
+  const arrange = !!s.arrange;
   const noTurnout = refs.fields.filter((f) => f.active && !f.parent_field_id && !f.turnout_id).length;
 
-  let html = `<p id="order-status"></p>
+  let html = `<div class="order-bar">
+      <p id="order-status"></p>
+      <button class="${arrange ? 'primary' : ''} small" data-act="arrange">${arrange ? 'Done arranging' : 'Arrange'}</button>
+    </div>
+    ${arrange ? '<p class="muted small">Use the arrows to set the order of riders, turnouts and fields. Changes save as you go.</p>' : ''}
     ${noTurnout ? `<p class="muted small">${noTurnout} field(s) have no turnout and aren't shown.</p>` : ''}
-    <div class="order-grid"><div class="order-fields">`;
+    <div class="order-grid${arrange ? ' arranging' : ''}"><div class="order-fields">`;
 
   for (const r of refs.riders) {
     const tos = refs.turnouts.filter((t) => t.rider_id === r.rider_id && parents.some((f) => f.turnout_id === t.turnout_id));
     if (!tos.length) continue;
-    html += `<section class="card"><h3>${esc(r.name)}</h3>`;
+    html += `<section class="card rider-card"><div class="rider-head"><h3>${esc(r.name)}</h3>
+      ${arrange ? moveBtns('riders', r.rider_id) : ''}</div>`;
     for (const t of tos) {
-      html += `<div class="turnout"><div class="turnout-head"><span>${esc(t.name)}</span>
-        <span class="total" data-total="${t.turnout_id}"></span></div>`;
+      html += `<div class="turnout"><div class="turnout-head">
+        <span class="turnout-name">Turnout ${esc(t.name)}</span>
+        ${arrange ? moveBtns('turnouts', t.turnout_id) : `<span class="pill" data-total="${t.turnout_id}"></span>`}</div>`;
       for (const f of parents.filter((p) => p.turnout_id === t.turnout_id)) {
         const l = lineFor(f);
         const subs = subunitsOf(f.field_id);
-        html += `<div class="field-row">
-          <label class="switch"><input type="checkbox" data-on="${f.field_id}" ${l.is_on ? 'checked' : ''}>
-            <span>${esc(f.name)}</span></label>
-          <span class="cfs"><input type="number" min="0" step="0.05" inputmode="decimal"
-            data-cfs="${f.field_id}" value="${num(l.cfs)}"> CFS</span>
-          ${subs.length ? `<div class="subs">${subs.map((sf) => `<label>
-            <input type="checkbox" data-sub="${sf.field_id}" ${s.subs.get(sf.field_id) ? 'checked' : ''}>
-            ${esc(sf.name)} watered</label>`).join('')}</div>` : ''}
-        </div>`;
+        const cfsInput = `<span class="cfs"><input type="number" min="0" step="0.05" inputmode="decimal"
+            data-cfs="${f.field_id}" value="${num(l.cfs)}" aria-label="${esc(f.name)} CFS"><span>CFS</span></span>`;
+        if (arrange) {
+          html += `<div class="field-row"><span class="field-name">${esc(f.name)}</span>${moveBtns('fields', f.field_id)}</div>`;
+        } else if (subs.length) {
+          html += `<div class="field-row parent ${l.is_on ? 'on' : ''}" data-row="${f.field_id}">
+              <span class="field-name">${esc(f.name)}<small>on when either half is on</small></span>${cfsInput}<span class="toggle-spacer"></span></div>
+            ${subs.map((sf) => `<label class="field-row sub ${s.subs.get(sf.field_id) ? 'on' : ''}" data-subrow="${sf.field_id}">
+              <span class="field-name">${esc(sf.name)}</span>
+              <input type="checkbox" data-sub="${sf.field_id}" data-parent="${f.field_id}" ${s.subs.get(sf.field_id) ? 'checked' : ''}>
+            </label>`).join('')}`;
+        } else {
+          html += `<div class="field-row ${l.is_on ? 'on' : ''}" data-row="${f.field_id}">
+            <label class="field-name" for="on-${f.field_id}">${esc(f.name)}</label>${cfsInput}
+            <input type="checkbox" id="on-${f.field_id}" data-on="${f.field_id}" ${l.is_on ? 'checked' : ''}></div>`;
+        }
       }
       html += `</div>`;
     }
@@ -420,19 +455,55 @@ function drawOrder(body) {
     </aside></div>`;
   body.innerHTML = html;
 
+  const changed = () => { s.dirty = true; updateOrderOutput(body); };
+  $('[data-act=arrange]', body).onclick = () => { s.arrange = !s.arrange; drawOrder(body); };
+  $$('[data-move]', body).forEach((b) => (b.onclick = async () => {
+    const [kind, id, dir] = b.dataset.move.split(':');
+    await moveItem(kind, Number(id), Number(dir));
+    drawOrder(body);
+  }));
   $$('[data-on]', body).forEach((cb) => (cb.onchange = () => {
     lineFor(fieldById(cb.dataset.on)).is_on = cb.checked;
-    s.dirty = true;
-    updateOrderOutput(body);
+    cb.closest('.field-row').classList.toggle('on', cb.checked);
+    changed();
+  }));
+  $$('[data-sub]', body).forEach((cb) => (cb.onchange = () => {
+    s.subs.set(Number(cb.dataset.sub), cb.checked);
+    cb.closest('.field-row').classList.toggle('on', cb.checked);
+    const parent = fieldById(cb.dataset.parent);
+    const anyOn = subunitsOf(parent.field_id).some((sf) => s.subs.get(sf.field_id));
+    lineFor(parent).is_on = anyOn;
+    $(`[data-row="${parent.field_id}"]`, body)?.classList.toggle('on', anyOn);
+    changed();
   }));
   $$('[data-cfs]', body).forEach((inp) => (inp.oninput = () => {
     lineFor(fieldById(inp.dataset.cfs)).cfs = Number(inp.value) || 0;
-    s.dirty = true;
-    updateOrderOutput(body);
+    changed();
   }));
-  $$('[data-sub]', body).forEach((cb) => (cb.onchange = () => { s.subs.set(Number(cb.dataset.sub), cb.checked); s.dirty = true; updateOrderOutput(body); }));
   $$('[data-save]', body).forEach((b) => (b.onclick = () => saveOrder(b.dataset.save, body)));
   updateOrderOutput(body);
+}
+
+// Swap an item with its neighbour, renumber the group, save.
+async function moveItem(kind, id, dir) {
+  const spec = {
+    riders: { table: 'ditch_riders', pk: 'rider_id', group: () => refs.riders },
+    turnouts: { table: 'turnouts', pk: 'turnout_id', group: (x) => refs.turnouts.filter((t) => t.rider_id === x.rider_id) },
+    fields: { table: 'fields', pk: 'field_id', group: (x) => orderParents().filter((f) => f.turnout_id === x.turnout_id) },
+  }[kind];
+  const item = refs[kind].find((x) => x[spec.pk] === id);
+  const list = [...spec.group(item)];
+  const i = list.indexOf(item);
+  const j = i + dir;
+  if (j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  const updates = list
+    .map((x, n) => ({ id: x[spec.pk], order: (n + 1) * 10, old: x.sort_order }))
+    .filter((u) => u.order !== u.old);
+  try {
+    await Promise.all(updates.map((u) => q(sb.from(spec.table).update({ sort_order: u.order }).eq(spec.pk, u.id))));
+    await loadRefs();
+  } catch { /* error shown */ }
 }
 
 function riderTexts() {
@@ -475,6 +546,7 @@ function updateOrderOutput(body) {
   $$('[data-total]', body).forEach((el) => {
     const total = turnoutCfs(Number(el.dataset.total), orderState.lines);
     el.textContent = total > 0 ? `${num(total)} CFS` : 'Off';
+    el.classList.toggle('on', total > 0);
   });
   const texts = riderTexts();
   $('#order-text', body).innerHTML = texts.length
