@@ -275,6 +275,7 @@ const orderState = {
   subs: new Map(),    // sub-unit field_id -> watered
   prev: new Map(),    // previous submitted order's lines, for change notes
   prevDate: null,
+  dirty: false,       // edited since last save
 };
 
 const orderParents = () => refs.fields.filter((f) => f.active && !f.parent_field_id && f.turnout_id);
@@ -315,6 +316,7 @@ async function loadOrder(date) {
   const prev = prevOrder ? await linesFor(prevOrder.order_id) : { lines: new Map(), subs: new Map() };
   s.prev = prev.lines;
   s.prevDate = prevOrder?.order_date ?? null;
+  s.dirty = false;
 
   if (existing) {
     const cur = await linesFor(existing.order_id);
@@ -324,6 +326,10 @@ async function loadOrder(date) {
     Object.assign(s, { orderId: null, status: null, submittedAt: null,
       lines: new Map([...prev.lines].map(([k, v]) => [k, { ...v }])), subs: new Map(prev.subs) });
   }
+}
+
+function okToLeaveOrder() {
+  return !orderState.dirty || confirm('This water order has changes that haven\'t been sent or saved. Leave anyway?');
 }
 
 async function renderOrder(el) {
@@ -336,8 +342,9 @@ async function renderOrder(el) {
         <button data-shift="1" aria-label="Next day">›</button>
       </div></div>
     <div id="order-body"><p class="muted">Loading…</p></div>`;
-  $('#order-date', el).onchange = (e) => { if (e.target.value) { orderState.date = e.target.value; renderOrder(el); } };
+  $('#order-date', el).onchange = (e) => { if (!okToLeaveOrder()) { e.target.value = orderState.date; return; } if (e.target.value) { orderState.date = e.target.value; renderOrder(el); } };
   $$('[data-shift]', el).forEach((b) => (b.onclick = () => {
+    if (!okToLeaveOrder()) return;
     orderState.date = addDays(orderState.date, Number(b.dataset.shift));
     renderOrder(el);
   }));
@@ -354,11 +361,9 @@ function drawOrder(body) {
     return;
   }
   const noTurnout = refs.fields.filter((f) => f.active && !f.parent_field_id && !f.turnout_id).length;
-  const status = s.orderId
-    ? `Saved as <b>${esc(s.status)}</b>${s.submittedAt ? ' · ' + esc(fmtTime(s.submittedAt)) : ''}`
-    : s.prevDate ? `Not saved yet · pre-filled from ${esc(fmtDay(s.prevDate))}` : 'Not saved yet';
 
-  let html = `<p class="muted">${status}${noTurnout ? ` · ${noTurnout} field(s) have no turnout and aren't shown` : ''}</p>
+  let html = `<p id="order-status"></p>
+    ${noTurnout ? `<p class="muted small">${noTurnout} field(s) have no turnout and aren't shown.</p>` : ''}
     <div class="order-grid"><div class="order-fields">`;
 
   for (const r of refs.riders) {
@@ -393,20 +398,22 @@ function drawOrder(body) {
       <div class="actions">
         <span class="spacer"></span>
         <button data-save="draft">Save draft</button>
-        <button class="primary" data-save="submitted">Save as submitted</button>
+        <button data-save="submitted">Mark as sent</button>
       </div>
     </aside></div>`;
   body.innerHTML = html;
 
   $$('[data-on]', body).forEach((cb) => (cb.onchange = () => {
     lineFor(fieldById(cb.dataset.on)).is_on = cb.checked;
+    s.dirty = true;
     updateOrderOutput(body);
   }));
   $$('[data-cfs]', body).forEach((inp) => (inp.oninput = () => {
     lineFor(fieldById(inp.dataset.cfs)).cfs = Number(inp.value) || 0;
+    s.dirty = true;
     updateOrderOutput(body);
   }));
-  $$('[data-sub]', body).forEach((cb) => (cb.onchange = () => s.subs.set(Number(cb.dataset.sub), cb.checked)));
+  $$('[data-sub]', body).forEach((cb) => (cb.onchange = () => { s.subs.set(Number(cb.dataset.sub), cb.checked); s.dirty = true; updateOrderOutput(body); }));
   $$('[data-save]', body).forEach((b) => (b.onclick = () => saveOrder(b.dataset.save, body)));
   updateOrderOutput(body);
 }
@@ -426,12 +433,29 @@ function riderTexts() {
         : was > 0 ? ` (was ${num(was)})` : ' (new)';
       rows.push(`${t.name}: ${val}${note}`);
     }
-    if (rows.length) out.push({ rider: r.name, text: `Water order for ${fmtDay(s.date)}\n${rows.join('\n')}` });
+    if (rows.length) out.push({ rider: r.name, phone: r.phone, text: `Water order for ${fmtDay(s.date)}\n${rows.join('\n')}` });
   }
   return out;
 }
 
+function orderStatusHtml() {
+  const s = orderState;
+  if (s.dirty && s.status === 'submitted') {
+    return `<span class="notice">Changed since it was sent. Send the updated text to the ditch riders.</span>`;
+  }
+  if (s.dirty) return `<span class="notice">Unsaved changes. Send or save before leaving this screen.</span>`;
+  if (s.status === 'submitted') {
+    return `<span class="badge new">Sent</span> <span class="muted">${s.submittedAt ? esc(fmtTime(s.submittedAt)) : ''}</span>`;
+  }
+  if (s.status === 'draft') return `<span class="badge down">Draft</span> <span class="muted">not sent yet</span>`;
+  return `<span class="badge off">Not sent</span> <span class="muted">${
+    s.prevDate ? `pre-filled from ${esc(fmtDay(s.prevDate))}` : ''}</span>`;
+}
+
+const smsLink = (phone, text) => `sms:${String(phone).replace(/[^\d+]/g, '')}?&body=${encodeURIComponent(text)}`;
+
 function updateOrderOutput(body) {
+  $('#order-status', body).innerHTML = orderStatusHtml();
   $$('[data-total]', body).forEach((el) => {
     const total = turnoutCfs(Number(el.dataset.total), orderState.lines);
     el.textContent = total > 0 ? `${num(total)} CFS` : 'Off';
@@ -439,16 +463,36 @@ function updateOrderOutput(body) {
   const texts = riderTexts();
   $('#order-text', body).innerHTML = texts.length
     ? texts.map((t, i) => `<div class="rider-text">
-        <div class="rider-text-head"><b>${esc(t.rider)}</b><button class="small" data-copy="${i}">Copy</button></div>
-        <pre>${esc(t.text)}</pre></div>`).join('')
+        <div class="rider-text-head"><b>${esc(t.rider)}</b>
+          <span class="row">
+            ${t.phone ? `<button class="small primary" data-text="${i}">Text</button>` : ''}
+            <button class="small" data-copy="${i}">Copy</button>
+          </span></div>
+        <pre>${esc(t.text)}</pre>
+        ${t.phone ? '' : '<p class="muted small">Add a phone number for this rider under Setup to text from here.</p>'}
+      </div>`).join('') +
+      '<p class="muted small">Text and Copy also save the order as sent.</p>'
     : '<p class="muted">No water on or changing for this day.</p>';
+
+  // Copy, then save as sent (clipboard must be written before any waiting).
   $$('[data-copy]', body).forEach((b) => (b.onclick = async () => {
-    try { await navigator.clipboard.writeText(texts[b.dataset.copy].text); toast('Copied'); }
-    catch { toast('Copy failed — select the text and copy it by hand', true); }
+    const t = texts[b.dataset.copy];
+    let copied = true;
+    try { await navigator.clipboard.writeText(t.text); } catch { copied = false; }
+    await saveOrder('submitted', body, copied
+      ? `Copied ${t.rider}'s text · order saved as sent`
+      : 'Order saved as sent, but copy failed. Select the text and copy it by hand.');
+  }));
+
+  // Save as sent, then open the phone's messaging app with the text filled in.
+  $$('[data-text]', body).forEach((b) => (b.onclick = async () => {
+    const t = texts[b.dataset.text];
+    const ok = await saveOrder('submitted', body, `Order saved as sent · opening Messages for ${t.rider}`);
+    if (ok) window.location.href = smsLink(t.phone, t.text);
   }));
 }
 
-async function saveOrder(status, body) {
+async function saveOrder(status, body, message) {
   const s = orderState;
   $$('[data-save]', body).forEach((b) => (b.disabled = true));
   try {
@@ -471,11 +515,13 @@ async function saveOrder(status, body) {
     })));
     if (subs.length) await q(sb.from('water_order_subunits').insert(subs));
 
-    Object.assign(s, { orderId: order.order_id, status: order.status, submittedAt: order.submitted_at });
-    toast(status === 'submitted' ? 'Order saved as submitted' : 'Draft saved');
+    Object.assign(s, { orderId: order.order_id, status: order.status, submittedAt: order.submitted_at, dirty: false });
+    toast(message ?? (status === 'submitted' ? 'Order marked as sent' : 'Draft saved'));
     drawOrder(body);
+    return true;
   } catch {
     $$('[data-save]', body).forEach((b) => (b.disabled = false));
+    return false;
   }
 }
 
@@ -554,7 +600,7 @@ async function renderHome(el) {
           <ul class="list">${g.items.map(changeLine).join('')}</ul></div>`).join('')
       : `<p class="muted">Today's order is the same as the previous one. No changes.</p>`;
   } else if (todayRows[0]) {
-    changesHtml = `<p class="notice">Today's order was saved as a draft but never marked submitted, so it isn't counted.
+    changesHtml = `<p class="notice">Today's order was saved as a draft but never sent, so it isn't counted.
       Water is running as ordered for ${esc(fmtDay(current?.order_date ?? today))}.</p>`;
   } else if (current) {
     changesHtml = `<p class="muted">No changes today. Water is running as ordered for ${esc(fmtDay(current.order_date))}.</p>`;
@@ -565,8 +611,8 @@ async function renderHome(el) {
   // ---- Tomorrow card
   const tmr = tomorrowRows[0];
   const tmrStatus = !tmr ? '<span class="badge off">Not started</span>'
-    : tmr.status === 'draft' ? '<span class="badge down">Draft</span>'
-    : `<span class="badge new">Submitted</span> <span class="muted">${tmr.submitted_at ? esc(fmtTime(tmr.submitted_at)) : ''}</span>`;
+    : tmr.status === 'draft' ? '<span class="badge down">Draft, not sent</span>'
+    : `<span class="badge new">Sent</span> <span class="muted">${tmr.submitted_at ? esc(fmtTime(tmr.submitted_at)) : ''}</span>`;
 
   // ---- Running card
   const runningHtml = running.length
@@ -575,11 +621,16 @@ async function renderHome(el) {
           <span class="li-value">${num(r.cfs)} CFS</span></li>`).join('')}</ul></div>`).join('')
     : '<p class="muted">Nothing is running.</p>';
 
+  const needsOrder = (!tmr || tmr.status === 'draft') && new Date().getHours() >= 10;
+
   el.innerHTML = `
     <div class="home-head">
       <p class="eyebrow">${esc(fmtLong(today))}</p>
       <h2>Today on the farm</h2>
     </div>
+    ${needsOrder ? `<div class="alert">
+      <span><b>Tomorrow's water order hasn't been sent.</b> It's due to the ditch riders around 2:30 PM.</span>
+      <button class="primary small" data-act="tomorrow">Open order</button></div>` : ''}
 
     <div class="stats">
       <div class="stat"><span class="stat-label">Water running</span><span class="stat-value">${num(totalCfs)}<small> CFS</small></span></div>
@@ -607,7 +658,7 @@ async function renderHome(el) {
       </div>
     </div>`;
 
-  $('[data-act=tomorrow]', el).onclick = () => { orderState.date = tomorrow; show('order'); };
+  $$('[data-act=tomorrow]', el).forEach((b) => (b.onclick = () => { orderState.date = tomorrow; show('order'); }));
 }
 
 // =====================================================================
@@ -635,6 +686,8 @@ const VIEWS = {
 let currentView = 'home';
 
 async function show(view) {
+  if (currentView === 'order' && view !== 'order' && !okToLeaveOrder()) return;
+  orderState.dirty = false;
   currentView = view;
   $$('nav [data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
   const el = $('#view');
@@ -674,6 +727,10 @@ $('#login-form').onsubmit = async (e) => {
 };
 $('#signout').onclick = () => sb.auth.signOut();
 $$('nav [data-view]').forEach((b) => (b.onclick = () => show(b.dataset.view)));
+
+window.addEventListener('beforeunload', (e) => {
+  if (currentView === 'order' && orderState.dirty) { e.preventDefault(); e.returnValue = ''; }
+});
 
 let started = false;
 sb.auth.onAuthStateChange((_event, session) => {

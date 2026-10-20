@@ -210,3 +210,13 @@ pre {
 }
 #toast.show { transform: translateX(-50%) translateY(0); }
 #toast.error { background: var(--danger); }
+
+/* Reminders */
+.alert {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem;
+  background: var(--amber-soft); color: var(--amber); border: 1px solid #f1dca8;
+  border-radius: var(--radius); padding: .8rem 1rem; margin-bottom: 1rem;
+}
+.alert b { color: #7a4d00; }
+#order-status { margin: 0 0 .8rem; }
+#order-status .notice { display: inline-block; }
