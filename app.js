@@ -621,7 +621,7 @@ async function renderHome(el) {
           <span class="li-value">${num(r.cfs)} CFS</span></li>`).join('')}</ul></div>`).join('')
     : '<p class="muted">Nothing is running.</p>';
 
-  const needsOrder = (!tmr || tmr.status === 'draft') && new Date().getHours() >= 10;
+  const needsOrder = (!tmr || tmr.status === 'draft') && new Date().getHours() * 60 + new Date().getMinutes() >= 14 * 60 + 30
 
   el.innerHTML = `
     <div class="home-head">
