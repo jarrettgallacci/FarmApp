@@ -35,15 +35,30 @@ async function q(request) {
 // =====================================================================
 // Reference data used across screens
 // =====================================================================
-const refs = { riders: [], turnouts: [], fields: [] };
+const refs = { riders: [], turnouts: [], fields: [], leases: [] };
 
 async function loadRefs() {
-  const [riders, turnouts, fields] = await Promise.all([
+  const [riders, turnouts, fields, leases] = await Promise.all([
     q(sb.from('ditch_riders').select('*').order('name')),
     q(sb.from('turnouts').select('*').order('name')),
     q(sb.from('fields').select('*').order('name')),
+    q(sb.from('leases').select('*')),
   ]);
-  Object.assign(refs, { riders, turnouts, fields });
+  Object.assign(refs, { riders, turnouts, fields, leases });
+}
+
+// Deeded unless a lease or partnership is in effect today.
+// A split half with no agreement of its own follows its parent.
+function currentAgreement(fieldId) {
+  const today = localDate();
+  return refs.leases
+    .filter((l) => l.field_id === fieldId && l.start_date <= today && (!l.end_date || l.end_date >= today))
+    .sort((a, b) => b.start_date.localeCompare(a.start_date))[0] ?? null;
+}
+function tenureOf(f) {
+  const a = currentAgreement(f.field_id) ?? (f.parent_field_id ? currentAgreement(f.parent_field_id) : null);
+  if (!a) return 'Deeded';
+  return a.agreement_type === 'partnership' ? `Partnership (${a.lessor})` : `Leased (${a.lessor})`;
 }
 const fieldById = (id) => refs.fields.find((f) => f.field_id === Number(id));
 const fieldName = (id) => fieldById(id)?.name ?? '';
@@ -59,10 +74,8 @@ const CRUD = {
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'farm_unit', label: 'Farm unit', type: 'text', list: true },
       { key: 'block', label: 'Block', type: 'text' },
-      { key: 'unit', label: 'Unit', type: 'text' },
       { key: 'acres', label: 'Acres', type: 'number', step: '0.01', list: true },
-      { key: 'tenure', label: 'Deeded or leased', type: 'select', list: true,
-        options: () => [['deeded', 'Deeded'], ['leased', 'Leased']] },
+      { key: 'tenure', label: 'Ground', list: true, form: false, compute: tenureOf },
       { key: 'turnout_id', label: 'Turnout', type: 'select', num: true, list: true,
         options: () => refs.turnouts.map((t) => [t.turnout_id, t.name]) },
       { key: 'flow_rate_cfs', label: 'Flow rate (CFS)', type: 'number', step: '0.01', list: true },
@@ -70,7 +83,6 @@ const CRUD = {
         options: (row) => refs.fields
           .filter((f) => !f.parent_field_id && f.field_id !== row?.field_id)
           .map((f) => [f.field_id, f.name]) },
-      { key: 'water_field_id', label: 'District water field ID', type: 'text' },
       { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
@@ -142,15 +154,17 @@ const CRUD = {
     ],
   },
   leases: {
-    table: 'leases', pk: 'lease_id', title: 'Leases', singular: 'lease', order: 'start_date',
-    allowDelete: true,
+    table: 'leases', pk: 'lease_id', title: 'Leases & partnerships', singular: 'lease or partnership',
+    order: 'start_date', allowDelete: true, refreshRefs: true,
     columns: [
       { key: 'field_id', label: 'Field', type: 'select', num: true, required: true, list: true,
         options: () => refs.fields.map((f) => [f.field_id, f.name]) },
-      { key: 'lessor', label: 'Lessor', type: 'text', required: true, list: true },
+      { key: 'agreement_type', label: 'Type', type: 'select', required: true, list: true, default: 'lease',
+        options: () => [['lease', 'Lease'], ['partnership', 'Partnership']] },
+      { key: 'lessor', label: 'Landowner (lessor or partner grower)', type: 'text', required: true, list: true },
       { key: 'start_date', label: 'Start date', type: 'date', required: true, list: true },
       { key: 'end_date', label: 'End date', type: 'date', list: true },
-      { key: 'rate', label: 'Rate', type: 'number', step: '0.01', list: true },
+      { key: 'rate', label: 'Rate (leave blank for partnerships)', type: 'number', step: '0.01', list: true },
       { key: 'rate_basis', label: 'Rate basis (per acre, flat, crop share)', type: 'text', list: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
@@ -158,6 +172,7 @@ const CRUD = {
 };
 
 function display(c, r) {
+  if (c.compute) return c.compute(r);
   const v = r[c.key];
   if (c.type === 'checkbox') return v ? 'Yes' : 'No';
   if (c.type === 'select') return c.options(null).find(([val]) => String(val) === String(v))?.[1] ?? '';
@@ -192,6 +207,7 @@ async function renderCrud(cfg, el) {
 }
 
 function fieldHtml(c, row) {
+  if (c.form === false) return '';
   const v = row ? row[c.key] : c.default;
   const req = c.required ? 'required' : '';
   const lbl = esc(c.label) + (c.required ? ' *' : '');
@@ -213,6 +229,7 @@ function fieldHtml(c, row) {
 function readForm(cfg, form) {
   const data = {};
   for (const c of cfg.columns) {
+    if (c.form === false) continue;
     const input = form.elements[c.key];
     if (c.type === 'checkbox') { data[c.key] = input.checked; continue; }
     const v = input.value.trim();
