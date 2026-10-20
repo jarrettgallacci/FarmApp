@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Farm Records</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <form id="login-form" class="card form">
+      <h1>Farm Records</h1>
+      <p id="config-warning" class="warning" hidden>
+        The app isn't connected yet. Open <code>config.js</code> and paste in your Supabase URL and key.
+      </p>
+      <label>Email<input type="email" name="email" autocomplete="username" required></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+  </div>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <h1>Farm Records</h1>
+      <nav>
+        <button data-view="order">Water order</button>
+        <button data-view="log">Water log</button>
+        <button data-view="fields">Fields</button>
+        <button data-view="setup">Setup</button>
+      </nav>
+      <button id="signout" class="ghost">Sign out</button>
+    </header>
+    <main id="view"></main>
+  </div>
+
+  <dialog id="dialog"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
