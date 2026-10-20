@@ -480,108 +480,134 @@ async function saveOrder(status, body) {
 }
 
 // =====================================================================
-// Water log: pivot runs and ordered-vs-applied balance
+// Home dashboard
+// "Today" = the most recent submitted order dated today or earlier.
+// If that order is dated today, its differences from the order before
+// it are today's water changes.
 // =====================================================================
-async function renderLog(el) {
-  const season = new Date().getFullYear();
-  const fields = refs.fields.filter((f) => f.active);
-  el.innerHTML = `
-    <div class="section-head"><h2>Water log</h2></div>
-    <div class="grid-2">
-      <form class="card form" id="we-form">
-        <h3>Record a pivot run</h3>
-        <label>Field *<select name="field_id" required><option value="">Choose…</option>
-          ${fields.map((f) => `<option value="${f.field_id}">${esc(f.name)}</option>`).join('')}</select></label>
-        <div class="row2">
-          <label>Start *<input type="datetime-local" name="start_at" required></label>
-          <label>Stop *<input type="datetime-local" name="stop_at" required></label>
-        </div>
-        <label>Flow rate (CFS) *<input type="number" name="cfs" min="0" step="0.01" required></label>
-        <label>Notes<input type="text" name="notes"></label>
-        <p class="muted" id="we-preview"></p>
-        <div class="actions"><span class="spacer"></span><button class="primary" type="submit">Save run</button></div>
-      </form>
-      <section class="card"><h3>${season}: ordered vs applied (acre-feet)</h3>
-        <div id="balance"><p class="muted">Loading…</p></div></section>
-    </div>
-    <section class="card"><h3>Recent runs</h3><div id="recent"><p class="muted">Loading…</p></div></section>`;
+const fmtLong = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
-  const form = $('#we-form', el);
-  const preview = () => {
-    const hrs = (new Date(form.elements.stop_at.value) - new Date(form.elements.start_at.value)) / 3.6e6;
-    const cfs = Number(form.elements.cfs.value);
-    $('#we-preview', el).textContent = hrs > 0 && cfs > 0
-      ? `${hrs.toFixed(1)} hours × ${num(cfs)} CFS = ${(cfs * hrs * 3600 / 43560).toFixed(2)} acre-feet` : '';
-  };
-  form.elements.field_id.onchange = () => {
-    const f = fieldById(form.elements.field_id.value);
-    const parent = f?.parent_field_id ? fieldById(f.parent_field_id) : null;
-    const rate = f?.flow_rate_cfs ?? parent?.flow_rate_cfs;
-    if (rate != null) form.elements.cfs.value = rate;
-    preview();
-  };
-  form.oninput = preview;
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const start = new Date(form.elements.start_at.value);
-    const stop = new Date(form.elements.stop_at.value);
-    if (!(stop > start)) return toast('Stop time must be after start time', true);
-    try {
-      await q(sb.from('water_events').insert({
-        field_id: Number(form.elements.field_id.value),
-        start_at: start.toISOString(),
-        stop_at: stop.toISOString(),
-        cfs: Number(form.elements.cfs.value),
-        notes: form.elements.notes.value.trim() || null,
-      }));
-      toast('Run saved');
-      form.elements.start_at.value = '';
-      form.elements.stop_at.value = '';
-      form.elements.notes.value = '';
-      preview();
-      loadLogTables(el, season);
-    } catch { /* shown */ }
-  };
-  await loadLogTables(el, season);
+function turnoutTotals(lineMap) {
+  const totals = new Map();
+  for (const f of orderParents()) {
+    const l = lineMap.get(f.field_id);
+    if (l?.is_on) totals.set(f.turnout_id, (totals.get(f.turnout_id) || 0) + Number(l.cfs || 0));
+  }
+  return totals;
 }
 
-async function loadLogTables(el, season) {
-  const [events, balance] = await Promise.all([
-    q(sb.from('water_events').select('*').order('start_at', { ascending: false }).limit(50)),
-    q(sb.from('water_balance_by_season').select('*').eq('season', season)),
+// Group a list of { turnout, ... } by ditch rider, in rider order.
+function byRider(items) {
+  return refs.riders
+    .map((r) => ({ rider: r, items: items.filter((i) => i.turnout.rider_id === r.rider_id) }))
+    .filter((g) => g.items.length);
+}
+
+async function renderHome(el) {
+  const today = localDate();
+  const tomorrow = addDays(today, 1);
+  const season = new Date().getFullYear();
+
+  const [recent, todayRows, tomorrowRows, balance] = await Promise.all([
+    q(sb.from('water_orders').select('order_id, order_date, status').lte('order_date', today)
+      .neq('status', 'draft').order('order_date', { ascending: false }).limit(2)),
+    q(sb.from('water_orders').select('order_id, status').eq('order_date', today)),
+    q(sb.from('water_orders').select('order_id, status, submitted_at').eq('order_date', tomorrow)),
+    q(sb.from('water_balance_by_season').select('af_ordered').eq('season', season)),
   ]);
 
-  $('#recent', el).innerHTML = events.length ? `<div class="table-wrap"><table>
-    <thead><tr><th>Field</th><th>Start</th><th>Stop</th><th class="r">Hours</th><th class="r">CFS</th>
-      <th class="r">Acre-ft</th><th>Source</th><th></th></tr></thead>
-    <tbody>${events.map((ev) => `<tr>
-      <td>${esc(fieldName(ev.field_id))}</td><td>${esc(fmtTime(ev.start_at))}</td><td>${esc(fmtTime(ev.stop_at))}</td>
-      <td class="r">${((new Date(ev.stop_at) - new Date(ev.start_at)) / 3.6e6).toFixed(1)}</td>
-      <td class="r">${num(ev.cfs)}</td><td class="r">${num(ev.acre_feet)}</td><td>${esc(ev.source)}</td>
-      <td><button class="small danger" data-del="${ev.event_id}">Delete</button></td></tr>`).join('')}
-    </tbody></table></div>` : '<p class="muted">No runs recorded yet.</p>';
+  const [current, previous] = recent;
+  const changedToday = current?.order_date === today;
+  const none = { lines: new Map() };
+  const cur = current ? await linesFor(current.order_id) : none;
+  const prev = changedToday && previous ? await linesFor(previous.order_id) : none;
 
-  $$('[data-del]', el).forEach((b) => (b.onclick = async () => {
-    if (!confirm('Delete this run?')) return;
-    try {
-      await q(sb.from('water_events').delete().eq('event_id', Number(b.dataset.del)));
-      toast('Deleted');
-      loadLogTables(el, season);
-    } catch { /* shown */ }
-  }));
+  const now = turnoutTotals(cur.lines);
+  const was = turnoutTotals(prev.lines);
 
-  const rows = balance
-    .map((b) => ({ ...b, name: fieldName(b.field_id) }))
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const sum = (k) => rows.reduce((t, r) => t + Number(r[k] || 0), 0);
-  $('#balance', el).innerHTML = rows.length ? `<div class="table-wrap"><table>
-    <thead><tr><th>Field</th><th class="r">Ordered</th><th class="r">Applied</th><th class="r">Paid, not used</th></tr></thead>
-    <tbody>${rows.map((r) => `<tr><td>${esc(r.name)}</td><td class="r">${num(r.af_ordered)}</td>
-      <td class="r">${num(r.af_applied)}</td><td class="r">${num(r.af_unused)}</td></tr>`).join('')}</tbody>
-    <tfoot><tr><td>Total</td><td class="r">${num(sum('af_ordered'))}</td><td class="r">${num(sum('af_applied'))}</td>
-      <td class="r">${num(sum('af_unused'))}</td></tr></tfoot></table></div>
-    <p class="muted">Ordered water counts through today from submitted orders.</p>`
-    : '<p class="muted">No ordered or applied water this season yet.</p>';
+  const changes = changedToday
+    ? refs.turnouts
+        .map((t) => ({ turnout: t, a: was.get(t.turnout_id) || 0, b: now.get(t.turnout_id) || 0 }))
+        .filter((c) => Math.abs(c.a - c.b) >= 0.001)
+    : [];
+  const running = refs.turnouts
+    .filter((t) => now.has(t.turnout_id))
+    .map((t) => ({ turnout: t, cfs: now.get(t.turnout_id) }));
+
+  const totalCfs = running.reduce((s, r) => s + r.cfs, 0);
+  const fieldsOn = orderParents().filter((f) => cur.lines.get(f.field_id)?.is_on).length;
+  const seasonAf = balance.reduce((s, b) => s + Number(b.af_ordered || 0), 0);
+
+  // ---- Water changes card
+  const changeLine = ({ turnout, a, b }) => {
+    let value, badge;
+    if (b === 0) { value = 'Off'; badge = '<span class="badge off">Off</span>'; }
+    else if (a === 0) { value = `${num(b)} CFS`; badge = '<span class="badge new">New</span>'; }
+    else { value = `${num(a)} → ${num(b)} CFS`; badge = b > a ? '<span class="badge up">Up</span>' : '<span class="badge down">Down</span>'; }
+    return `<li><span class="li-name">${esc(turnout.name)}</span><span class="li-value">${value} ${badge}</span></li>`;
+  };
+
+  let changesHtml;
+  if (changedToday) {
+    changesHtml = changes.length
+      ? byRider(changes).map((g) => `<div class="group"><h4>${esc(g.rider.name)}</h4>
+          <ul class="list">${g.items.map(changeLine).join('')}</ul></div>`).join('')
+      : `<p class="muted">Today's order is the same as the previous one. No changes.</p>`;
+  } else if (todayRows[0]) {
+    changesHtml = `<p class="notice">Today's order was saved as a draft but never marked submitted, so it isn't counted.
+      Water is running as ordered for ${esc(fmtDay(current?.order_date ?? today))}.</p>`;
+  } else if (current) {
+    changesHtml = `<p class="muted">No changes today. Water is running as ordered for ${esc(fmtDay(current.order_date))}.</p>`;
+  } else {
+    changesHtml = `<p class="muted">No water orders yet. Start one from the Water order tab.</p>`;
+  }
+
+  // ---- Tomorrow card
+  const tmr = tomorrowRows[0];
+  const tmrStatus = !tmr ? '<span class="badge off">Not started</span>'
+    : tmr.status === 'draft' ? '<span class="badge down">Draft</span>'
+    : `<span class="badge new">Submitted</span> <span class="muted">${tmr.submitted_at ? esc(fmtTime(tmr.submitted_at)) : ''}</span>`;
+
+  // ---- Running card
+  const runningHtml = running.length
+    ? byRider(running).map((g) => `<div class="group"><h4>${esc(g.rider.name)}</h4>
+        <ul class="list">${g.items.map((r) => `<li><span class="li-name">${esc(r.turnout.name)}</span>
+          <span class="li-value">${num(r.cfs)} CFS</span></li>`).join('')}</ul></div>`).join('')
+    : '<p class="muted">Nothing is running.</p>';
+
+  el.innerHTML = `
+    <div class="home-head">
+      <p class="eyebrow">${esc(fmtLong(today))}</p>
+      <h2>Today on the farm</h2>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><span class="stat-label">Water running</span><span class="stat-value">${num(totalCfs)}<small> CFS</small></span></div>
+      <div class="stat"><span class="stat-label">Turnouts on</span><span class="stat-value">${running.length}</span></div>
+      <div class="stat"><span class="stat-label">Fields watering</span><span class="stat-value">${fieldsOn}</span></div>
+      <div class="stat"><span class="stat-label">Ordered in ${season}</span><span class="stat-value">${num(seasonAf, 0)}<small> ac-ft</small></span></div>
+    </div>
+
+    <div class="dash-grid">
+      <div>
+        <section class="card"><h3>Water changes today</h3>${changesHtml}</section>
+        <section class="card"><h3>Running now</h3>${runningHtml}</section>
+      </div>
+      <div>
+        <section class="card">
+          <h3>Tomorrow's order</h3>
+          <p class="status-line">${tmrStatus}</p>
+          <p class="muted small">${esc(fmtDay(tomorrow))} · due to the ditch riders around 2:30 PM today</p>
+          <div class="actions"><button class="primary" data-act="tomorrow">Open tomorrow's order</button></div>
+        </section>
+        <section class="card soon">
+          <h3>Work schedule</h3>
+          <p class="muted">Scheduled work and a calendar will show here.</p>
+        </section>
+      </div>
+    </div>`;
+
+  $('[data-act=tomorrow]', el).onclick = () => { orderState.date = tomorrow; show('order'); };
 }
 
 // =====================================================================
@@ -601,12 +627,12 @@ async function renderSetup(el) {
 // Navigation and sign-in
 // =====================================================================
 const VIEWS = {
+  home: renderHome,
   order: renderOrder,
-  log: renderLog,
   fields: (el) => renderCrud(CRUD.fields, el),
   setup: renderSetup,
 };
-let currentView = 'order';
+let currentView = 'home';
 
 async function show(view) {
   currentView = view;
