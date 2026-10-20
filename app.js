@@ -426,12 +426,11 @@ function riderTexts() {
     for (const t of refs.turnouts.filter((x) => x.rider_id === r.rider_id)) {
       const now = turnoutCfs(t.turnout_id, s.lines);
       const was = turnoutCfs(t.turnout_id, s.prev);
-      if (now === 0 && was === 0) continue;
-      const val = now > 0 ? `${num(now)} CFS` : 'OFF';
-      const note = s.prevDate == null ? ''
-        : Math.abs(now - was) < 0.001 ? ' (no change)'
-        : was > 0 ? ` (was ${num(was)})` : ' (new)';
-      rows.push(`${t.name}: ${val}${note}`);
+      if (Math.abs(now - was) < 0.001) continue;          // unchanged: not in the text
+      const amount = String(Number(now.toFixed(2)));       // 1.50 -> 1.5, 2.00 -> 2
+      if (was === 0) rows.push(`${t.name} on ${amount}`);
+      else if (now === 0) rows.push(`${t.name} off to stock`);
+      else rows.push(`${t.name} change to ${amount}`);
     }
     if (rows.length) out.push({ rider: r.name, phone: r.phone, text: `Water order for ${fmtDay(s.date)}\n${rows.join('\n')}` });
   }
@@ -472,7 +471,7 @@ function updateOrderOutput(body) {
         ${t.phone ? '' : '<p class="muted small">Add a phone number for this rider under Setup to text from here.</p>'}
       </div>`).join('') +
       '<p class="muted small">Text and Copy also save the order as sent.</p>'
-    : '<p class="muted">No water on or changing for this day.</p>';
+    : '<p class="muted">No changes from the last order, so there\'s nothing to text. Use Mark as sent to record it.</p>';
 
   // Copy, then save as sent (clipboard must be written before any waiting).
   $$('[data-copy]', body).forEach((b) => (b.onclick = async () => {
@@ -621,7 +620,7 @@ async function renderHome(el) {
           <span class="li-value">${num(r.cfs)} CFS</span></li>`).join('')}</ul></div>`).join('')
     : '<p class="muted">Nothing is running.</p>';
 
-  const needsOrder = (!tmr || tmr.status === 'draft') && new Date().getHours() * 60 + new Date().getMinutes() >= 14 * 60 + 30
+  const needsOrder = (!tmr || tmr.status === 'draft') && new Date().getHours() * 60 + new Date().getMinutes() >= 14 * 60 + 30;
 
   el.innerHTML = `
     <div class="home-head">
