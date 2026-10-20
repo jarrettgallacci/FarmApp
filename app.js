@@ -35,16 +35,17 @@ async function q(request) {
 // =====================================================================
 // Reference data used across screens
 // =====================================================================
-const refs = { riders: [], turnouts: [], fields: [], leases: [] };
+const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [] };
 
 async function loadRefs() {
-  const [riders, turnouts, fields, leases] = await Promise.all([
+  const [riders, turnouts, fields, leases, crops] = await Promise.all([
     q(sb.from('ditch_riders').select('*').order('sort_order', { nullsFirst: false }).order('name')),
     q(sb.from('turnouts').select('*').order('sort_order', { nullsFirst: false }).order('name')),
     q(sb.from('fields').select('*').order('sort_order', { nullsFirst: false }).order('name')),
     q(sb.from('leases').select('*')),
+    q(sb.from('crops').select('*').order('name')),
   ]);
-  Object.assign(refs, { riders, turnouts, fields, leases });
+  Object.assign(refs, { riders, turnouts, fields, leases, crops });
 }
 
 // Deeded unless a lease or partnership is in effect today.
@@ -151,6 +152,16 @@ const CRUD = {
       { key: 'type', label: 'Type', type: 'text', list: true },
       { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
+    ],
+  },
+  crops: {
+    table: 'crops', pk: 'crop_id', title: 'Crops', singular: 'crop', order: 'name',
+    refreshRefs: true, allowDelete: true,
+    columns: [
+      { key: 'name', label: 'Crop', type: 'text', required: true, list: true },
+      { key: 'yield_unit', label: 'Usual yield unit', type: 'select', list: true,
+        options: () => [['bu', 'Bushels (bu)'], ['ton', 'Tons'], ['cwt', 'Hundredweight (cwt)'], ['lb', 'Pounds (lb)']] },
+      { key: 'active', label: 'Active (shows in the crop list)', type: 'checkbox', default: true, list: true },
     ],
   },
   leases: {
@@ -750,11 +761,229 @@ async function renderHome(el) {
 }
 
 // =====================================================================
+// Crops: what was grown where, by season, with full field histories.
+// One crop year = one crop + variety on one field in one season.
+// =====================================================================
+let cropSeason = new Date().getFullYear();
+const cropName = (id) => refs.crops.find((c) => c.crop_id === id)?.name ?? '';
+const fmtDate = (iso) => (iso ? new Date(iso + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' }) : '');
+const SEQ = { 1: '1st crop', 2: '2nd crop', 3: '3rd crop' };
+
+// Fields in the same order as the water order screen, split halves under their parent.
+function fieldsInOrder() {
+  const out = [];
+  const seen = new Set();
+  const add = (f) => {
+    if (seen.has(f.field_id)) return;
+    seen.add(f.field_id);
+    out.push(f);
+    refs.fields.filter((h) => h.parent_field_id === f.field_id).forEach(add);
+  };
+  for (const r of refs.riders) {
+    for (const t of refs.turnouts.filter((x) => x.rider_id === r.rider_id)) {
+      refs.fields.filter((f) => f.turnout_id === t.turnout_id && !f.parent_field_id).forEach(add);
+    }
+  }
+  refs.fields.filter((f) => !f.parent_field_id).forEach(add);
+  refs.fields.forEach(add);
+  return out;
+}
+
+function yieldText(r) {
+  return r.total_yield != null ? `${Number(r.total_yield).toLocaleString()} ${esc(r.yield_unit ?? '')}` : '<span class="muted">—</span>';
+}
+
+async function renderCrops(el) {
+  const rows = await q(sb.from('crop_year_summary').select('*').eq('season', cropSeason)
+    .order('sequence').order('crop_year_id'));
+  const byField = new Map();
+  rows.forEach((r) => byField.set(r.field_id, [...(byField.get(r.field_id) ?? []), r]));
+  const fields = fieldsInOrder().filter((f) => f.active || byField.has(f.field_id));
+  const planted = fields.filter((f) => byField.has(f.field_id)).length;
+
+  let body = '';
+  for (const f of fields) {
+    const list = byField.get(f.field_id) ?? [];
+    const half = f.parent_field_id ? ' half' : '';
+    const nameCell = (span) => `<td rowspan="${span}" class="field-cell${half}">
+      <button class="link" data-history="${f.field_id}">${esc(f.name)}</button>
+      <span class="muted small">${f.acres != null ? num(f.acres, 0) + ' ac' : ''}</span></td>`;
+    if (!list.length) {
+      body += `<tr class="unplanted">${nameCell(1)}<td class="muted">Nothing entered</td><td class="c-variety"></td><td class="c-planted"></td><td class="c-yield"></td>
+        <td class="r"><button class="small" data-add="${f.field_id}">Add</button></td></tr>`;
+      continue;
+    }
+    list.forEach((r, i) => {
+      body += `<tr>${i === 0 ? nameCell(list.length) : ''}
+        <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span>${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}
+          ${r.variety ? `<span class="v-inline">${esc(r.variety)}</span>` : ''}</td>
+        <td class="c-variety">${esc(r.variety ?? '')}</td>
+        <td class="c-planted">${esc(fmtDate(r.planting_date))}${r.acres != null ? ` <span class="muted small">· ${num(r.acres, 0)} ac</span>` : ''}</td>
+        <td class="r c-yield">${yieldText(r)}</td>
+        <td class="r"><button class="small" data-edit-cy="${r.crop_year_id}">Edit</button>
+          ${i === list.length - 1 ? `<button class="small ghost" data-add="${f.field_id}" title="Add another crop or variety">+</button>` : ''}</td>
+      </tr>`;
+    });
+  }
+
+  el.innerHTML = `
+    <div class="section-head"><h2>Crops</h2>
+      <div class="row">
+        <button data-season="-1" aria-label="Previous season">‹</button>
+        <strong class="season">${cropSeason}</strong>
+        <button data-season="1" aria-label="Next season">›</button>
+        <button class="primary" data-add="">Add crop</button>
+      </div></div>
+    <p class="muted small">${planted} of ${fields.length} fields entered for ${cropSeason}. Click a field name for its full history.</p>
+    ${refs.crops.length ? '' : '<div class="empty">Add your crops under <b>Setup → Crops</b> first.</div>'}
+    <div class="card table-wrap"><table class="crop-table">
+      <thead><tr><th>Field</th><th>Crop</th><th class="c-variety">Variety</th><th class="c-planted">Planted</th><th class="r c-yield">Yield</th><th></th></tr></thead>
+      <tbody>${body}</tbody></table></div>`;
+
+  const reload = () => renderCrops(el);
+  $$('[data-season]', el).forEach((b) => (b.onclick = () => { cropSeason += Number(b.dataset.season); reload(); }));
+  $$('[data-add]', el).forEach((b) => (b.onclick = () =>
+    openCropYear(null, { field_id: b.dataset.add ? Number(b.dataset.add) : null, season: cropSeason }, reload)));
+  $$('[data-edit-cy]', el).forEach((b) => (b.onclick = () =>
+    openCropYear(rows.find((r) => r.crop_year_id === Number(b.dataset.editCy)), null, reload)));
+  $$('[data-history]', el).forEach((b) => (b.onclick = () => openFieldHistory(Number(b.dataset.history), reload)));
+}
+
+async function openFieldHistory(fieldId, onChange) {
+  const f = fieldById(fieldId);
+  const rows = await q(sb.from('crop_year_summary').select('*').eq('field_id', fieldId)
+    .order('season', { ascending: false }).order('sequence'));
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.innerHTML = `<div class="form">
+    <div class="dialog-head"><div><h3>${esc(f.name)}</h3>
+      <p class="muted small">${[f.farm_unit && 'Farm unit ' + esc(f.farm_unit), f.block && 'Block ' + esc(f.block),
+        f.acres != null && num(f.acres, 0) + ' acres', esc(tenureOf(f))].filter(Boolean).join(' · ')}</p></div>
+      <button class="primary small" data-act="add">Add crop year</button></div>
+    ${rows.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Season</th><th>Crop</th><th>Variety</th><th>Planted</th><th class="r">Yield</th><th></th></tr></thead>
+      <tbody>${rows.map((r) => `<tr>
+        <td><b>${r.season}</b>${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}</td>
+        <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span></td><td>${esc(r.variety ?? '')}</td>
+        <td>${esc(fmtDate(r.planting_date))}</td><td class="r">${yieldText(r)}</td>
+        <td class="r"><button class="small" data-edit-cy="${r.crop_year_id}">Edit</button></td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted">No crops recorded for this field yet.</p>'}
+    <div class="actions"><span class="spacer"></span><button data-act="close">Close</button></div></div>`;
+
+  const reopen = () => { onChange(); openFieldHistory(fieldId, onChange); };
+  $('[data-act=close]', dlg).onclick = () => dlg.close();
+  $('[data-act=add]', dlg).onclick = () =>
+    openCropYear(null, { field_id: fieldId, season: new Date().getFullYear() }, reopen);
+  $$('[data-edit-cy]', dlg).forEach((b) => (b.onclick = () =>
+    openCropYear(rows.find((r) => r.crop_year_id === Number(b.dataset.editCy)), null, reopen)));
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+async function openCropYear(row, defaults, onDone) {
+  const v = row ?? { sequence: 1, ...defaults };
+  // Every variety used before, grouped by crop, for the suggestions list.
+  const used = await q(sb.from('crop_years').select('crop_id, variety').not('variety', 'is', null));
+  const varietiesFor = (cropId) => [...new Map(used
+    .filter((u) => u.crop_id === cropId && u.variety.trim())
+    .map((u) => [u.variety.trim().toLowerCase(), u.variety.trim()])).values()].sort();
+
+  const crops = refs.crops.filter((c) => c.active || c.crop_id === v.crop_id);
+  const fields = fieldsInOrder().filter((f) => f.active || f.field_id === v.field_id);
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  dlg.innerHTML = `<form class="form">
+    <h3>${row ? 'Edit' : 'Add'} crop year</h3>
+    <label>Field *<select name="field_id" required><option value="">Choose…</option>
+      ${fields.map((f) => `<option value="${f.field_id}" ${f.field_id === v.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}
+    </select></label>
+    <div class="row2">
+      <label>Season *<input type="number" name="season" min="1990" max="2100" required value="${esc(v.season ?? '')}"></label>
+      <label>Crop in season<select name="sequence">
+        ${Object.entries(SEQ).map(([n, t]) => `<option value="${n}" ${Number(n) === v.sequence ? 'selected' : ''}>${t}</option>`).join('')}
+      </select></label>
+    </div>
+    <label>Crop *<select name="crop_id" required><option value="">Choose…</option>
+      ${crops.map((c) => `<option value="${c.crop_id}" ${c.crop_id === v.crop_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+    </select></label>
+    <label>Variety<input name="variety" list="variety-options" autocomplete="off" value="${esc(v.variety ?? '')}"
+      placeholder="Start typing — past varieties appear">
+      <datalist id="variety-options"></datalist></label>
+    <div class="row2">
+      <label>Planting date<input type="date" name="planting_date" value="${esc(v.planting_date ?? '')}"></label>
+      <label>Acres planted<input type="number" name="acres" step="0.1" min="0" value="${esc(v.acres ?? '')}"></label>
+    </div>
+    <p class="muted small" id="acres-hint"></p>
+    <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
+    <div class="actions">
+      ${row ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
+      <span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div></form>`;
+
+  const form = $('form', dlg);
+  const el = form.elements;
+  const fillVarieties = () => {
+    $('#variety-options', dlg).innerHTML = varietiesFor(Number(el.crop_id.value))
+      .map((x) => `<option value="${esc(x)}"></option>`).join('');
+  };
+  const acresHint = () => {
+    const f = fieldById(el.field_id.value);
+    $('#acres-hint', dlg).textContent = f?.acres != null
+      ? `Leave acres blank if the whole field (${num(f.acres, 0)} ac) is in this crop.` : '';
+  };
+  el.crop_id.onchange = fillVarieties;
+  el.field_id.onchange = acresHint;
+  fillVarieties();
+  acresHint();
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const val = (k) => el[k].value.trim();
+    const data = {
+      field_id: Number(val('field_id')),
+      season: Number(val('season')),
+      sequence: Number(val('sequence')),
+      crop_id: Number(val('crop_id')),
+      variety: val('variety') || null,
+      planting_date: val('planting_date') || null,
+      acres: val('acres') === '' ? null : Number(val('acres')),
+      notes: val('notes') || null,
+    };
+    // Reuse the spelling already on file ("dekalb 51-20" -> "DeKalb 51-20").
+    if (data.variety) {
+      const match = varietiesFor(data.crop_id).find((x) => x.toLowerCase() === data.variety.toLowerCase());
+      if (match) data.variety = match;
+    }
+    try {
+      if (row) await q(sb.from('crop_years').update(data).eq('crop_year_id', row.crop_year_id));
+      else await q(sb.from('crop_years').insert(data));
+      dlg.close();
+      toast('Saved');
+      onDone();
+    } catch { /* shown */ }
+  };
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  const del = $('[data-act=del]', dlg);
+  if (del) del.onclick = async () => {
+    if (!confirm('Delete this crop year? Any harvest records attached to it are deleted too.')) return;
+    try {
+      await q(sb.from('crop_years').delete().eq('crop_year_id', row.crop_year_id));
+      dlg.close();
+      toast('Deleted');
+      onDone();
+    } catch { /* shown */ }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+// =====================================================================
 // Setup: reference lists
 // =====================================================================
 let setupTab = 'riders';
 async function renderSetup(el) {
-  const tabs = ['riders', 'turnouts', 'operators', 'chemicals', 'equipment', 'leases'];
+  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>
     `<button data-tab="${t}" class="${t === setupTab ? 'active' : ''}">${esc(CRUD[t].title)}</button>`).join('')}</div>
     <div id="setup-body"><p class="muted">Loading…</p></div>`;
@@ -769,6 +998,7 @@ const VIEWS = {
   home: renderHome,
   order: renderOrder,
   fields: (el) => renderCrud(CRUD.fields, el),
+  crops: renderCrops,
   setup: renderSetup,
 };
 let currentView = 'home';
