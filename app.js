@@ -171,6 +171,8 @@ const CRUD = {
       { key: 'yield_unit', label: 'Usual yield unit', type: 'select', list: true,
         options: () => [['bu', 'Bushels (bu)'], ['ton', 'Tons'], ['cwt', 'Hundredweight (cwt)'], ['lb', 'Pounds (lb)']] },
       { key: 'multi_year', label: 'Usually a multi-year stand', type: 'checkbox', default: false, list: true },
+      { key: 'color', label: 'Map color', type: 'color', list: true,
+        fallback: (row) => (row ? PALETTE[row.crop_id % PALETTE.length] : '#2563a8') },
       { key: 'active', label: 'Active (shows in the crop list)', type: 'checkbox', default: true, list: true },
     ],
   },
@@ -212,7 +214,9 @@ async function renderCrud(cfg, el) {
     <div class="card table-wrap"><table>
       <thead><tr>${cols.map((c) => `<th>${esc(c.label)}</th>`).join('')}<th></th></tr></thead>
       <tbody>${rows.length ? rows.map((r) => `<tr>
-          ${cols.map((c) => `<td>${esc(display(c, r))}</td>`).join('')}
+          ${cols.map((c) => c.type === 'color'
+            ? `<td><span class="swatch" style="background:${esc(r[c.key] || c.fallback(r))}"></span></td>`
+            : `<td>${esc(display(c, r))}</td>`).join('')}
           <td><button class="small" data-edit="${r[cfg.pk]}">Edit</button></td></tr>`).join('')
         : `<tr><td colspan="${cols.length + 1}" class="muted">Nothing here yet.</td></tr>`}
       </tbody></table></div>`;
@@ -231,7 +235,7 @@ async function renderCrud(cfg, el) {
 
 function fieldHtml(c, row) {
   if (c.form === false) return '';
-  const v = row ? row[c.key] : c.default;
+  const v = (row ? row[c.key] : c.default) ?? c.fallback?.(row);
   const req = c.required ? 'required' : '';
   const lbl = esc(c.label) + (c.required ? ' *' : '');
   switch (c.type) {
@@ -1071,6 +1075,414 @@ async function openCropYear(row, defaults, onDone) {
 }
 
 // =====================================================================
+// Farm map: fields coloured by crop for a season, with shape editing.
+// A field's outline is stored on fields.boundary as a GeoJSON Feature.
+// Pivots keep their centre, radius and arc so they stay easy to adjust.
+// =====================================================================
+const PALETTE = ['#2563a8', '#e07b39', '#3a9d5d', '#c0392b', '#7c3aed', '#d4a017', '#0f766e', '#db2777',
+  '#65a30d', '#0891b2', '#9f1239', '#a16207', '#4338ca', '#15803d', '#ea580c', '#475569'];
+const cropColor = (id) => refs.crops.find((c) => c.crop_id === id)?.color || PALETTE[id % PALETTE.length];
+
+const AC_M2 = 4046.8564224;
+const M_LAT = 110574;
+const mLon = (lat) => 111320 * Math.cos((lat * Math.PI) / 180);
+const toLL = ([lng, lat]) => [lat, lng];
+const fromLL = (ll) => [Number(ll.lng.toFixed(7)), Number(ll.lat.toFixed(7))];
+const offsetPt = ([lng, lat], dx, dy) => [lng + dx / mLon(lat), lat + dy / M_LAT];
+const metresBetween = (a, b) => Math.hypot((b[0] - a[0]) * mLon(a[1]), (b[1] - a[1]) * M_LAT);
+const bearingTo = (a, b) => ((Math.atan2((b[0] - a[0]) * mLon(a[1]), (b[1] - a[1]) * M_LAT) * 180) / Math.PI + 360) % 360;
+const spanOf = (p) => (((p.end - p.start) % 360) + 360) % 360 || 360;
+const atBearing = (p, deg, r = p.radius) =>
+  offsetPt(p.center, r * Math.sin((deg * Math.PI) / 180), r * Math.cos((deg * Math.PI) / 180));
+
+function pivotRing(p) {
+  const span = spanOf(p);
+  const steps = Math.max(8, Math.round((72 * span) / 360));
+  const pts = [];
+  for (let i = 0; i <= steps; i++) pts.push(atBearing(p, p.start + (span * i) / steps));
+  if (span < 360) pts.unshift([...p.center]);
+  pts.push(pts[0]);
+  return pts;
+}
+function ringAcres(ring) {
+  if (!ring || ring.length < 4) return 0;
+  const k = mLon(ring[0][1]);
+  let s = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    s += ring[i][0] * k * ring[i + 1][1] * M_LAT - ring[i + 1][0] * k * ring[i][1] * M_LAT;
+  }
+  return Math.abs(s) / 2 / AC_M2;
+}
+const radiusForAcres = (acres, span = 360) => Math.sqrt((acres * AC_M2) / (Math.PI * (span / 360)));
+
+// Draft shape -> GeoJSON Feature
+function toFeature(d) {
+  if (d.shape === 'pivot') {
+    return { type: 'Feature',
+      properties: { shape: 'pivot', center: d.center.map((x) => Number(x.toFixed(7))), radius: Number(d.radius.toFixed(1)), start: d.start, end: d.end },
+      geometry: { type: 'Polygon', coordinates: [pivotRing(d)] } };
+  }
+  const ring = d.ring.map((p) => [...p]);
+  ring.push([...ring[0]]);
+  return { type: 'Feature', properties: { shape: 'polygon' }, geometry: { type: 'Polygon', coordinates: [ring] } };
+}
+// GeoJSON Feature -> editable draft
+function toDraft(f) {
+  const p = f.properties ?? {};
+  if (p.shape === 'pivot') return { shape: 'pivot', center: [...p.center], radius: p.radius, start: p.start ?? 0, end: p.end ?? 360 };
+  return { shape: 'polygon', ring: f.geometry.coordinates[0].slice(0, -1).map((x) => [...x]) };
+}
+const draftRing = (d) => (d.shape === 'pivot' ? pivotRing(d) : d.ring.length ? [...d.ring, d.ring[0]] : []);
+
+const mapState = { map: null, view: null, season: new Date().getFullYear(), editMode: false, layers: [], ed: null };
+
+async function renderMap(el) {
+  if (!window.L) {
+    el.innerHTML = '<div class="empty">The map library didn\'t load. Check your connection and refresh.</div>';
+    return;
+  }
+  const season = mapState.season;
+  const rows = (await q(sb.from('crop_year_summary').select('*').lte('season', season)
+    .or(`season.eq.${season},multi_year.eq.true`).order('sequence')))
+    .filter((r) => r.season === season || (r.multi_year && (r.end_season == null || r.end_season >= season)));
+  const cropsByField = new Map();
+  rows.forEach((r) => cropsByField.set(r.field_id, [...(cropsByField.get(r.field_id) ?? []), r]));
+  mapState.cropsByField = cropsByField;
+
+  el.innerHTML = `
+    <div class="section-head"><h2>Farm map</h2>
+      <div class="row">
+        <button data-season="-1" aria-label="Previous season">‹</button>
+        <strong class="season">${season}</strong>
+        <button data-season="1" aria-label="Next season">›</button>
+        <button class="${mapState.editMode ? 'primary' : ''}" data-act="edit">${mapState.editMode ? 'Done editing' : 'Edit shapes'}</button>
+      </div></div>
+    <div class="map-wrap"><div id="map"></div><aside class="card map-side" id="map-side"></aside></div>`;
+
+  $$('[data-season]', el).forEach((b) => (b.onclick = () => {
+    if (!confirmDiscard()) return;
+    mapState.season += Number(b.dataset.season);
+    renderMap(el);
+  }));
+  $('[data-act=edit]', el).onclick = () => {
+    if (!confirmDiscard()) return;
+    mapState.editMode = !mapState.editMode;
+    mapState.ed = null;
+    renderMap(el);
+  };
+
+  if (mapState.map) { mapState.view = { center: mapState.map.getCenter(), zoom: mapState.map.getZoom() }; mapState.map.remove(); }
+  const map = L.map('map', { zoomControl: true, maxZoom: 19, doubleClickZoom: !mapState.editMode });
+  mapState.map = map;
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 19, maxNativeZoom: 18,
+    attribution: 'Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+  }).addTo(map);
+  map.on('zoomend', () => $('#map')?.classList.toggle('hide-labels', map.getZoom() < 13));
+  map.on('click', (e) => onMapClick(e));
+
+  drawFields();
+  const shaped = refs.fields.filter((f) => f.boundary);
+  if (mapState.view) map.setView(mapState.view.center, mapState.view.zoom);
+  else if (shaped.length) map.fitBounds(L.featureGroup(mapState.layers.map((x) => x.layer)).getBounds(), { padding: [20, 20] });
+  else map.setView([39.5, -98.35], 4);
+  $('#map').classList.toggle('hide-labels', map.getZoom() < 13);
+  drawSide();
+}
+
+function confirmDiscard() {
+  return !mapState.ed?.dirty || confirm('Discard your changes to this field\'s shape?');
+}
+
+function drawFields() {
+  const map = mapState.map;
+  mapState.layers.forEach((x) => x.layer.remove());
+  mapState.layers = [];
+  for (const f of refs.fields) {
+    if (!f.boundary || mapState.ed?.field.field_id === f.field_id) continue;
+    const crops = mapState.cropsByField.get(f.field_id) ?? [];
+    const color = crops.length ? cropColor(crops[0].crop_id) : '#9aa5b1';
+    const layer = L.polygon(f.boundary.geometry.coordinates[0].map(toLL), {
+      color: mapState.editMode ? '#ffffff' : color, weight: mapState.editMode ? 2 : 1.5,
+      dashArray: crops.length > 1 ? '6 4' : null,
+      fillColor: color, fillOpacity: crops.length ? 0.55 : 0.25,
+    }).addTo(map);
+    layer.bindTooltip(esc(f.name), { permanent: true, direction: 'center', className: 'field-label' });
+    layer.on('click', (e) => {
+      L.DomEvent.stopPropagation(e);
+      if (mapState.ed?.mode === 'draw' || mapState.ed?.mode === 'place') return onMapClick(e);
+      if (mapState.editMode) startEdit(f);
+      else showFieldInfo(f);
+    });
+    mapState.layers.push({ field: f, layer });
+  }
+}
+
+// ---------- Side panel ----------
+function drawSide(info) {
+  const side = $('#map-side');
+  if (!side) return;
+  if (mapState.editMode) return drawEditSide();
+  if (info) return;
+  // Legend: crops on the map this season, with acres
+  const totals = new Map();
+  for (const [fid, list] of mapState.cropsByField) {
+    const f = fieldById(fid);
+    if (!f) continue;
+    for (const r of list) {
+      const acres = Number(r.acres ?? f.acres ?? 0) / (r.acres == null ? list.filter((x) => x.acres == null).length : 1);
+      totals.set(r.crop_id, (totals.get(r.crop_id) ?? 0) + acres);
+    }
+  }
+  const unmapped = refs.fields.filter((f) => f.active && !f.boundary).length;
+  side.innerHTML = `<h3>${mapState.season} crops</h3>
+    ${totals.size ? `<ul class="legend">${[...totals].sort((a, b) => b[1] - a[1]).map(([id, ac]) => `
+      <li><span class="swatch" style="background:${esc(cropColor(id))}"></span>${esc(cropName(id))}
+        <span class="muted">${Math.round(ac).toLocaleString()} ac</span></li>`).join('')}</ul>`
+      : '<p class="muted">No crops entered for this season.</p>'}
+    <p class="muted small">Acres are from your crop records. Dashed outline = more than one crop or variety.
+      Click a field for details.</p>
+    ${unmapped ? `<p class="small">${unmapped} active field(s) aren't on the map yet. Use <b>Edit shapes</b> to add them.</p>` : ''}`;
+}
+
+function showFieldInfo(f) {
+  const crops = mapState.cropsByField.get(f.field_id) ?? [];
+  const drawn = f.boundary ? ringAcres(f.boundary.geometry.coordinates[0]) : 0;
+  $('#map-side').innerHTML = `
+    <div class="dialog-head"><h3>${esc(f.name)}</h3><button class="small ghost" data-act="back">✕</button></div>
+    <p class="muted small">${[f.farm_unit && 'Farm unit ' + esc(f.farm_unit), f.acres != null && num(f.acres, 0) + ' ac',
+      esc(tenureOf(f))].filter(Boolean).join(' · ')}</p>
+    ${crops.length ? crops.map((r) => `<div class="info-crop">
+        <span class="swatch" style="background:${esc(cropColor(r.crop_id))}"></span>
+        <div><b>${esc(cropName(r.crop_id))}</b>${r.variety ? ` · ${esc(r.variety)}` : ''}
+          <div class="muted small">${r.grown_by ? 'Grown by ' + esc(r.grown_by)
+            : r.season !== mapState.season ? `Stand planted ${r.season}` : esc(fmtDate(r.planting_date) || 'No planting date')}</div></div>
+      </div>`).join('') : `<p class="muted">Nothing entered for ${mapState.season}.</p>`}
+    <p class="muted small">Outline is ${num(drawn, 1)} ac.</p>
+    <div class="actions"><button data-act="history">Crop history</button></div>`;
+  $('[data-act=back]').onclick = () => drawSide();
+  $('[data-act=history]').onclick = () => openFieldHistory(f.field_id, () => {});
+}
+
+// ---------- Editing ----------
+function drawEditSide() {
+  const ed = mapState.ed;
+  const side = $('#map-side');
+  if (!ed) {
+    const missing = fieldsInOrder().filter((f) => f.active && !f.boundary);
+    side.innerHTML = `<h3>Edit shapes</h3>
+      <p class="muted small">Click a field on the map to adjust it.</p>
+      ${missing.length ? `<h4>Not on the map yet</h4><ul class="missing">${missing.map((f) => `
+        <li><span>${esc(f.name)} <span class="muted small">${f.acres != null ? num(f.acres, 0) + ' ac' : ''}</span></span>
+          <span class="row"><button class="small" data-place="${f.field_id}">Pivot</button>
+          <button class="small" data-draw="${f.field_id}">Draw</button></span></li>`).join('')}</ul>`
+        : '<p class="muted small">Every active field is on the map.</p>'}`;
+    $$('[data-place]', side).forEach((b) => (b.onclick = () => startPlace(fieldById(b.dataset.place), 'place')));
+    $$('[data-draw]', side).forEach((b) => (b.onclick = () => startPlace(fieldById(b.dataset.draw), 'draw')));
+    return;
+  }
+  const f = ed.field;
+  const d = ed.draft;
+  const drawn = d ? ringAcres(draftRing(d)) : 0;
+  let body = '';
+  if (ed.mode === 'place') body = '<p class="notice">Click the pivot point on the map.</p>';
+  else if (ed.mode === 'draw') {
+    body = `<p class="notice">Click around the field's edge. ${d.ring.length} point(s) so far.</p>
+      <div class="row wrap"><button class="small" data-act="undo" ${d.ring.length ? '' : 'disabled'}>Undo point</button>
+      <button class="small primary" data-act="finish" ${d.ring.length >= 3 ? '' : 'disabled'}>Finish shape</button></div>`;
+  } else if (d.shape === 'pivot') {
+    const span = spanOf(d);
+    body = `<p class="muted small">Drag the centre dot to move it, the edge dot to resize${span < 360 ? ', and the two end dots to set the arc' : ''}.</p>
+      <label class="small">Arc<select data-act="arc">
+        ${[['0-360', 'Full circle'], ['270-90', 'North half'], ['90-270', 'South half'], ['0-180', 'East half'], ['180-360', 'West half'],
+          ['custom', 'Custom (drag end dots)']].map(([v, t]) =>
+          `<option value="${v}" ${v === `${d.start}-${d.end}` || (v === 'custom' && !['0-360', '270-90', '90-270', '0-180', '180-360'].includes(`${d.start}-${d.end}`)) ? 'selected' : ''}>${t}</option>`).join('')}
+      </select></label>
+      <div class="row wrap"><button class="small" data-act="fit" ${f.acres ? '' : 'disabled'}>Size to ${f.acres ? num(f.acres, 0) + ' ac' : 'field acres'}</button>
+      <button class="small" data-act="topoly">Switch to drawn shape</button></div>`;
+  } else {
+    body = `<p class="muted small">Drag the white dots to move corners. Drag a small dot to add a corner. Double-click a corner to remove it.</p>
+      <div class="row wrap"><button class="small" data-act="redraw">Redraw from scratch</button>
+      <button class="small" data-act="topivot">Switch to pivot</button></div>`;
+  }
+  side.innerHTML = `
+    <div class="dialog-head"><h3>${esc(f.name)}</h3></div>
+    <div class="acre-compare">
+      <div><span class="muted small">Field acres</span><b>${f.acres != null ? num(f.acres, 1) : '—'}</b></div>
+      <div><span class="muted small">Drawn</span><b>${num(drawn, 1)}</b></div>
+    </div>
+    ${body}
+    <div class="actions">
+      ${f.boundary ? '<button class="small danger" data-act="remove">Remove</button>' : ''}
+      <span class="spacer"></span>
+      <button data-act="cancel">Cancel</button>
+      <button class="primary" data-act="save" ${d && (d.shape === 'pivot' || d.ring.length >= 3) && ed.mode === 'edit' ? '' : 'disabled'}>Save</button>
+    </div>`;
+
+  const act = (name, fn) => { const b = $(`[data-act=${name}]`, side); if (b) b.onclick = fn; };
+  act('cancel', () => { if (confirmDiscard()) endEdit(); });
+  act('save', saveShape);
+  act('remove', async () => {
+    if (!confirm(`Take ${f.name} off the map?`)) return;
+    await persistBoundary(f, null);
+  });
+  act('undo', () => { d.ring.pop(); ed.dirty = true; redrawDraft(); });
+  act('finish', () => { ed.mode = 'edit'; redrawDraft(); });
+  act('fit', () => { d.radius = radiusForAcres(Number(f.acres), spanOf(d)); ed.dirty = true; redrawDraft(); });
+  act('topoly', () => {
+    ed.draft = { shape: 'polygon', ring: simplifyRing(pivotRing(d).slice(0, -1)) };
+    ed.dirty = true; redrawDraft();
+  });
+  act('topivot', () => {
+    const ring = d.ring;
+    const c = ring.reduce((a, p) => [a[0] + p[0] / ring.length, a[1] + p[1] / ring.length], [0, 0]);
+    ed.draft = { shape: 'pivot', center: c, radius: radiusForAcres(Number(f.acres) || ringAcres(draftRing(d)) || 10), start: 0, end: 360 };
+    ed.dirty = true; redrawDraft();
+  });
+  act('redraw', () => { ed.draft = { shape: 'polygon', ring: [] }; ed.mode = 'draw'; ed.dirty = true; redrawDraft(); });
+  const arc = $('[data-act=arc]', side);
+  if (arc) arc.onchange = () => {
+    if (arc.value === 'custom') { if (spanOf(d) === 360) { d.start = 0; d.end = 270; } }
+    else [d.start, d.end] = arc.value.split('-').map(Number);
+    ed.dirty = true; redrawDraft();
+  };
+}
+
+// Every 4th point of a circle is plenty to start reshaping from.
+const simplifyRing = (ring) => ring.filter((_, i) => i % 4 === 0);
+
+function startEdit(f) {
+  if (!confirmDiscard()) return;
+  mapState.ed = { field: f, draft: f.boundary ? toDraft(f.boundary) : null, mode: 'edit', dirty: false, handles: [], layer: null };
+  drawFields();
+  redrawDraft();
+}
+
+function startPlace(f, mode) {
+  if (!confirmDiscard()) return;
+  mapState.ed = { field: f, mode, dirty: true, handles: [], layer: null,
+    draft: mode === 'draw' ? { shape: 'polygon', ring: [] } : null };
+  drawFields();
+  redrawDraft();
+}
+
+function onMapClick(e) {
+  const ed = mapState.ed;
+  if (!ed) return;
+  const pt = fromLL(e.latlng);
+  if (ed.mode === 'place') {
+    const acres = Number(ed.field.acres) || 40;
+    ed.draft = { shape: 'pivot', center: pt, radius: radiusForAcres(acres), start: 0, end: 360 };
+    ed.mode = 'edit';
+    redrawDraft();
+  } else if (ed.mode === 'draw') {
+    ed.draft.ring.push(pt);
+    redrawDraft();
+  }
+}
+
+function handle(latlng, cls, opts = {}) {
+  return L.marker(latlng, { draggable: true, autoPan: true, icon: L.divIcon({ className: `map-handle ${cls}`, iconSize: opts.size ?? [16, 16] }) })
+    .addTo(mapState.map);
+}
+
+function redrawDraft() {
+  const ed = mapState.ed;
+  const map = mapState.map;
+  ed.handles.forEach((h) => h.remove());
+  ed.handles = [];
+  ed.layer?.remove();
+  ed.layer = null;
+  const d = ed.draft;
+  if (d) {
+    const ring = draftRing(d);
+    if (ring.length) {
+      ed.layer = (ed.mode === 'draw' ? L.polyline(d.ring.map(toLL), { color: '#ffd400', weight: 3 })
+        : L.polygon(ring.map(toLL), { color: '#ffd400', weight: 3, fillColor: '#ffd400', fillOpacity: 0.2 })).addTo(map);
+    }
+    const update = () => { ed.dirty = true; ed.layer?.setLatLngs(draftRing(d).map(toLL)); refreshAcres(); };
+    if (d.shape === 'pivot' && ed.mode === 'edit') {
+      const span = spanOf(d);
+      const mid = span < 360 ? d.start + span / 2 : 90;
+      const center = handle(toLL(d.center), 'center', { size: [18, 18] });
+      const edge = handle(toLL(atBearing(d, mid)), 'edge');
+      const ends = span < 360 ? [handle(toLL(atBearing(d, d.start)), 'end'), handle(toLL(atBearing(d, d.end)), 'end')] : [];
+      const place = () => {
+        const s = spanOf(d);
+        edge.setLatLng(toLL(atBearing(d, s < 360 ? d.start + s / 2 : 90)));
+        if (ends.length) { ends[0].setLatLng(toLL(atBearing(d, d.start))); ends[1].setLatLng(toLL(atBearing(d, d.end))); }
+      };
+      center.on('drag', () => { d.center = fromLL(center.getLatLng()); place(); update(); });
+      edge.on('drag', () => { d.radius = Math.max(5, metresBetween(d.center, fromLL(edge.getLatLng()))); update(); });
+      edge.on('dragend', place);
+      ends.forEach((h, i) => {
+        h.on('drag', () => {
+          const b = Math.round(bearingTo(d.center, fromLL(h.getLatLng())));
+          if (i === 0) d.start = b; else d.end = b;
+          update();
+        });
+        h.on('dragend', () => { place(); drawEditSide(); });
+      });
+      ed.handles.push(center, edge, ...ends);
+    } else if (d.shape === 'polygon' && ed.mode === 'edit') {
+      d.ring.forEach((p, i) => {
+        const h = handle(toLL(p), 'vertex');
+        h.on('drag', () => { d.ring[i] = fromLL(h.getLatLng()); update(); });
+        h.on('dragend', redrawDraft);
+        h.on('dblclick', () => { if (d.ring.length > 3) { d.ring.splice(i, 1); ed.dirty = true; redrawDraft(); } });
+        ed.handles.push(h);
+      });
+      d.ring.forEach((p, i) => {
+        const q2 = d.ring[(i + 1) % d.ring.length];
+        const h = handle(toLL([(p[0] + q2[0]) / 2, (p[1] + q2[1]) / 2]), 'mid', { size: [11, 11] });
+        let inserted = false;
+        h.on('drag', () => {
+          if (!inserted) { d.ring.splice(i + 1, 0, fromLL(h.getLatLng())); inserted = true; }
+          d.ring[i + 1] = fromLL(h.getLatLng());
+          update();
+        });
+        h.on('dragend', redrawDraft);
+        ed.handles.push(h);
+      });
+    } else if (ed.mode === 'draw') {
+      d.ring.forEach((p) => {
+        const h = L.marker(toLL(p), { interactive: false, icon: L.divIcon({ className: 'map-handle vertex', iconSize: [12, 12] }) }).addTo(map);
+        ed.handles.push(h);
+      });
+    }
+  }
+  drawEditSide();
+}
+
+function refreshAcres() {
+  const d = mapState.ed?.draft;
+  const el = $$('.acre-compare b')[1];
+  if (d && el) el.textContent = num(ringAcres(draftRing(d)), 1);
+}
+
+async function saveShape() {
+  const { field, draft } = mapState.ed;
+  await persistBoundary(field, toFeature(draft));
+}
+
+async function persistBoundary(f, feature) {
+  try {
+    await q(sb.from('fields').update({ boundary: feature }).eq('field_id', f.field_id));
+    f.boundary = feature;
+    toast(feature ? 'Shape saved' : 'Removed from map');
+    endEdit();
+  } catch { /* shown */ }
+}
+
+function endEdit() {
+  const ed = mapState.ed;
+  if (ed) { ed.handles.forEach((h) => h.remove()); ed.layer?.remove(); }
+  mapState.ed = null;
+  drawFields();
+  drawSide();
+}
+
+// =====================================================================
 // Setup: reference lists
 // =====================================================================
 let setupTab = 'riders';
@@ -1091,11 +1503,14 @@ const VIEWS = {
   order: renderOrder,
   fields: (el) => renderCrud(CRUD.fields, el),
   crops: renderCrops,
+  map: renderMap,
   setup: renderSetup,
 };
 let currentView = 'home';
 
 async function show(view) {
+  if (currentView === 'map' && view !== 'map' && !confirmDiscard()) return;
+  if (view !== 'map') mapState.ed = null;
   if (currentView === 'order' && view !== 'order' && !okToLeaveOrder()) return;
   orderState.dirty = false;
   currentView = view;
