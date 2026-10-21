@@ -2018,7 +2018,7 @@ async function recentChem(fieldId, limit = 5) {
 const ruleWait = (r) => (r.seasons_after != null ? `not until ${r.seasons_after === 1 ? 'the next season' : `${r.seasons_after} seasons later`}`
   : Number(r.months) === 0 ? 'anytime' : `${Number(r.months)} month${Number(r.months) === 1 ? '' : 's'}`);
 
-async function openLabelDialog(chem, onDone) {
+async function openLabelDialog(chem, onDone, unlocked = false) {
   const rules = await q(sb.from('chemical_rotation_rules').select('*').eq('chemical_id', chem.chemical_id));
   const named = rules.filter((r) => r.crop_id != null).sort((a, b) => cropName(a.crop_id).localeCompare(cropName(b.crop_id)));
   const other = rules.find((r) => r.crop_id == null);
@@ -2051,9 +2051,13 @@ async function openLabelDialog(chem, onDone) {
         <td class="nowrap">${esc(ruleWait(r))}</td>
         <td class="small">${esc(r.conditions ?? '')}</td>
         <td class="nowrap muted small">${esc(r.label_page ?? '')}</td>
-        <td class="r"><button type="button" class="small" data-rule="${r.rule_id}">Edit</button></td></tr>`).join('')}
+        <td class="r">${unlocked ? `<button type="button" class="small" data-rule="${r.rule_id}">Edit</button>` : ''}</td></tr>`).join('')}
       </tbody></table></div>` : '<p class="muted small">No plant-back intervals recorded for this product.</p>'}
-    <div class="row wrap"><button type="button" class="small" data-act="add-rule">+ Add interval</button></div>
+    <div class="row wrap">${unlocked
+      ? `<button type="button" class="small" data-act="add-rule">+ Add interval</button>
+         <button type="button" class="small ghost" data-act="lock">🔒 Done editing</button>
+         <span class="muted small">Every change asks you to confirm.</span>`
+      : `<button type="button" class="small" data-act="unlock">🔓 Edit intervals</button>`}</div>
 
     <div class="actions">
       <label class="check small"><input type="checkbox" data-act="checked" ${chem.label_checked ? 'checked' : ''}> I've checked this against the label</label>
@@ -2061,9 +2065,17 @@ async function openLabelDialog(chem, onDone) {
       <button type="button" data-act="close">Close</button>
     </div></div>`;
 
-  const reopen = async () => { await loadRefs(); openLabelDialog(chemById(chem.chemical_id), onDone); };
+  const reopen = async (keepUnlocked = unlocked) => { await loadRefs(); openLabelDialog(chemById(chem.chemical_id), onDone, keepUnlocked); };
+  const unlock = $('[data-act=unlock]', dlg);
+  if (unlock) unlock.onclick = () => {
+    if (chem.label_checked && !confirm(`${chem.name} has been checked against its label. Edit its plant-back intervals anyway?`)) return;
+    openLabelDialog(chem, onDone, true);
+  };
+  const lock = $('[data-act=lock]', dlg);
+  if (lock) lock.onclick = () => openLabelDialog(chem, onDone, false);
   $('[data-act=close]', dlg).onclick = () => { dlg.close(); onDone?.(); };
   $('[data-act=checked]', dlg).onchange = async (e) => {
+    if (!e.target.checked && !confirm(`Mark ${chem.name} as NOT checked against its label?`)) { e.target.checked = true; return; }
     try { await q(sb.from('chemicals').update({ label_checked: e.target.checked }).eq('chemical_id', chem.chemical_id)); toast(e.target.checked ? 'Marked as checked' : 'Marked as not checked'); reopen(); }
     catch { e.target.checked = !e.target.checked; }
   };
@@ -2088,7 +2100,8 @@ async function openLabelDialog(chem, onDone) {
       reopen();
     } catch { /* shown */ }
   };
-  $('[data-act=add-rule]', dlg).onclick = () => openRuleForm(chem, null, reopen);
+  const add = $('[data-act=add-rule]', dlg);
+  if (add) add.onclick = () => openRuleForm(chem, null, reopen);
   $$('[data-rule]', dlg).forEach((b) => (b.onclick = () => openRuleForm(chem, rules.find((r) => r.rule_id === Number(b.dataset.rule)), reopen)));
   dlg.onclose = () => dlg.classList.remove('wide');
   if (!dlg.open) dlg.showModal();
@@ -2136,6 +2149,15 @@ function openRuleForm(chem, rule, onDone) {
       months: el.kind.value === 'months' ? n : null, seasons_after: el.kind.value === 'seasons' ? Math.round(n) : null,
       conditions: el.conditions.value.trim() || null, label_page: el.label_page.value.trim() || null,
     };
+    const cropLabel = (id) => (id ? cropName(id) : 'All other crops');
+    const describe = (x) => `${cropLabel(x.crop_id)}: ${ruleWait(x)}${x.label_page ? ` (${x.label_page})` : ''}`;
+    if (rule) {
+      const changed = ['crop_id', 'months', 'seasons_after', 'conditions', 'label_page']
+        .some((k) => String(rule[k] ?? '') !== String(data[k] ?? '') && !(k === 'months' && Number(rule[k]) === Number(data[k])));
+      if (!changed) return onDone();
+      const condNote = (rule.conditions ?? '') !== (data.conditions ?? '') ? '\n\nThe conditions text also changed.' : '';
+      if (!confirm(`Change this plant-back interval for ${chem.name}?\n\nBefore: ${describe(rule)}\nAfter:  ${describe(data)}${condNote}`)) return;
+    } else if (!confirm(`Add this plant-back interval for ${chem.name}?\n\n${describe(data)}`)) return;
     try {
       if (rule) await q(sb.from('chemical_rotation_rules').update(data).eq('rule_id', rule.rule_id));
       else await q(sb.from('chemical_rotation_rules').insert(data));
@@ -2145,7 +2167,7 @@ function openRuleForm(chem, rule, onDone) {
   };
   const del = $('[data-act=del]', dlg);
   if (del) del.onclick = async () => {
-    if (!confirm('Delete this interval?')) return;
+    if (!confirm(`Delete this plant-back interval for ${chem.name}?\n\n${rule.crop_id ? cropName(rule.crop_id) : 'All other crops'}: ${ruleWait(rule)}\n\nWarnings for this crop will fall back to the "All other crops" interval, if there is one.`)) return;
     try { await q(sb.from('chemical_rotation_rules').delete().eq('rule_id', rule.rule_id)); rotationCache.at = 0; onDone(); } catch { /* shown */ }
   };
 }
