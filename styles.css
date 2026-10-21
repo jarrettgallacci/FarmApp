@@ -446,3 +446,6 @@ table.crud td { white-space: normal; max-width: 260px; overflow-wrap: anywhere; 
 table.crud td:last-child { white-space: nowrap; max-width: none; text-align: right; }
 
 .filters input, .filters select { height: 42px; }
+
+.primary-link { background: var(--accent); color: #fff !important; border-color: var(--accent); text-decoration: none; }
+a.button-like { text-decoration: none; }

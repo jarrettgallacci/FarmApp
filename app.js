@@ -168,7 +168,9 @@ const CRUD = {
       { key: 'manufacturer', label: 'Manufacturer', listLabel: 'Maker', type: 'text', list: true },
       { key: 'label_status', label: 'Label', list: true, form: false,
         compute: (r) => [r.label_path ? 'PDF' : null, r.label_source ? (r.label_checked ? '✓ checked' : 'not checked') : null].filter(Boolean).join(' · ') },
-      { key: 'epa_reg_no', label: 'EPA reg. no.', type: 'text' },
+      { key: 'epa_reg_no', label: 'EPA reg. no. (links the current EPA label)', type: 'text' },
+      { key: 'label_url', label: 'Other label link (manufacturer, 24c, PICOL…)', type: 'url' },
+      { key: 'label_version', label: 'Label version the data came from (EPA accepted date or revision code)', type: 'text' },
       { key: 'active', label: 'Active (shows when picking products)', type: 'checkbox', default: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
@@ -2050,6 +2052,13 @@ async function recentChem(fieldId, limit = 5) {
 const ruleWait = (r) => (r.seasons_after != null ? `not until ${r.seasons_after === 1 ? 'the next season' : `${r.seasons_after} seasons later`}`
   : Number(r.months) === 0 ? 'anytime' : `${Number(r.months)} month${Number(r.months) === 1 ? '' : 's'}`);
 
+// EPA's label page for a product (distributor numbers like 100-497-5905 use the base 100-497).
+function epaLabelUrl(reg) {
+  const parts = String(reg ?? '').trim().split('-');
+  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+  return `https://ordspub.epa.gov/ords/pesticides/f?p=PPLS:102:::NO::P102_REG_NUM:${parts[0]}-${parts[1]}`;
+}
+
 async function openLabelDialog(chem, onDone, unlocked = false) {
   const rules = await q(sb.from('chemical_rotation_rules').select('*').eq('chemical_id', chem.chemical_id));
   const named = rules.filter((r) => r.crop_id != null).sort((a, b) => cropName(a.crop_id).localeCompare(cropName(b.crop_id)));
@@ -2065,11 +2074,17 @@ async function openLabelDialog(chem, onDone, unlocked = false) {
       ${fact('EPA reg. no.', chem.epa_reg_no)}${fact('Active ingredient', chem.active_ingredient)}
       ${fact('Signal word', chem.signal_word)}${fact('Re-entry (REI)', chem.rei_hours != null ? `${Number(chem.rei_hours)} hours` : '')}
       ${chem.restricted_use ? '<div><span class="muted small">Restricted use</span><b>Yes, certified applicator</b></div>' : ''}
+      ${fact('Label version', chem.label_version)}${fact('Checked on', chem.label_checked_on ? fmtDate(chem.label_checked_on) + ' ' + chem.label_checked_on.slice(0, 4) : '')}
     </div>
     ${chem.chemigation ? `<p class="small"><b>Chemigation:</b> ${esc(chem.chemigation)}</p>` : ''}
     ${chem.label_notes ? `<p class="small">${esc(chem.label_notes)}</p>` : ''}
     ${chem.label_source ? `<p class="muted small">From: ${esc(chem.label_source)}</p>` : ''}
 
+    <div class="label-file">
+      ${epaLabelUrl(chem.epa_reg_no) ? `<a class="button-like primary-link" href="${esc(epaLabelUrl(chem.epa_reg_no))}" target="_blank" rel="noopener">Current label at EPA ↗</a>` : '<span class="muted small">Add the EPA reg. no. (Edit) to link EPA\'s label.</span>'}
+      ${chem.label_url ? `<a class="button-like" href="${esc(chem.label_url)}" target="_blank" rel="noopener">Saved link ↗</a>` : ''}
+      <a class="button-like" href="https://picol.cahnrs.wsu.edu/" target="_blank" rel="noopener">PICOL (WA/OR) ↗</a>
+    </div>
     <div class="label-file">
       ${chem.label_path ? `<button type="button" class="primary" data-act="view">View label PDF</button>` : '<span class="muted">No label PDF attached.</span>'}
       <label class="button-like">${chem.label_path ? 'Replace PDF' : 'Upload label PDF'}<input type="file" accept="application/pdf" data-act="upload" hidden></label>
@@ -2108,7 +2123,7 @@ async function openLabelDialog(chem, onDone, unlocked = false) {
   $('[data-act=close]', dlg).onclick = () => { dlg.close(); onDone?.(); };
   $('[data-act=checked]', dlg).onchange = async (e) => {
     if (!e.target.checked && !confirm(`Mark ${chem.name} as NOT checked against its label?`)) { e.target.checked = true; return; }
-    try { await q(sb.from('chemicals').update({ label_checked: e.target.checked }).eq('chemical_id', chem.chemical_id)); toast(e.target.checked ? 'Marked as checked' : 'Marked as not checked'); reopen(); }
+    try { await q(sb.from('chemicals').update({ label_checked: e.target.checked, label_checked_on: e.target.checked ? localDate() : null }).eq('chemical_id', chem.chemical_id)); toast(e.target.checked ? 'Marked as checked' : 'Marked as not checked'); reopen(); }
     catch { e.target.checked = !e.target.checked; }
   };
   const view = $('[data-act=view]', dlg);
