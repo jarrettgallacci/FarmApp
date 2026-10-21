@@ -444,3 +444,5 @@ table.rules td { white-space: normal; vertical-align: top; }
 table.crud thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; padding-top: 1rem; }
 table.crud td { white-space: normal; max-width: 260px; overflow-wrap: anywhere; vertical-align: top; }
 table.crud td:last-child { white-space: nowrap; max-width: none; text-align: right; }
+
+.filters input, .filters select { height: 42px; }
