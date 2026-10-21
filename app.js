@@ -729,14 +729,12 @@ function byRider(items) {
 async function renderHome(el) {
   const today = localDate();
   const tomorrow = addDays(today, 1);
-  const season = new Date().getFullYear();
 
-  const [recent, todayRows, tomorrowRows, balance] = await Promise.all([
+  const [recent, todayRows, tomorrowRows] = await Promise.all([
     q(sb.from('water_orders').select('order_id, order_date, status').lte('order_date', today)
       .neq('status', 'draft').order('order_date', { ascending: false }).limit(2)),
     q(sb.from('water_orders').select('order_id, status').eq('order_date', today)),
     q(sb.from('water_orders').select('order_id, status, submitted_at').eq('order_date', tomorrow)),
-    q(sb.from('water_balance_by_season').select('af_ordered').eq('season', season)),
   ]);
 
   const [current, previous] = recent;
@@ -757,9 +755,6 @@ async function renderHome(el) {
     .filter((t) => now.has(t.turnout_id))
     .map((t) => ({ turnout: t, cfs: now.get(t.turnout_id) }));
 
-  const totalCfs = running.reduce((s, r) => s + r.cfs, 0);
-  const fieldsOn = orderParents().filter((f) => cur.lines.get(f.field_id)?.is_on).length;
-  const seasonAf = balance.reduce((s, b) => s + Number(b.af_ordered || 0), 0);
 
   // ---- Water changes card
   const changeLine = ({ turnout, a, b }) => {
@@ -809,12 +804,7 @@ async function renderHome(el) {
       <span><b>Tomorrow's water order hasn't been sent.</b> It's due to the ditch riders around 2:30 PM.</span>
       <button class="primary small" data-act="tomorrow">Open order</button></div>` : ''}
 
-    <div class="stats">
-      <div class="stat"><span class="stat-label">Water running</span><span class="stat-value">${num(totalCfs)}<small> CFS</small></span></div>
-      <div class="stat"><span class="stat-label">Turnouts on</span><span class="stat-value">${running.length}</span></div>
-      <div class="stat"><span class="stat-label">Fields watering</span><span class="stat-value">${fieldsOn}</span></div>
-      <div class="stat"><span class="stat-label">Ordered in ${season}</span><span class="stat-value">${num(seasonAf, 0)}<small> ac-ft</small></span></div>
-    </div>
+    <div class="forecast" id="forecast"><p class="muted small">Loading forecast…</p></div>
 
     <div class="dash-grid">
       <div>
@@ -836,6 +826,56 @@ async function renderHome(el) {
     </div>`;
 
   $$('[data-act=tomorrow]', el).forEach((b) => (b.onclick = () => { orderState.date = tomorrow; show('order'); }));
+  drawForecast($('#forecast', el));
+}
+
+// ---- 4-day forecast for the farm (Open-Meteo: free, no key). Cached 30 min per browser.
+const FARM_LAT = 47.073, FARM_LON = -119.123;   // middle of the mapped fields
+const WX = [
+  [[0], '☀️', 'Sunny'], [[1], '🌤️', 'Mostly sunny'], [[2], '⛅', 'Partly cloudy'], [[3], '☁️', 'Cloudy'],
+  [[45, 48], '🌫️', 'Fog'], [[51, 53, 55, 56, 57], '🌦️', 'Drizzle'], [[61, 63, 65, 66, 67], '🌧️', 'Rain'],
+  [[71, 73, 75, 77, 85, 86], '🌨️', 'Snow'], [[80, 81, 82], '🌦️', 'Showers'], [[95, 96, 99], '⛈️', 'Thunderstorms'],
+];
+const wxOf = (code) => WX.find(([codes]) => codes.includes(code)) ?? [[], '🌡️', ''];
+const compass = (deg) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+
+async function loadForecast() {
+  const key = 'farm-forecast-v1';
+  try {
+    const c = JSON.parse(localStorage.getItem(key) || 'null');
+    if (c && Date.now() - c.at < 30 * 60 * 1000) return c.daily;
+  } catch { /* storage unavailable */ }
+  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + FARM_LAT + '&longitude=' + FARM_LON +
+    '&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max,wind_gusts_10m_max,' +
+    'wind_direction_10m_dominant,precipitation_probability_max' +
+    '&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FLos_Angeles&forecast_days=4';
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Forecast unavailable (' + res.status + ')');
+  const { daily } = await res.json();
+  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), daily })); } catch { /* ignore */ }
+  return daily;
+}
+
+async function drawForecast(box) {
+  if (!box) return;
+  try {
+    const d = await loadForecast();
+    const today = localDate();
+    box.innerHTML = d.time.map((day, i) => {
+      const [, icon, text] = wxOf(d.weather_code[i]);
+      const label = day === today ? 'Today' : new Date(day + 'T12:00:00').toLocaleDateString([], { weekday: 'short' });
+      const rain = d.precipitation_probability_max?.[i];
+      return `<div class="stat wx">
+        <span class="stat-label">${esc(label)}</span>
+        <div class="wx-main"><span class="wx-icon" aria-hidden="true">${icon}</span>
+          <span class="stat-value">${Math.round(d.temperature_2m_max[i])}°<small> / ${Math.round(d.temperature_2m_min[i])}°</small></span></div>
+        <span class="wx-text">${esc(text)}${rain >= 20 ? ` · ${rain}% rain` : ''}</span>
+        <span class="wx-wind">Wind ${compass(d.wind_direction_10m_dominant[i])} ${Math.round(d.wind_speed_10m_max[i])}, gusts ${Math.round(d.wind_gusts_10m_max[i])} mph</span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = `<p class="muted small">Forecast couldn't load right now (${esc(e.message)}).</p>`;
+  }
 }
 
 // =====================================================================

@@ -135,6 +135,13 @@ main { padding: 20px 16px 40px; max-width: 1180px; margin: 0 auto; }
 .stat-label { color: var(--muted); font-size: .82rem; }
 .stat-value { font-size: 1.6rem; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
 .stat-value small { font-size: .85rem; font-weight: 500; color: var(--muted); }
+.forecast { display: grid; gap: .8rem; grid-template-columns: repeat(2, 1fr); margin-bottom: 1rem; }
+@media (min-width: 760px) { .forecast { grid-template-columns: repeat(4, 1fr); } }
+.forecast > p { grid-column: 1 / -1; margin: 0; }
+.wx-main { display: flex; align-items: center; gap: .5rem; }
+.wx-icon { font-size: 1.7rem; line-height: 1; }
+.wx-text { font-size: .88rem; color: var(--text); }
+.wx-wind { font-size: .82rem; color: var(--muted); }
 .dash-grid { display: grid; gap: 0 1rem; grid-template-columns: 1fr; }
 @media (min-width: 900px) { .dash-grid { grid-template-columns: 1.5fr 1fr; align-items: start; } }
 .group + .group { margin-top: .9rem; }
