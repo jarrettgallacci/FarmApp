@@ -142,6 +142,16 @@ main { padding: 20px 16px 40px; max-width: 1180px; margin: 0 auto; }
 .wx-icon { font-size: 1.7rem; line-height: 1; }
 .wx-text { font-size: .88rem; color: var(--text); }
 .wx-wind { font-size: .82rem; color: var(--muted); }
+.stat.wx { text-align: left; font: inherit; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.stat.wx:hover, .stat.wx:focus-visible { border-color: var(--accent); }
+.wx-more { float: right; color: var(--accent); font-size: .78rem; }
+.wx-summary { display: grid; gap: .6rem; grid-template-columns: repeat(2, 1fr); margin: .4rem 0 .8rem; }
+@media (min-width: 640px) { .wx-summary { grid-template-columns: repeat(4, 1fr); } }
+.wx-summary > div { display: flex; flex-direction: column; gap: .15rem; background: var(--bg); border-radius: 8px; padding: .55rem .7rem; }
+.wx-window { margin: 0 0 .6rem; }
+.wx-hours td, .wx-hours th { padding: .35rem .5rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.wx-hours tr.spray td { background: #e7f6ec; }
+.wx-hours tr.night td { color: var(--muted); }
 .dash-grid { display: grid; gap: 0 1rem; grid-template-columns: 1fr; }
 @media (min-width: 900px) { .dash-grid { grid-template-columns: 1.5fr 1fr; align-items: start; } }
 .group + .group { margin-top: .9rem; }

@@ -893,44 +893,105 @@ const WX = [
 const wxOf = (code) => WX.find(([codes]) => codes.includes(code)) ?? [[], '🌡️', ''];
 const compass = (deg) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((deg % 360) + 360) % 360 / 45) % 8];
 
+const SPRAY_MAX_MPH = 10, SPRAY_MIN_MPH = 2;   // highlighted spray window (sustained wind)
+const MM_IN = 25.4;
+
 async function loadForecast() {
-  const key = 'farm-forecast-v1';
+  const key = 'farm-forecast-v2';
   try {
     const c = JSON.parse(localStorage.getItem(key) || 'null');
-    if (c && Date.now() - c.at < 30 * 60 * 1000) return c.daily;
+    if (c && Date.now() - c.at < 30 * 60 * 1000) return c.wx;
   } catch { /* storage unavailable */ }
   const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + FARM_LAT + '&longitude=' + FARM_LON +
     '&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max,wind_gusts_10m_max,' +
-    'wind_direction_10m_dominant,precipitation_probability_max' +
+    'wind_direction_10m_dominant,precipitation_probability_max,precipitation_sum,et0_fao_evapotranspiration,sunrise,sunset' +
+    '&hourly=temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,cloud_cover,' +
+    'wind_speed_10m,wind_gusts_10m,wind_direction_10m,weather_code' +
     '&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FLos_Angeles&forecast_days=4';
   const res = await fetch(url);
   if (!res.ok) throw new Error('Forecast unavailable (' + res.status + ')');
-  const { daily } = await res.json();
-  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), daily })); } catch { /* ignore */ }
-  return daily;
+  const { daily, hourly } = await res.json();
+  const wx = { daily, hourly };
+  try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), wx })); } catch { /* ignore */ }
+  return wx;
 }
+
+const hourLabel = (iso) => new Date(iso).toLocaleTimeString([], { hour: 'numeric' });
+const inches = (mm) => (mm == null ? '—' : (mm / MM_IN).toFixed(2) + ' in');
 
 async function drawForecast(box) {
   if (!box) return;
   try {
-    const d = await loadForecast();
+    const wx = await loadForecast();
+    const d = wx.daily;
     const today = localDate();
     box.innerHTML = d.time.map((day, i) => {
       const [, icon, text] = wxOf(d.weather_code[i]);
       const label = day === today ? 'Today' : new Date(day + 'T12:00:00').toLocaleDateString([], { weekday: 'short' });
       const rain = d.precipitation_probability_max?.[i];
-      return `<div class="stat wx">
-        <span class="stat-label">${esc(label)}</span>
+      return `<button type="button" class="stat wx" data-wx-day="${i}" aria-label="${esc(label)} details">
+        <span class="stat-label">${esc(label)} <span class="wx-more">Details ›</span></span>
         <div class="wx-main"><span class="wx-icon" aria-hidden="true">${icon}</span>
           <span class="stat-value">${Math.round(d.temperature_2m_max[i])}°<small> / ${Math.round(d.temperature_2m_min[i])}°</small></span></div>
         <span class="wx-text">${esc(text)}${rain >= 20 ? ` · ${rain}% rain` : ''}</span>
         <span class="wx-wind">Wind ${compass(d.wind_direction_10m_dominant[i])} ${Math.round(d.wind_speed_10m_max[i])}, gusts ${Math.round(d.wind_gusts_10m_max[i])} mph</span>
-      </div>`;
+      </button>`;
     }).join('');
+    $$('[data-wx-day]', box).forEach((b) => (b.onclick = () => openDayWeather(wx, Number(b.dataset.wxDay))));
   } catch (e) {
     box.innerHTML = `<p class="muted small">Forecast couldn't load right now (${esc(e.message)}).</p>`;
   }
 }
+
+function openDayWeather(wx, i) {
+  const d = wx.daily, h = wx.hourly;
+  const day = d.time[i];
+  const hrs = h.time.map((t, k) => k).filter((k) => h.time[k].startsWith(day));
+  const sunrise = d.sunrise?.[i], sunset = d.sunset?.[i];
+  const daylight = (k) => !sunrise || (h.time[k] >= sunrise.slice(0, 13) && h.time[k] <= sunset);
+  const sprayOk = (k) => daylight(k) && h.wind_speed_10m[k] >= SPRAY_MIN_MPH && h.wind_speed_10m[k] <= SPRAY_MAX_MPH;
+  // Contiguous spray-friendly stretches, e.g. "6 AM–11 AM"
+  const windows = [];
+  for (const k of hrs) {
+    if (!sprayOk(k)) continue;
+    const last = windows[windows.length - 1];
+    if (last && last.end === k - 1) last.end = k; else windows.push({ start: k, end: k });
+  }
+  const winText = windows.length
+    ? windows.map((w) => `${hourLabel(h.time[w.start])}–${hourLabel(new Date(new Date(h.time[w.end]).getTime() + 3600e3))}`).join(', ')
+    : 'None today';
+  const [, icon, text] = wxOf(d.weather_code[i]);
+  const title = new Date(day + 'T12:00:00').toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.innerHTML = `<div class="form wx-day">
+    <div class="dialog-head"><div><h3>${icon} ${esc(title)}</h3>
+      <p class="muted small">${esc(text)} · forecast for the middle of the farm</p></div>
+      <button data-act="close">Close</button></div>
+    <div class="wx-summary">
+      <div><span class="stat-label">High / low</span><b>${Math.round(d.temperature_2m_max[i])}° / ${Math.round(d.temperature_2m_min[i])}°F</b></div>
+      <div><span class="stat-label">Rain</span><b>${d.precipitation_probability_max?.[i] ?? 0}% · ${inches(d.precipitation_sum?.[i])}</b></div>
+      <div><span class="stat-label">Crop water use (ET₀)</span><b>${inches(d.et0_fao_evapotranspiration?.[i])}</b></div>
+      <div><span class="stat-label">Sunrise / sunset</span><b>${sunrise ? hourMin(sunrise) : '—'} / ${sunset ? hourMin(sunset) : '—'}</b></div>
+    </div>
+    <p class="wx-window"><b>Spray window</b> (daylight, wind ${SPRAY_MIN_MPH}–${SPRAY_MAX_MPH} mph): ${esc(winText)}</p>
+    <div class="table-wrap"><table class="wx-hours">
+      <thead><tr><th>Time</th><th class="r">Temp</th><th>Wind (mph)</th><th class="r">Gusts</th><th class="r">Rain</th><th class="r">Clouds</th><th class="r">Humidity</th></tr></thead>
+      <tbody>${hrs.map((k) => `<tr class="${sprayOk(k) ? 'spray' : ''}${daylight(k) ? '' : ' night'}">
+        <td>${esc(hourLabel(h.time[k]))}</td>
+        <td class="r">${Math.round(h.temperature_2m[k])}°</td>
+        <td>${compass(h.wind_direction_10m[k])} ${Math.round(h.wind_speed_10m[k])}</td>
+        <td class="r">${Math.round(h.wind_gusts_10m[k])}</td>
+        <td class="r">${h.precipitation_probability[k] ?? 0}%${h.precipitation[k] > 0 ? ` <span class="muted">${(h.precipitation[k] / MM_IN).toFixed(2)}"</span>` : ''}</td>
+        <td class="r">${h.cloud_cover[k]}%</td>
+        <td class="r">${h.relative_humidity_2m[k]}%</td></tr>`).join('')}</tbody></table></div>
+    <p class="muted small">Green rows are inside the spray window. Always check the product label's wind limits and watch for temperature inversions on calm mornings and evenings. Weather data: Open-Meteo.</p>
+  </div>`;
+  $('[data-act=close]', dlg).onclick = () => dlg.close();
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+const hourMin = (iso) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 // =====================================================================
 // Crops: what was grown where, by season, with full field histories.
