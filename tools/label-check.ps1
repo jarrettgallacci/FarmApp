@@ -41,6 +41,12 @@ $chems = Invoke-RestMethod -Uri "$SupabaseUrl/rest/v1/chemicals?select=$sel&epa_
 Write-Host "Checking $($chems.Count) product(s) that have an EPA registration number..."
 
 # ---- helpers
+# EPA sends UTF-8 without saying so; Windows PowerShell would garble (R) and similar.
+function GetJson([string]$u) {
+  $r = Invoke-WebRequest -Uri $u -TimeoutSec 60 -UseBasicParsing
+  $ms = New-Object IO.MemoryStream; $r.RawContentStream.CopyTo($ms)
+  return ([Text.Encoding]::UTF8.GetString($ms.ToArray()) | ConvertFrom-Json)
+}
 function Norm($s) { if ($null -eq $s) { return '' } ; return ($s.ToString().Trim().ToUpper() -replace '\s+', ' ') }
 function BaseReg([string]$reg) {
   # 100-497-5905 (distributor product) -> 100-497 ; leading zeros removed (EPA's examples use 241-310)
@@ -71,7 +77,7 @@ foreach ($c in $chems) {
     $item = $null; $err = 'no record'
     foreach ($u in @("https://ordspub.epa.gov/ords/pesticides/cswu/ppls/$base", "https://ordspub.epa.gov/ords/pesticides/ppls/$base")) {
       try {
-        $r = Invoke-RestMethod -Uri $u -TimeoutSec 60
+        $r = GetJson $u
         if ($r.items -and @($r.items).Count) { $item = @($r.items)[0]; $r | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $OutDir ("epa-raw\" + ($c.epa_reg_no -replace '[^\w-]', '_') + '.json')); break }
       } catch { $err = $_.Exception.Message }
     }
