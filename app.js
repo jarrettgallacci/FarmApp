@@ -835,10 +835,18 @@ function standNote(r, season) {
   return `<span class="stand-note">${year === 1 ? 'New stand' : `Year ${year} of stand`}${end}</span>`;
 }
 function plantedCell(r, season) {
+  if (r.status === 'planned') return `<span class="muted small">Planned${r.acres != null ? ` · ${num(r.acres, 0)} ac` : ''}</span>`;
   if (r.grown_by) return `<span class="badge off">Grown by ${esc(r.grown_by)}</span>`;
   if (r.season !== season) return `<span class="muted small">Planted ${r.season}</span>`;
   return esc(fmtDate(r.planting_date)) + (r.acres != null ? ` <span class="muted small">· ${num(r.acres, 0)} ac</span>` : '');
 }
+const planTag = (r) => (r.status === 'planned' ? ' <span class="badge down">Plan</span>' : '');
+function isoText(ft) {
+  if (ft == null) return '';
+  const n = Number(ft);
+  return n >= 5280 ? `${Number((n / 5280).toFixed(2))} mi` : `${Number(n.toFixed(0)).toLocaleString()} ft`;
+}
+const isoTag = (r) => (r.isolation_ft != null ? ` <span class="iso-tag" title="Isolation required">↔ ${isoText(r.isolation_ft)}</span>` : '');
 const seasonSpan = (r) => !r.multi_year ? String(r.season)
   : r.end_season == null ? `${r.season}–` : r.end_season === r.season ? String(r.season) : `${r.season}–${r.end_season}`;
 
@@ -871,8 +879,8 @@ async function renderCrops(el) {
     }
     list.forEach((r, i) => {
       body += `<tr>${i === 0 ? nameCell(list.length) : ''}
-        <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span>${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}
-          ${standNote(r, cropSeason)}
+        <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span>${planTag(r)}${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}
+          ${standNote(r, cropSeason)}${isoTag(r)}
           ${r.variety ? `<span class="v-inline">${esc(r.variety)}</span>` : ''}</td>
         <td class="c-variety">${esc(r.variety ?? '')}</td>
         <td class="c-planted">${plantedCell(r, cropSeason)}</td>
@@ -921,7 +929,7 @@ async function openFieldHistory(fieldId, onChange) {
       <thead><tr><th>Season</th><th>Crop</th><th>Variety</th><th>Planted</th><th class="r">Yield</th><th></th></tr></thead>
       <tbody>${rows.map((r) => `<tr>
         <td><b>${seasonSpan(r)}</b>${r.multi_year && r.end_season == null ? ' <span class="muted small">still in</span>' : ''}${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}</td>
-        <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span></td><td>${esc(r.variety ?? '')}</td>
+        <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span>${planTag(r)}${isoTag(r)}</td><td>${esc(r.variety ?? '')}</td>
         <td>${plantedCell(r, r.season)}</td><td class="r">${r.grown_by ? '<span class="muted">—</span>' : yieldText(r)}</td>
         <td class="r"><button class="small" data-edit-cy="${r.crop_year_id}">Edit</button></td></tr>`).join('')}
       </tbody></table></div>` : '<p class="muted">No crops recorded for this field yet.</p>'}
@@ -938,7 +946,7 @@ async function openFieldHistory(fieldId, onChange) {
 }
 
 async function openCropYear(row, defaults, onDone) {
-  const v = row ?? { sequence: 1, ...defaults };
+  const v = row ?? { sequence: 1, status: (defaults?.season ?? 0) > new Date().getFullYear() ? 'planned' : 'planted', ...defaults };
   // Every variety used before, grouped by crop, for the suggestions list.
   const used = await q(sb.from('crop_years').select('crop_id, variety').not('variety', 'is', null));
   const varietiesFor = (cropId) => [...new Map(used
@@ -953,6 +961,10 @@ async function openCropYear(row, defaults, onDone) {
     <h3>${row ? 'Edit' : 'Add'} crop year</h3>
     <label>Field *<select name="field_id" required><option value="">Choose…</option>
       ${fields.map((f) => `<option value="${f.field_id}" ${f.field_id === v.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}
+    </select></label>
+    <label>Status<select name="status">
+      <option value="planted" ${v.status !== 'planned' ? 'selected' : ''}>Planted</option>
+      <option value="planned" ${v.status === 'planned' ? 'selected' : ''}>Planned (on the crop plan, not in the ground yet)</option>
     </select></label>
     <div class="row2">
       <label>Season *<input type="number" name="season" min="1990" max="2100" required value="${esc(v.season ?? '')}"></label>
@@ -974,11 +986,37 @@ async function openCropYear(row, defaults, onDone) {
     </div>
     <div id="our-crop">
       <div class="row2">
-        <label>Planting date<input type="date" name="planting_date" value="${esc(v.planting_date ?? '')}"></label>
-        <label>Acres planted<input type="number" name="acres" step="0.1" min="0" value="${esc(v.acres ?? '')}"></label>
+        <label id="pdate-wrap">Planting date<input type="date" name="planting_date" value="${esc(v.planting_date ?? '')}"></label>
+        <label>Acres<input type="number" name="acres" step="0.1" min="0" value="${esc(v.acres ?? '')}"></label>
       </div>
       <p class="muted small" id="acres-hint"></p>
     </div>
+    <div class="row2">
+      <label>Isolation required<input type="number" name="iso" step="any" min="0" placeholder="None"
+        value="${v.isolation_ft == null ? '' : Number(v.isolation_ft) >= 5280 ? Number((v.isolation_ft / 5280).toFixed(3)) : Number(v.isolation_ft)}"></label>
+      <label>&nbsp;<select name="iso_unit">
+        <option value="ft" ${v.isolation_ft == null || Number(v.isolation_ft) < 5280 ? 'selected' : ''}>feet</option>
+        <option value="mi" ${Number(v.isolation_ft) >= 5280 ? 'selected' : ''}>miles</option>
+      </select></label>
+    </div>
+    <fieldset id="contract" class="contract">
+      <legend>Contract <span class="muted small">(optional)</span></legend>
+      <div class="row2">
+        <label>Company<input name="contract_company" value="${esc(v.contract_company ?? '')}"></label>
+        <label>Contract #<input name="contract_number" value="${esc(v.contract_number ?? '')}"></label>
+      </div>
+      <div class="row2">
+        <label>Price<input type="number" name="contract_price" step="any" min="0" value="${esc(v.contract_price ?? '')}"></label>
+        <label>Bonus<input type="number" name="contract_bonus" step="any" min="0" value="${esc(v.contract_bonus ?? '')}"></label>
+      </div>
+      <div class="row2">
+        <label>Per<select name="contract_unit">
+          ${['lb', 'bu', 'cwt', 'ton', 'acre'].map((u) => `<option value="${u}" ${(v.contract_unit ?? 'lb') === u ? 'selected' : ''}>${u}</option>`).join('')}
+        </select></label>
+        <label>Minimum<input type="number" name="contract_minimum" step="any" min="0" value="${esc(v.contract_minimum ?? '')}"></label>
+      </div>
+      <label>Overage terms<input name="contract_overage" value="${esc(v.contract_overage ?? '')}"></label>
+    </fieldset>
     <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
     <div class="actions">
       ${row ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
@@ -1007,11 +1045,18 @@ async function openCropYear(row, defaults, onDone) {
       Array.from({ length: 11 }, (_, i) => start + i)
         .map((y) => `<option value="${y}" ${String(y) === String(keep) ? 'selected' : ''}>${y}</option>`).join('');
   };
+  const syncStatus = () => {
+    const planned = el.status.value === 'planned';
+    $('#pdate-wrap', dlg).hidden = planned;
+    $('#contract', dlg).hidden = planned || !$('#leased-out', dlg).hidden;
+  };
+  el.status.onchange = syncStatus;
   const syncLeasedOut = () => {
     const lease = el.field_id.value && el.season.value ? leasedOutIn(Number(el.field_id.value), Number(el.season.value)) : null;
     const out = !!lease || !!(row?.grown_by);
     $('#leased-out', dlg).hidden = !out;
     $('#our-crop', dlg).hidden = out;
+    syncStatus();
     if (out && !el.grown_by.value && lease) el.grown_by.value = lease.lessor;
   };
   el.crop_id.onchange = () => {
@@ -1041,7 +1086,15 @@ async function openCropYear(row, defaults, onDone) {
       multi_year: el.multi_year.checked,
       end_season: el.multi_year.checked && val('end_season') ? Number(val('end_season')) : null,
       grown_by: null,
+      status: el.status.value,
+      isolation_ft: val('iso') === '' ? null : Number(val('iso')) * (el.iso_unit.value === 'mi' ? 5280 : 1),
     };
+    const contractFields = ['contract_company', 'contract_number', 'contract_price', 'contract_bonus', 'contract_unit', 'contract_minimum', 'contract_overage'];
+    const numeric = ['contract_price', 'contract_bonus', 'contract_minimum'];
+    const contractOn = $('#contract', dlg).hidden === false;
+    for (const k of contractFields) data[k] = contractOn && val(k) !== '' ? (numeric.includes(k) ? Number(val(k)) : val(k)) : null;
+    if (!data.contract_company && !data.contract_number && data.contract_price == null) data.contract_unit = null;
+    if (data.status === 'planned') data.planting_date = null;
     if (!$('#leased-out', dlg).hidden) {
       data.grown_by = val('grown_by') || null;
       data.planting_date = null;
@@ -1202,10 +1255,11 @@ function drawFields() {
     if (!f.boundary || mapState.ed?.field.field_id === f.field_id) continue;
     const crops = mapState.cropsByField.get(f.field_id) ?? [];
     const color = crops.length ? cropColor(crops[0].crop_id) : '#9aa5b1';
+    const planned = crops.length > 0 && crops.every((r) => r.status === 'planned');
     const layer = L.polygon(f.boundary.geometry.coordinates[0].map(toLL), {
-      color: mapState.editMode ? '#ffffff' : color, weight: mapState.editMode ? 2 : 1.5,
-      dashArray: crops.length > 1 ? '6 4' : null,
-      fillColor: color, fillOpacity: crops.length ? 0.55 : 0.25,
+      color: mapState.editMode ? '#ffffff' : planned ? '#ffffff' : color, weight: mapState.editMode ? 2 : planned ? 2 : 1.5,
+      dashArray: planned ? '3 5' : crops.length > 1 ? '8 4' : null,
+      fillColor: color, fillOpacity: !crops.length ? 0.25 : planned ? 0.3 : 0.55,
     }).addTo(map);
     layer.bindTooltip(esc(f.name), { permanent: true, direction: 'center', className: 'field-label' });
     layer.on('click', (e) => {
@@ -1240,9 +1294,60 @@ function drawSide(info) {
       <li><span class="swatch" style="background:${esc(cropColor(id))}"></span>${esc(cropName(id))}
         <span class="muted">${Math.round(ac).toLocaleString()} ac</span></li>`).join('')}</ul>`
       : '<p class="muted">No crops entered for this season.</p>'}
-    <p class="muted small">Acres are from your crop records. Dashed outline = more than one crop or variety.
-      Click a field for details.</p>
+    <p class="muted small">Acres are from your crop records. Long dashes = more than one crop or variety.
+      Pale with a white dotted edge = planned, not planted. Click a field for details.</p>
+    ${isoFields().length ? `<h4>Isolation</h4>
+      <label class="check small"><input type="checkbox" data-act="all-rings" ${mapState.allRings ? 'checked' : ''}> Show all isolation rings</label>
+      <ul class="missing">${isoFields().map(({ f, r }) => `<li><span>${esc(f.name)} <span class="muted small">${esc(cropName(r.crop_id))} · ${isoText(r.isolation_ft)}</span></span>
+        <button class="small" data-ring="${f.field_id}">Check</button></li>`).join('')}</ul>` : ''}
     ${unmapped ? `<p class="small">${unmapped} active field(s) aren't on the map yet. Use <b>Edit shapes</b> to add them.</p>` : ''}`;
+  const all = $('[data-act=all-rings]', side);
+  if (all) all.onchange = () => { mapState.allRings = all.checked; drawRings(); };
+  $$('[data-ring]', side).forEach((b) => (b.onclick = () => showFieldInfo(fieldById(b.dataset.ring))));
+  drawRings();
+}
+
+// ---------- Isolation rings ----------
+// Fields with an isolation requirement on a crop this season (largest requirement per field).
+function isoFields() {
+  const out = [];
+  for (const [fid, list] of mapState.cropsByField ?? []) {
+    const f = fieldById(fid);
+    const r = list.filter((x) => x.isolation_ft != null).sort((a, b) => b.isolation_ft - a.isolation_ft)[0];
+    if (f?.boundary && r) out.push({ f, r });
+  }
+  return out.sort((a, b) => a.f.name.localeCompare(b.f.name, undefined, { numeric: true }));
+}
+// Centre and outer reach of a field's outline, in metres.
+function shapeReach(f) {
+  const ring = f.boundary.geometry.coordinates[0];
+  const p = f.boundary.properties ?? {};
+  const center = p.shape === 'pivot' ? p.center
+    : ring.slice(0, -1).reduce((a, x, _, arr) => [a[0] + x[0] / arr.length, a[1] + x[1] / arr.length], [0, 0]);
+  return { center, reach: Math.max(...ring.map((x) => metresBetween(center, x))) };
+}
+// Ring = field outline pushed out by the isolation distance (exact for full pivots, a little generous for other shapes).
+function isoRing(f, r) {
+  const { center, reach } = shapeReach(f);
+  const radius = reach + Number(r.isolation_ft) * 0.3048;
+  const inside = [];
+  for (const g of refs.fields) {
+    if (g.field_id === f.field_id || !g.boundary) continue;
+    const d = Math.min(...g.boundary.geometry.coordinates[0].map((x) => metresBetween(center, x)));
+    if (d <= radius) inside.push(g);
+  }
+  return { center, radius, inside };
+}
+function drawRings(focus) {
+  (mapState.rings ?? []).forEach((l) => l.remove());
+  mapState.rings = [];
+  if (mapState.editMode || !mapState.map) return;
+  const list = focus ? isoFields().filter((x) => x.f.field_id === focus.field_id)
+    : mapState.allRings ? isoFields() : [];
+  for (const { f, r } of list) {
+    const { center, radius } = isoRing(f, r);
+    mapState.rings.push(L.circle(toLL(center), { radius, color: '#ffd400', weight: 2, dashArray: '6 6', fill: false, interactive: false }).addTo(mapState.map));
+  }
 }
 
 function showFieldInfo(f) {
@@ -1256,12 +1361,36 @@ function showFieldInfo(f) {
         <span class="swatch" style="background:${esc(cropColor(r.crop_id))}"></span>
         <div><b>${esc(cropName(r.crop_id))}</b>${r.variety ? ` · ${esc(r.variety)}` : ''}
           <div class="muted small">${r.grown_by ? 'Grown by ' + esc(r.grown_by)
-            : r.season !== mapState.season ? `Stand planted ${r.season}` : esc(fmtDate(r.planting_date) || 'No planting date')}</div></div>
+            : r.status === 'planned' ? 'Planned'
+            : r.season !== mapState.season ? `Stand planted ${r.season}` : esc(fmtDate(r.planting_date) || 'No planting date')}${
+            r.isolation_ft != null ? ` · isolation ${isoText(r.isolation_ft)}` : ''}</div></div>
       </div>`).join('') : `<p class="muted">Nothing entered for ${mapState.season}.</p>`}
     <p class="muted small">Outline is ${num(drawn, 1)} ac.</p>
+    ${isoSection(f, crops)}
     <div class="actions"><button data-act="history">Crop history</button></div>`;
-  $('[data-act=back]').onclick = () => drawSide();
+  drawRings(crops.some((r) => r.isolation_ft != null) ? f : null);
+  $('[data-act=back]').onclick = () => { drawRings(); drawSide(); };
   $('[data-act=history]').onclick = () => openFieldHistory(f.field_id, () => {});
+}
+
+function isoSection(f, crops) {
+  const r = crops.filter((x) => x.isolation_ft != null).sort((a, b) => b.isolation_ft - a.isolation_ft)[0];
+  if (!r || !f.boundary) return '';
+  const { inside } = isoRing(f, r);
+  const rows = inside.map((g) => {
+    const gc = mapState.cropsByField.get(g.field_id) ?? [];
+    const same = gc.some((x) => x.crop_id === r.crop_id);
+    return { g, gc, same };
+  }).sort((a, b) => Number(b.same) - Number(a.same));
+  const empty = rows.filter((x) => !x.gc.length).length;
+  rows.splice(0, rows.length, ...rows.filter((x) => x.gc.length));
+  return `<div class="iso-box"><b>Isolation ${isoText(r.isolation_ft)}</b> <span class="muted small">for ${esc(cropName(r.crop_id))}</span>
+    ${rows.length ? `<p class="muted small">Fields inside the ring for ${mapState.season}:</p><ul class="iso-list">${rows.map(({ g, gc, same }) => `
+      <li class="${same ? 'conflict' : ''}"><span>${esc(g.name)}</span>
+        <span class="small">${gc.length ? gc.map((x) => esc(cropName(x.crop_id)) + (x.status === 'planned' ? ' (plan)' : '')).join(', ') : '<span class="muted">nothing entered</span>'}</span></li>`).join('')}</ul>
+      ${empty ? `<p class="muted small">Plus ${empty} field(s) with nothing entered.</p>` : ''}
+      ${rows.some((x) => x.same) ? '<p class="small conflict-note">Red = same crop inside the isolation distance.</p>' : ''}`
+      : `<p class="muted small">${empty ? `${empty} field(s) inside the ring, none with a crop entered.` : 'No other fields inside the ring.'}</p>`}</div>`;
 }
 
 // ---------- Editing ----------

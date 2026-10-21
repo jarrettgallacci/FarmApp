@@ -366,3 +366,15 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .map-handle.center { background: #ffd400; border-color: #fff; }
 .map-handle.end { background: #2563a8; border-color: #fff; }
 .map-handle.mid { background: rgb(255 255 255 / .7); border-width: 1px; }
+
+/* Plan, isolation, contracts */
+.iso-tag { display: inline-block; margin-left: .35rem; font-size: .74rem; font-weight: 600; color: var(--amber); }
+fieldset.contract { border: 1px solid var(--border); border-radius: 10px; padding: .6rem .8rem .8rem; margin: 0; display: flex; flex-direction: column; gap: .6rem; }
+fieldset.contract legend { font-size: .88rem; font-weight: 600; padding: 0 .3rem; }
+.iso-box { background: var(--accent-tint); border-radius: 10px; padding: .6rem .7rem; margin: .5rem 0; }
+.iso-box p { margin: .3rem 0; }
+.iso-list { list-style: none; padding: 0; margin: 0; }
+.iso-list li { display: flex; justify-content: space-between; gap: .5rem; padding: .3rem 0; border-bottom: 1px solid var(--border); }
+.iso-list li.conflict { color: var(--danger); font-weight: 600; }
+.conflict-note { color: var(--danger); }
+label.check.small { font-size: .88rem; display: flex; align-items: center; gap: .5rem; margin: .3rem 0 .5rem; }
