@@ -1680,6 +1680,35 @@ $('#login-form').onsubmit = async (e) => {
   if (error) toast(error.message, true);
 };
 $('#signout').onclick = () => sb.auth.signOut();
+$('#account').onclick = async () => {
+  const { data: { user } } = await sb.auth.getUser();
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  dlg.innerHTML = `<form class="form">
+    <h3>Account</h3>
+    <p class="muted small">Signed in as <b>${esc(user?.email ?? '')}</b></p>
+    <label>New password<input type="password" name="pw" autocomplete="new-password" minlength="8" required></label>
+    <label>Type it again<input type="password" name="pw2" autocomplete="new-password" minlength="8" required></label>
+    <p class="muted small">At least 8 characters.</p>
+    <div class="actions"><span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button>
+      <button type="submit" class="primary">Change password</button></div></form>`;
+  const form = $('form', dlg);
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const pw = form.elements.pw.value;
+    if (pw !== form.elements.pw2.value) return toast('The two passwords don\'t match', true);
+    const btn = $('button[type=submit]', form);
+    btn.disabled = true;
+    const { error } = await sb.auth.updateUser({ password: pw });
+    btn.disabled = false;
+    if (error) return toast(error.message, true);
+    dlg.close();
+    toast('Password changed');
+  };
+  dlg.showModal();
+};
 $$('nav [data-view]').forEach((b) => (b.onclick = () => show(b.dataset.view)));
 
 window.addEventListener('beforeunload', (e) => {
