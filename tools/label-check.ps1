@@ -4,6 +4,13 @@
 # Read-only: it never changes the database.
 
 $ErrorActionPreference = 'Stop'
+trap {
+  $msg = "Unexpected error: $($_.Exception.Message) (line $($_.InvocationInfo.ScriptLineNumber))"
+  Write-Host $msg -ForegroundColor Red
+  try { $msg | Add-Content (Join-Path (Split-Path -Parent $PSCommandPath) 'label-check-error.log') } catch {}
+  Read-Host 'Press Enter to close'
+  exit 1
+}
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $SupabaseUrl = 'https://devmfericqaekxsxxlvj.supabase.co'
@@ -34,33 +41,6 @@ $chems = Invoke-RestMethod -Uri "$SupabaseUrl/rest/v1/chemicals?select=$sel&epa_
 Write-Host "Checking $($chems.Count) product(s) that have an EPA registration number..."
 
 # ---- helpers
-function Get-Prop($obj, [string[]]$names) {
-  # finds the first property whose name matches (case-insensitive), searching nested objects
-  if ($null -eq $obj) { return $null }
-  if ($obj -is [System.Collections.IEnumerable] -and -not ($obj -is [string])) {
-    foreach ($o in $obj) { $v = Get-Prop $o $names; if ($null -ne $v) { return $v } }
-    return $null
-  }
-  foreach ($p in $obj.PSObject.Properties) {
-    foreach ($n in $names) { if ($p.Name -ieq $n) { return $p.Value } }
-  }
-  foreach ($p in $obj.PSObject.Properties) {
-    if ($p.Value -is [psobject] -or ($p.Value -is [System.Collections.IEnumerable] -and -not ($p.Value -is [string]))) {
-      $v = Get-Prop $p.Value $names; if ($null -ne $v) { return $v }
-    }
-  }
-  return $null
-}
-function Get-AllDates($obj) {
-  # every date-looking value in properties whose name mentions "date" inside a PDF list
-  $out = @()
-  $json = $obj | ConvertTo-Json -Depth 20 -Compress
-  foreach ($m in [regex]::Matches($json, '"(pdf[^"]*date[^"]*|[^"]*accept[^"]*date[^"]*)"\s*:\s*"([^"]+)"', 'IgnoreCase')) {
-    $d = $null
-    if ([datetime]::TryParse($m.Groups[2].Value, [ref]$d)) { $out += $d }
-  }
-  return $out
-}
 function Norm($s) { if ($null -eq $s) { return '' } ; return ($s.ToString().Trim().ToUpper() -replace '\s+', ' ') }
 function BaseReg([string]$reg) {
   # 100-497-5905 (distributor product) -> 100-497 ; leading zeros removed (EPA's examples use 241-310)
@@ -68,81 +48,88 @@ function BaseReg([string]$reg) {
   if ($parts.Count -lt 2) { return $null }
   return ('{0}-{1}' -f [int]$parts[0], [int]$parts[1])
 }
-function PdfList($obj) {
-  # every {file, date} pair EPA lists for the product
-  $out = @()
-  $json = $obj | ConvertTo-Json -Depth 20 -Compress
-  foreach ($m in [regex]::Matches($json, '\{[^{}]*"pdffile"\s*:\s*"([^"]+)"[^{}]*\}', 'IgnoreCase')) {
-    $d = $null
-    $dm = [regex]::Match($m.Value, '"pdffile_accepted_date"\s*:\s*"([^"]+)"', 'IgnoreCase')
-    if ($dm.Success) { [void][datetime]::TryParse($dm.Groups[1].Value, [ref]$d) }
-    if (-not $d) { $fm = [regex]::Match($m.Groups[1].Value, '(\d{8})\.pdf$'); if ($fm.Success) { $d = [datetime]::ParseExact($fm.Groups[1].Value, 'yyyyMMdd', $null) } }
-    $out += [pscustomobject]@{ File = $m.Groups[1].Value; Date = $d }
-  }
-  return $out
-}
-
 # ---- 2. Look each product up at EPA and compare
+$Inv = [Globalization.CultureInfo]::InvariantCulture
+function EpaDate([string]$s, [string]$file) {
+  $d = [datetime]::MinValue
+  foreach ($f in @('MMMM d, yyyy', 'MMMM dd, yyyy', 'yyyy-MM-dd')) {
+    if ([datetime]::TryParseExact("$s".Trim(), $f, $Inv, [Globalization.DateTimeStyles]::None, [ref]$d)) { return $d }
+  }
+  $m = [regex]::Match("$file", '(\d{8})\.pdf$')
+  if ($m.Success) { return [datetime]::ParseExact($m.Groups[1].Value, 'yyyyMMdd', $Inv) }
+  return $null
+}
 $rows = @()
 foreach ($c in $chems) {
   $base = BaseReg $c.epa_reg_no
-  $row = [ordered]@{ Product = $c.name; Reg = $c.epa_reg_no; Issues = @(); Info = @(); Latest = ''; EpaName = ''; NewPdf = $false; Link = "https://ordspub.epa.gov/ords/pesticides/f?p=PPLS:102:::NO::P102_REG_NUM:$($c.epa_reg_no)" }
-  if (-not $base) { $row.Issues += 'EPA number is not in the usual 123-456 form'; $rows += [pscustomobject]$row; continue }
-  Write-Host "  $($c.name) ($($c.epa_reg_no))"
-  $epa = $null; $err = 'no record'
-  foreach ($u in @("https://ordspub.epa.gov/ords/pesticides/cswu/ppls/$base", "https://ordspub.epa.gov/ords/pesticides/ppls/$base")) {
-    try {
-      $r = Invoke-RestMethod -Uri $u -TimeoutSec 60
-      if ($r -and $r.items -and @($r.items).Count) { $epa = $r; break }
-    } catch { $err = $_.Exception.Message }
-  }
-  if (($c.epa_reg_no -split '-').Count -ge 3) { $row.Info += "Distributor number: compared with the main registration $base (distributor labels follow it)" }
-  if (-not $epa) { $row.Issues += "EPA has no record under $base ($err)"; $rows += [pscustomobject]$row; continue }
-  $epa | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 (Join-Path $OutDir ("epa-raw\" + ($c.epa_reg_no -replace '[^\w-]', '_') + '.json'))
+  $row = [ordered]@{ Product = $c.name; Reg = $c.epa_reg_no; Issues = @(); Info = @(); Latest = ''; EpaName = ''; NewPdf = $false; Link = "https://ordspub.epa.gov/ords/pesticides/f?p=PPLS:102:::NO::P102_REG_NUM:$base" }
+  try {
+    if (-not $base) { throw 'EPA number is not in the usual 123-456 form' }
+    Write-Host "  $($c.name) ($($c.epa_reg_no))"
+    if (($c.epa_reg_no -split '-').Count -ge 3) { $row.Info += "Distributor number: compared with the main registration $base" }
 
-  $row.EpaName = Get-Prop $epa @('productname', 'product_name', 'prodname')
-  $status = Get-Prop $epa @('product_status', 'productstatus', 'status')
-  $signal = Get-Prop $epa @('signal_word', 'signalword')
-  $rup    = Get-Prop $epa @('rupyn', 'rup_yn', 'rup', 'restricted_use')
-  $pdfs   = @(PdfList $epa | Where-Object { $_.Date } | Sort-Object Date)
-  $dates  = if ($pdfs.Count) { @($pdfs.Date) } else { Get-AllDates $epa }
-  if ($dates.Count) { $latest = ($dates | Sort-Object | Select-Object -Last 1); $row.Latest = $latest.ToString('yyyy-MM-dd') }
-  # Download the newest label PDF (skipped if we already have it)
-  if ($pdfs.Count) {
-    $newest = $pdfs[-1]
-    $name = if ($newest.File -match '\.pdf$') { $newest.File } else { "$($newest.File).pdf" }
-    $dir = Join-Path $LabelDir ($c.epa_reg_no -replace '[^\w-]', '_')
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    $dest = Join-Path $dir $name
-    if (Test-Path $dest) { $row.Info += "Newest label already downloaded ($name)" }
-    else {
-      $got = $false
-      foreach ($pu in @("https://www3.epa.gov/pesticides/chem_search/ppls/$name")) {
-        try { Invoke-WebRequest -Uri $pu -OutFile $dest -TimeoutSec 120 -UseBasicParsing; $got = $true; break } catch { $err = $_.Exception.Message }
-      }
-      if ($got) { $row.Info += "NEW label PDF downloaded: labels\$(Split-Path $dir -Leaf)\$name"; $row.NewPdf = $true }
-      else { $row.Info += "Couldn't download the label PDF ($err)"; Remove-Item -ErrorAction SilentlyContinue $dest }
+    $item = $null; $err = 'no record'
+    foreach ($u in @("https://ordspub.epa.gov/ords/pesticides/cswu/ppls/$base", "https://ordspub.epa.gov/ords/pesticides/ppls/$base")) {
+      try {
+        $r = Invoke-RestMethod -Uri $u -TimeoutSec 60
+        if ($r.items -and @($r.items).Count) { $item = @($r.items)[0]; $r | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 (Join-Path $OutDir ("epa-raw\" + ($c.epa_reg_no -replace '[^\w-]', '_') + '.json')); break }
+      } catch { $err = $_.Exception.Message }
     }
-  }
+    if (-not $item) { $row.Issues += "EPA has no record under $base ($err)"; continue }
 
-  if ($status -and (Norm $status) -notmatch 'ACTIVE|REGISTERED') { $row.Issues += "EPA status is '$status'" }
-  if ($signal -and $c.signal_word -and (Norm $signal) -ne (Norm $c.signal_word)) { $row.Issues += "Signal word: EPA says '$signal', database has '$($c.signal_word)'" }
-  if ($signal -and -not $c.signal_word) { $row.Info += "EPA signal word '$signal' (not recorded in database)" }
-  if ($null -ne $rup -and "$rup" -ne '') {
-    $epaRup = (Norm $rup) -match '^(Y|YES|TRUE|1)'
-    if ($epaRup -ne [bool]$c.restricted_use) { $row.Issues += "Restricted use: EPA says $(if ($epaRup) {'yes'} else {'no'}), database says $(if ($c.restricted_use) {'yes'} else {'no'})" }
-  }
-  if ($row.Latest) {
-    if (-not $c.label_version) { $row.Info += "Newest EPA-accepted label: $($row.Latest). No label version recorded in the database yet." }
+    $row.EpaName = "$($item.productname)"
+    if ("$($item.product_status)" -and "$($item.product_status)" -notmatch '^(?i)active') { $row.Issues += "EPA status is '$($item.product_status)'" }
+    if ("$($item.cancel_flag)" -match '^(?i)y') { $row.Issues += "EPA shows this registration as cancelled ($($item.cancellationreason))" }
+
+    $signal = "$($item.signal_word)"
+    if ($signal -and $c.signal_word -and (Norm $signal) -ne (Norm $c.signal_word)) { $row.Issues += "Signal word: EPA says '$signal', database has '$($c.signal_word)'" }
+    if ($signal -and -not $c.signal_word) { $row.Info += "EPA signal word '$signal' (not in the database)" }
+
+    if ("$($item.rup_yn)") {
+      $epaRup = "$($item.rup_yn)" -match '^(?i)y'
+      if ($epaRup -ne [bool]$c.restricted_use) { $row.Issues += "Restricted use: EPA says $(if ($epaRup) {'yes'} else {'no'}), database says $(if ($c.restricted_use) {'yes'} else {'no'})" }
+    }
+
+    $pdfs = @()
+    foreach ($p in @($item.pdffiles)) {
+      if (-not $p.pdffile) { continue }
+      $d = EpaDate $p.pdffile_accepted_date $p.pdffile
+      if ($d) { $pdfs += [pscustomobject]@{ File = "$($p.pdffile)"; Date = $d } }
+    }
+    $pdfs = @($pdfs | Sort-Object Date)
+    if (-not $pdfs.Count) { $row.Info += 'EPA lists no dated label PDFs'; continue }
+    $newest = $pdfs[$pdfs.Count - 1]
+    $row.Latest = $newest.Date.ToString('yyyy-MM-dd')
+
+    if (-not $c.label_version) { $row.Info += "No label version recorded in the database yet" }
     else {
-      $have = $null
-      if ([datetime]::TryParse($c.label_version, [ref]$have) -and $have -lt [datetime]$row.Latest) {
+      $have = [datetime]::MinValue
+      if ([datetime]::TryParse("$($c.label_version)", [ref]$have) -and $have -lt $newest.Date) {
         $row.Issues += "Newer label at EPA ($($row.Latest)) than the version in the database ($($c.label_version)) - check the plant-back intervals"
       }
     }
-  } else { $row.Info += "Couldn't find label dates in EPA's record (see the raw file)" }
-  if (-not $c.label_checked -and $c.label_source) { $row.Info += 'Label data in the database has not been checked yet' }
-  $rows += [pscustomobject]$row
+
+    # Download the newest label PDF (skipped if already downloaded)
+    $dir = Join-Path $LabelDir ($c.epa_reg_no -replace '[^\w-]', '_')
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $dest = Join-Path $dir $newest.File
+    if (Test-Path $dest) { $row.Info += "Newest label already downloaded" }
+    else {
+      try {
+        Invoke-WebRequest -Uri "https://www3.epa.gov/pesticides/chem_search/ppls/$($newest.File)" -OutFile $dest -TimeoutSec 180 -UseBasicParsing
+        $row.Info += "NEW label PDF downloaded ($($newest.File))"; $row.NewPdf = $true
+      } catch {
+        Remove-Item -ErrorAction SilentlyContinue $dest
+        $row.Info += "Couldn't download the label PDF: $($_.Exception.Message)"
+      }
+    }
+    if (-not $c.label_checked -and $c.label_source) { $row.Info += 'Label data in the database has not been checked yet' }
+  } catch {
+    $row.Issues += "Error while checking: $($_.Exception.Message) (line $($_.InvocationInfo.ScriptLineNumber))"
+    "$($c.name): $($_.Exception.Message) at line $($_.InvocationInfo.ScriptLineNumber)" | Add-Content (Join-Path $OutDir 'errors.log')
+  } finally {
+    $rows += [pscustomobject]$row
+  }
 }
 
 # ---- 3. Report
