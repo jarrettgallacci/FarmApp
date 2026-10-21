@@ -81,7 +81,7 @@ const fieldName = (id) => fieldById(id)?.name ?? '';
 const CRUD = {
   fields: {
     table: 'fields', pk: 'field_id', title: 'Fields', singular: 'field', order: ['sort_order', 'name'],
-    search: true, refreshRefs: true,
+    search: true, refreshRefs: true, allowDelete: true,
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'farm_unit', label: 'Farm unit', type: 'text', list: true },
@@ -340,12 +340,56 @@ function openForm(cfg, row, onDone) {
   const del = $('[data-act=del]', dlg);
   if (del) del.onclick = async () => {
     if (!confirm(`Delete this ${cfg.singular}? This can't be undone.`)) return;
-    try {
-      await q(sb.from(cfg.table).delete().eq(cfg.pk, row[cfg.pk]));
-      await finish('Deleted');
-    } catch { /* usually "still referenced" — message already shown */ }
+    const { error } = await sb.from(cfg.table).delete().eq(cfg.pk, row[cfg.pk]);
+    if (!error) return finish('Deleted');
+    const fn = DELETE_EVERYWHERE[cfg.table];
+    if (error.code !== '23503' || !fn) return toast(error.message, true);
+    deleteEverythingDialog(cfg, row, fn, finish);
   };
   dlg.showModal();
+}
+
+// When a normal delete is blocked by attached records, offer to hide it (inactive)
+// or delete it with everything attached (functions in sql/delete_helpers.sql).
+const DELETE_EVERYWHERE = {
+  fields: { fn: 'delete_field_everywhere', arg: 'p_field',
+    what: 'its split halves, water order history, crop years and harvests, chemical records, work records and leases' },
+  turnouts: { fn: 'delete_turnout_everywhere', arg: 'p_turnout',
+    what: 'its water order history. Fields on this turnout are kept but will have no turnout' },
+  ditch_riders: { fn: 'delete_rider_everywhere', arg: 'p_rider',
+    what: 'their turnouts and the water order history for those turnouts. Fields are kept but will have no turnout' },
+};
+
+function deleteEverythingDialog(cfg, row, spec, onDone) {
+  const dlg = $('#dialog');
+  const name = String(row.name ?? '');
+  const canHide = 'active' in row;
+  dlg.innerHTML = `<form class="form">
+    <h3>${esc(name)} has records attached</h3>
+    <p>This ${esc(cfg.singular)} can't be deleted on its own because other records point to it.</p>
+    ${canHide ? `<p><b>Mark inactive</b> hides it everywhere but keeps its history. Use this for anything real.</p>` : ''}
+    <p><b>Delete everything</b> removes it along with ${esc(spec.what)}. Only for test entries; this can't be undone.</p>
+    <label>To delete everything, type the name: <b>${esc(name)}</b><input name="confirm" autocomplete="off"></label>
+    <div class="actions">
+      <button type="button" class="danger" data-act="nuke" disabled>Delete everything</button>
+      <span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button>
+      ${canHide ? '<button type="button" class="primary" data-act="hide">Mark inactive</button>' : ''}
+    </div></form>`;
+  const input = $('[name=confirm]', dlg);
+  const nuke = $('[data-act=nuke]', dlg);
+  input.oninput = () => { nuke.disabled = input.value.trim() !== name.trim(); };
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  const hide = $('[data-act=hide]', dlg);
+  if (hide) hide.onclick = async () => {
+    try { await q(sb.from(cfg.table).update({ active: false }).eq(cfg.pk, row[cfg.pk])); await onDone('Marked inactive'); } catch { /* shown */ }
+  };
+  nuke.onclick = async () => {
+    nuke.disabled = true;
+    try { await q(sb.rpc(spec.fn, { [spec.arg]: row[cfg.pk] })); await onDone('Deleted'); }
+    catch { nuke.disabled = false; }
+  };
+  if (!dlg.open) dlg.showModal();
 }
 
 // =====================================================================
