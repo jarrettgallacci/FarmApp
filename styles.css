@@ -423,3 +423,18 @@ label.check.small { font-size: .88rem; display: flex; align-items: center; gap: 
   .chem-table tr.is-planned td { background: none; }
   .chem-table tr.is-planned { background: var(--amber-soft); }
 }
+
+/* Labels and plant-back */
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .5rem; }
+.facts div { background: var(--accent-tint); border-radius: 8px; padding: .45rem .6rem; display: flex; flex-direction: column; }
+.label-file { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; padding: .6rem; border: 1px dashed var(--border); border-radius: 10px; }
+.button-like { display: inline-block; border: 1px solid var(--border); background: var(--surface); border-radius: 10px;
+  padding: .5rem .95rem; cursor: pointer; font-weight: 500; color: var(--text) !important; }
+.button-like:hover { border-color: var(--accent); }
+table.rules td { white-space: normal; vertical-align: top; }
+.rot-warn { background: #fde8ec; border: 1px solid #f5b5c2; color: #7f1d1d; border-radius: 10px; padding: .6rem .8rem; margin: .4rem 0; }
+.rot-warn ul { margin: .4rem 0; padding-left: 1.1rem; }
+.rot-warn li { margin-bottom: .35rem; }
+.rot-warn .muted { color: #9f4b56; }
+.rot-flag { display: inline-block; margin-left: .35rem; font-size: .74rem; font-weight: 700; color: #be123c; }
+.rot-key { color: #e11d48; font-weight: 600; }

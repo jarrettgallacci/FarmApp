@@ -144,11 +144,14 @@ const CRUD = {
   chemicals: {
     table: 'chemicals', pk: 'chemical_id', title: 'Chemicals', singular: 'chemical', order: 'name',
     allowDelete: true, refreshRefs: true, search: true,
+    rowAction: { label: 'Label', fn: (row, reload) => openLabelDialog(chemById(row.chemical_id) ?? row, reload) },
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'type', label: 'Type', type: 'select', required: true, list: true, options: () => CHEM_TYPES },
       { key: 'active_ingredient', label: 'Active ingredient', type: 'text', list: true },
       { key: 'manufacturer', label: 'Manufacturer', type: 'text', list: true },
+      { key: 'label_status', label: 'Label', list: true, form: false,
+        compute: (r) => [r.label_path ? 'PDF' : null, r.label_source ? (r.label_checked ? 'checked' : 'data not checked') : null].filter(Boolean).join(' · ') },
       { key: 'epa_reg_no', label: 'EPA reg. no.', type: 'text' },
       { key: 'active', label: 'Active (shows when picking products)', type: 'checkbox', default: true, list: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
@@ -218,7 +221,7 @@ async function renderCrud(cfg, el) {
           ${cols.map((c) => c.type === 'color'
             ? `<td><span class="swatch" style="background:${esc(r[c.key] || c.fallback(r))}"></span></td>`
             : `<td>${esc(display(c, r))}</td>`).join('')}
-          <td><button class="small" data-edit="${r[cfg.pk]}">Edit</button></td></tr>`).join('')
+          <td class="nowrap"><button class="small" data-edit="${r[cfg.pk]}">Edit</button>${cfg.rowAction ? ` <button class="small primary" data-row-act="${r[cfg.pk]}">${esc(cfg.rowAction.label)}</button>` : ''}</td></tr>`).join('')
         : `<tr><td colspan="${cols.length + 1}" class="muted">Nothing here yet.</td></tr>`}
       </tbody></table></div>`;
 
@@ -226,6 +229,8 @@ async function renderCrud(cfg, el) {
   $('[data-act=add]', el).onclick = () => openForm(cfg, null, reload);
   $$('[data-edit]', el).forEach((b) => (b.onclick = () =>
     openForm(cfg, rows.find((r) => String(r[cfg.pk]) === b.dataset.edit), reload)));
+  $$('[data-row-act]', el).forEach((b) => (b.onclick = () =>
+    cfg.rowAction.fn(rows.find((r) => String(r[cfg.pk]) === b.dataset.rowAct), reload)));
 
   const search = $('.search', el);
   if (search) search.oninput = () => {
@@ -879,7 +884,7 @@ async function renderCrops(el) {
       continue;
     }
     list.forEach((r, i) => {
-      body += `<tr>${i === 0 ? nameCell(list.length) : ''}
+      body += `<tr data-cyrow="${r.crop_year_id}">${i === 0 ? nameCell(list.length) : ''}
         <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span>${planTag(r)}${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}
           ${standNote(r, cropSeason)}${isoTag(r)}
           ${r.variety ? `<span class="v-inline">${esc(r.variety)}</span>` : ''}</td>
@@ -913,6 +918,14 @@ async function renderCrops(el) {
   $$('[data-edit-cy]', el).forEach((b) => (b.onclick = () =>
     openCropYear(rows.find((r) => r.crop_year_id === Number(b.dataset.editCy)), null, reload)));
   $$('[data-history]', el).forEach((b) => (b.onclick = () => openFieldHistory(Number(b.dataset.history), reload)));
+  loadRotationData().then((d) => {
+    for (const r of rows) {
+      if (r.season !== cropSeason || r.grown_by) continue;
+      const c = rotationConflicts(d, r.field_id, r.crop_id, r.planting_date || `${r.season}-03-01`);
+      const cell = $(`[data-cyrow="${r.crop_year_id}"] td:not(.field-cell)`, el);
+      if (c.length && cell) cell.insertAdjacentHTML('beforeend', ` <span class="rot-flag" title="${esc(c.map((x) => `${chemById(x.app.chemical_id)?.name}: not before ${x.earliest}`).join('; '))}">⚠ plant-back</span>`);
+    }
+  }).catch(() => {});
 }
 
 async function openFieldHistory(fieldId, onChange) {
@@ -925,7 +938,8 @@ async function openFieldHistory(fieldId, onChange) {
     <div class="dialog-head"><div><h3>${esc(f.name)}</h3>
       <p class="muted small">${[f.farm_unit && 'Farm unit ' + esc(f.farm_unit), f.block && 'Block ' + esc(f.block),
         f.acres != null && num(f.acres, 0) + ' acres', esc(tenureOf(f))].filter(Boolean).join(' · ')}</p></div>
-      <button class="primary small" data-act="add">Add crop year</button></div>
+      <span class="row"><button class="small" data-act="share">Share location</button>
+      <button class="primary small" data-act="add">Add crop year</button></span></div>
     ${rows.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Season</th><th>Crop</th><th>Variety</th><th>Planted</th><th class="r">Yield</th><th></th></tr></thead>
       <tbody>${rows.map((r) => `<tr>
@@ -938,6 +952,7 @@ async function openFieldHistory(fieldId, onChange) {
 
   const reopen = () => { onChange(); openFieldHistory(fieldId, onChange); };
   $('[data-act=close]', dlg).onclick = () => dlg.close();
+  $('[data-act=share]', dlg).onclick = () => shareFields([f]);
   $('[data-act=add]', dlg).onclick = () =>
     openCropYear(null, { field_id: fieldId, season: new Date().getFullYear() }, reopen);
   $$('[data-edit-cy]', dlg).forEach((b) => (b.onclick = () =>
@@ -1018,6 +1033,7 @@ async function openCropYear(row, defaults, onDone) {
       </div>
       <label>Overage terms<input name="contract_overage" value="${esc(v.contract_overage ?? '')}"></label>
     </fieldset>
+    <div id="rot-box"></div>
     <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
     <div class="actions">
       ${row ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
@@ -1028,6 +1044,16 @@ async function openCropYear(row, defaults, onDone) {
 
   const form = $('form', dlg);
   const el = form.elements;
+  let rotData = null;
+  const checkRotation = () => {
+    const box = $('#rot-box', dlg);
+    if (!rotData || !el.field_id.value || !el.crop_id.value || !el.season.value) { box.innerHTML = ''; return; }
+    const date = el.planting_date.value || `${el.season.value}-03-01`;
+    box.innerHTML = conflictHtml(rotationConflicts(rotData, Number(el.field_id.value), Number(el.crop_id.value), date), !el.planting_date.value);
+  };
+  loadRotationData().then((d) => { rotData = d; checkRotation(); }).catch(() => {});
+  ['field_id', 'crop_id', 'season', 'planting_date'].forEach((k) => el[k].addEventListener('change', checkRotation));
+  el.season.addEventListener('input', checkRotation);
   const fillVarieties = () => {
     $('#variety-options', dlg).innerHTML = varietiesFor(Number(el.crop_id.value))
       .map((x) => `<option value="${esc(x)}"></option>`).join('');
@@ -1202,6 +1228,7 @@ async function renderMap(el) {
   const cropsByField = new Map();
   rows.forEach((r) => cropsByField.set(r.field_id, [...(cropsByField.get(r.field_id) ?? []), r]));
   mapState.cropsByField = cropsByField;
+  mapState.rot = await loadRotationData().catch(() => null);
 
   el.innerHTML = `
     <div class="section-head"><h2>Farm map</h2>
@@ -1280,11 +1307,19 @@ function drawFields() {
       else showFieldInfo(f);
     });
     if (mapState.selected?.has(f.field_id)) layer.setStyle({ color: '#ffd400', weight: 4, dashArray: null });
+    else if (!mapState.editMode && fieldConflicts(f).length) layer.setStyle({ color: '#e11d48', weight: 3.5, dashArray: null });
     mapState.layers.push({ field: f, layer });
   }
 }
 
 // ---------- Side panel ----------
+function fieldConflicts(f) {
+  if (!mapState.rot) return [];
+  return (mapState.cropsByField.get(f.field_id) ?? [])
+    .filter((r) => r.season === mapState.season && !r.grown_by)
+    .flatMap((r) => rotationConflicts(mapState.rot, f.field_id, r.crop_id, r.planting_date || `${r.season}-03-01`).map((c) => ({ ...c, crop: r })));
+}
+
 function toggleSelect(f) {
   mapState.selected ??= new Set();
   if (mapState.selected.has(f.field_id)) mapState.selected.delete(f.field_id);
@@ -1305,6 +1340,7 @@ function drawSelectSide() {
       <div class="stack">
         <button class="primary" data-act="log-chem">Log chemical application</button>
         <button data-act="plan-chem">Plan chemical application</button>
+        <button data-act="share">Share locations</button>
         <button class="ghost small" data-act="clear">Clear selection</button>
       </div>` : '<p class="muted">Nothing selected yet.</p>'}`;
   const go = (status) => openChemForm({ fieldIds: ids, status }, () => { mapState.selected = new Set(); drawFields(); drawSide(); });
@@ -1312,6 +1348,7 @@ function drawSelectSide() {
   b('log-chem', () => go('done'));
   b('plan-chem', () => go('planned'));
   b('clear', () => { mapState.selected = new Set(); drawFields(); drawSide(); });
+  b('share', () => shareFields(picked));
 }
 
 function drawSide(info) {
@@ -1337,7 +1374,7 @@ function drawSide(info) {
         <span class="muted">${Math.round(ac).toLocaleString()} ac</span></li>`).join('')}</ul>`
       : '<p class="muted">No crops entered for this season.</p>'}
     <p class="muted small">Acres are from your crop records. Long dashes = more than one crop or variety.
-      Pale with a white dotted edge = planned, not planted. Click a field for details.</p>
+      Pale with a white dotted edge = planned, not planted. <span class="rot-key">Red edge</span> = plant-back conflict. Click a field for details.</p>
     ${isoFields().length ? `<h4>Isolation</h4>
       <label class="check small"><input type="checkbox" data-act="all-rings" ${mapState.allRings ? 'checked' : ''}> Show all isolation rings</label>
       <ul class="missing">${isoFields().map(({ f, r }) => `<li><span>${esc(f.name)} <span class="muted small">${esc(cropName(r.crop_id))} · ${isoText(r.isolation_ft)}</span></span>
@@ -1409,10 +1446,13 @@ function showFieldInfo(f) {
       </div>`).join('') : `<p class="muted">Nothing entered for ${mapState.season}.</p>`}
     <p class="muted small">Outline is ${num(drawn, 1)} ac.</p>
     ${isoSection(f, crops)}
+    ${(() => { const c = fieldConflicts(f); return c.length ? conflictHtml(c, c.some((x) => !x.crop.planting_date)) : ''; })()}
     <div class="actions wrap"><button data-act="history">Crop history</button>
+      <button data-act="share">Share location</button>
       <button class="primary" data-act="log-chem">Log chemical</button></div>
     <h4>Recent chemical</h4><div id="recent-chem"><p class="muted small">Loading…</p></div>`;
   $('[data-act=log-chem]').onclick = () => openChemForm({ fieldIds: [f.field_id] }, () => showFieldInfo(f));
+  $('#map-side [data-act=share]').onclick = () => shareFields([f]);
   recentChem(f.field_id).then((rows) => {
     const box = $('#recent-chem');
     if (!box) return;
@@ -1940,6 +1980,7 @@ async function openChemForm(opts, onDone) {
         }
         if (used.length) await q(sb.from('chemical_event_products').insert(lineRows(eventId)));
       }
+      rotationCache.at = 0;
       dlg.close();
       toast(ids.length > 1 ? `Saved ${ids.length} records` : 'Saved');
       onDone?.();
@@ -1967,6 +2008,240 @@ async function recentChem(fieldId, limit = 5) {
     .eq('field_id', fieldId).order('applied_on', { ascending: false }).limit(limit));
   rows.forEach((r) => r.chemical_event_products.sort((a, b) => a.position - b.position));
   return rows;
+}
+
+// =====================================================================
+// Chemical labels: label facts, PDF, and rotation (plant-back) rules.
+// Rotation conflicts warn when a crop is planned or planted too soon
+// after a product on the same field. They never block saving.
+// =====================================================================
+const ruleWait = (r) => (r.seasons_after != null ? `not until ${r.seasons_after === 1 ? 'the next season' : `${r.seasons_after} seasons later`}`
+  : Number(r.months) === 0 ? 'anytime' : `${Number(r.months)} month${Number(r.months) === 1 ? '' : 's'}`);
+
+async function openLabelDialog(chem, onDone) {
+  const rules = await q(sb.from('chemical_rotation_rules').select('*').eq('chemical_id', chem.chemical_id));
+  const named = rules.filter((r) => r.crop_id != null).sort((a, b) => cropName(a.crop_id).localeCompare(cropName(b.crop_id)));
+  const other = rules.find((r) => r.crop_id == null);
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  const fact = (label, value) => (value ? `<div><span class="muted small">${label}</span><b>${esc(value)}</b></div>` : '');
+  dlg.innerHTML = `<div class="form">
+    <div class="dialog-head"><div><h3>${esc(chem.name)}</h3>
+      <p class="muted small">${esc(CHEM_TYPES.find(([k]) => k === chem.type)?.[1] ?? '')}${chem.manufacturer ? ' · ' + esc(chem.manufacturer) : ''}</p></div>
+      <span class="badge ${chem.label_checked ? 'new' : 'down'}">${chem.label_checked ? 'Checked' : 'Not checked yet'}</span></div>
+    <div class="facts">
+      ${fact('EPA reg. no.', chem.epa_reg_no)}${fact('Active ingredient', chem.active_ingredient)}
+      ${fact('Signal word', chem.signal_word)}${fact('Re-entry (REI)', chem.rei_hours != null ? `${Number(chem.rei_hours)} hours` : '')}
+      ${chem.restricted_use ? '<div><span class="muted small">Restricted use</span><b>Yes, certified applicator</b></div>' : ''}
+    </div>
+    ${chem.chemigation ? `<p class="small"><b>Chemigation:</b> ${esc(chem.chemigation)}</p>` : ''}
+    ${chem.label_notes ? `<p class="small">${esc(chem.label_notes)}</p>` : ''}
+    ${chem.label_source ? `<p class="muted small">From: ${esc(chem.label_source)}</p>` : ''}
+
+    <div class="label-file">
+      ${chem.label_path ? `<button type="button" class="primary" data-act="view">View label PDF</button>` : '<span class="muted">No label PDF attached.</span>'}
+      <label class="button-like">${chem.label_path ? 'Replace PDF' : 'Upload label PDF'}<input type="file" accept="application/pdf" data-act="upload" hidden></label>
+    </div>
+
+    <h4>Plant-back intervals</h4>
+    ${rules.length ? `<div class="table-wrap"><table class="rules">
+      <thead><tr><th>Crop</th><th>Wait</th><th>Conditions</th><th>Page</th><th></th></tr></thead>
+      <tbody>${[...named, ...(other ? [other] : [])].map((r) => `<tr>
+        <td class="nowrap"><b>${r.crop_id ? esc(cropName(r.crop_id)) : 'All other crops'}</b></td>
+        <td class="nowrap">${esc(ruleWait(r))}</td>
+        <td class="small">${esc(r.conditions ?? '')}</td>
+        <td class="nowrap muted small">${esc(r.label_page ?? '')}</td>
+        <td class="r"><button type="button" class="small" data-rule="${r.rule_id}">Edit</button></td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted small">No plant-back intervals recorded for this product.</p>'}
+    <div class="row wrap"><button type="button" class="small" data-act="add-rule">+ Add interval</button></div>
+
+    <div class="actions">
+      <label class="check small"><input type="checkbox" data-act="checked" ${chem.label_checked ? 'checked' : ''}> I've checked this against the label</label>
+      <span class="spacer"></span>
+      <button type="button" data-act="close">Close</button>
+    </div></div>`;
+
+  const reopen = async () => { await loadRefs(); openLabelDialog(chemById(chem.chemical_id), onDone); };
+  $('[data-act=close]', dlg).onclick = () => { dlg.close(); onDone?.(); };
+  $('[data-act=checked]', dlg).onchange = async (e) => {
+    try { await q(sb.from('chemicals').update({ label_checked: e.target.checked }).eq('chemical_id', chem.chemical_id)); toast(e.target.checked ? 'Marked as checked' : 'Marked as not checked'); reopen(); }
+    catch { e.target.checked = !e.target.checked; }
+  };
+  const view = $('[data-act=view]', dlg);
+  if (view) view.onclick = async () => {
+    const win = window.open('', '_blank');
+    const { data, error } = await sb.storage.from('labels').createSignedUrl(chem.label_path, 3600);
+    if (error) { win?.close(); return toast(error.message, true); }
+    if (win) win.location = data.signedUrl; else window.location.href = data.signedUrl;
+  };
+  $('[data-act=upload]', dlg).onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024) return toast('That file is over 25 MB', true);
+    const path = `${chem.chemical_id}/${file.name.replace(/[^\w.-]+/g, '_')}`;
+    toast('Uploading…');
+    const { error } = await sb.storage.from('labels').upload(path, file, { upsert: true, contentType: 'application/pdf' });
+    if (error) return toast(error.message, true);
+    try {
+      await q(sb.from('chemicals').update({ label_path: path }).eq('chemical_id', chem.chemical_id));
+      toast('Label uploaded');
+      reopen();
+    } catch { /* shown */ }
+  };
+  $('[data-act=add-rule]', dlg).onclick = () => openRuleForm(chem, null, reopen);
+  $$('[data-rule]', dlg).forEach((b) => (b.onclick = () => openRuleForm(chem, rules.find((r) => r.rule_id === Number(b.dataset.rule)), reopen)));
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+function openRuleForm(chem, rule, onDone) {
+  const r = rule ?? { months: '', seasons_after: null };
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  dlg.innerHTML = `<form class="form">
+    <h3>${rule ? 'Edit' : 'Add'} plant-back interval</h3>
+    <p class="muted small">${esc(chem.name)}</p>
+    <label>Crop<select name="crop_id"><option value="">All other crops on the label</option>
+      ${refs.crops.map((c) => `<option value="${c.crop_id}" ${c.crop_id === r.crop_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+    <div class="row2">
+      <label>Wait type<select name="kind">
+        <option value="months" ${r.seasons_after == null ? 'selected' : ''}>Months after application</option>
+        <option value="seasons" ${r.seasons_after != null ? 'selected' : ''}>Whole seasons later</option></select></label>
+      <label id="amount-wrap">Months<input type="number" name="amount" step="0.5" min="0" required
+        value="${esc(r.seasons_after != null ? r.seasons_after : r.months ?? '')}"></label>
+    </div>
+    <p class="muted small" id="kind-hint"></p>
+    <label>Conditions<textarea name="conditions" rows="3" placeholder="Rate limits, rainfall + irrigation, pH, tillage, bioassay…">${esc(r.conditions ?? '')}</textarea></label>
+    <label>Label page<input name="label_page" value="${esc(r.label_page ?? '')}" placeholder="e.g. p22"></label>
+    <div class="actions">
+      ${rule ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
+      <span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button></div></form>`;
+  const form = $('form', dlg);
+  const el = form.elements;
+  const sync = () => {
+    const seasons = el.kind.value === 'seasons';
+    $('#amount-wrap', dlg).firstChild.textContent = seasons ? 'Seasons' : 'Months';
+    $('#kind-hint', dlg).textContent = seasons ? '1 = not until next season, 2 = skip a season (e.g. applied 2025, earliest 2027).' : '0 = anytime.';
+  };
+  el.kind.onchange = sync;
+  sync();
+  $('[data-act=cancel]', dlg).onclick = onDone;
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const n = Number(el.amount.value);
+    const data = {
+      chemical_id: chem.chemical_id, crop_id: el.crop_id.value ? Number(el.crop_id.value) : null,
+      months: el.kind.value === 'months' ? n : null, seasons_after: el.kind.value === 'seasons' ? Math.round(n) : null,
+      conditions: el.conditions.value.trim() || null, label_page: el.label_page.value.trim() || null,
+    };
+    try {
+      if (rule) await q(sb.from('chemical_rotation_rules').update(data).eq('rule_id', rule.rule_id));
+      else await q(sb.from('chemical_rotation_rules').insert(data));
+      rotationCache.at = 0;
+      onDone();
+    } catch { /* shown */ }
+  };
+  const del = $('[data-act=del]', dlg);
+  if (del) del.onclick = async () => {
+    if (!confirm('Delete this interval?')) return;
+    try { await q(sb.from('chemical_rotation_rules').delete().eq('rule_id', rule.rule_id)); rotationCache.at = 0; onDone(); } catch { /* shown */ }
+  };
+}
+
+// ---------- Rotation conflict check ----------
+// Loads every application of a product that has rotation rules (cached for a few minutes).
+const rotationCache = { at: 0, rules: [], apps: [] };
+async function loadRotationData() {
+  if (Date.now() - rotationCache.at < 5 * 60 * 1000) return rotationCache;
+  const rules = await q(sb.from('chemical_rotation_rules').select('*'));
+  const ids = [...new Set(rules.map((r) => r.chemical_id))];
+  const apps = [];
+  if (ids.length) {
+    const since = `${new Date().getFullYear() - 5}-01-01`;
+    for (let from = 0; ; from += 1000) {
+      const page = await q(sb.from('chemical_event_products')
+        .select('chemical_id, rate, rate_unit, rate_basis, rate_text, chemical_events!inner(field_id, applied_on, status)')
+        .in('chemical_id', ids).gte('chemical_events.applied_on', since).range(from, from + 999));
+      apps.push(...page);
+      if (page.length < 1000) break;
+    }
+  }
+  Object.assign(rotationCache, { at: Date.now(), rules, apps });
+  return rotationCache;
+}
+
+// Fields whose chemical history affects this field: itself, its parent, and its split halves.
+const relatedFieldIds = (fieldId) => {
+  const f = fieldById(fieldId);
+  return [fieldId, f?.parent_field_id, ...refs.fields.filter((x) => x.parent_field_id === fieldId).map((x) => x.field_id)].filter(Boolean);
+};
+
+// plantDate: 'YYYY-MM-DD' (if no planting date yet, March 1 of the season is assumed)
+function rotationConflicts(data, fieldId, cropId, plantDate) {
+  const out = [];
+  const ids = relatedFieldIds(fieldId);
+  const plant = new Date(plantDate + 'T12:00:00');
+  for (const a of data.apps) {
+    const ev = a.chemical_events;
+    if (!ids.includes(ev.field_id) || ev.status === 'planned') continue;
+    const applied = new Date(ev.applied_on + 'T12:00:00');
+    if (applied > plant) continue;
+    const forChem = data.rules.filter((r) => r.chemical_id === a.chemical_id);
+    const rule = forChem.find((r) => r.crop_id === cropId) ?? forChem.find((r) => r.crop_id == null);
+    if (!rule) continue;
+    let earliest;
+    if (rule.seasons_after != null) earliest = new Date(applied.getFullYear() + rule.seasons_after, 0, 1);
+    else { earliest = new Date(applied); earliest.setMonth(earliest.getMonth() + Math.floor(Number(rule.months))); earliest.setDate(earliest.getDate() + Math.round((Number(rule.months) % 1) * 30)); }
+    if (plant < earliest) out.push({ app: a, rule, applied: ev.applied_on, fieldId: ev.field_id, earliest: localDate(earliest) });
+  }
+  // keep the latest-clearing conflict per product
+  const best = new Map();
+  for (const c of out) { const k = c.app.chemical_id; if (!best.has(k) || c.earliest > best.get(k).earliest) best.set(k, c); }
+  return [...best.values()].sort((a, b) => b.earliest.localeCompare(a.earliest));
+}
+
+function conflictHtml(list, assumedDate) {
+  if (!list.length) return '';
+  return `<div class="rot-warn"><b>⚠ Plant-back conflict${list.length > 1 ? 's' : ''}</b>
+    ${assumedDate ? '<p class="small muted">No planting date yet, so March 1 of the season is assumed.</p>' : ''}
+    <ul>${list.map((c) => {
+      const chem = chemById(c.app.chemical_id);
+      return `<li><b>${esc(chem?.name ?? '?')}</b> applied ${esc(fmtDate(c.applied))} ${new Date(c.applied + 'T12:00').getFullYear()}${c.fieldId !== undefined && fieldName(c.fieldId) ? ` on ${esc(fieldName(c.fieldId))}` : ''}:
+        ${esc(ruleWait(c.rule))} for ${c.rule.crop_id ? esc(cropName(c.rule.crop_id)) : 'this crop'}, so not before <b>${esc(fmtDate(c.earliest))} ${c.earliest.slice(0, 4)}</b>.
+        ${c.rule.conditions ? `<div class="small muted">${esc(c.rule.conditions)}${c.rule.label_page ? ` (${esc(c.rule.label_page)})` : ''}</div>` : ''}
+        ${chem && !chem.label_checked ? '<div class="small muted">This product\'s label data hasn\'t been checked yet.</div>' : ''}</li>`;
+    }).join('')}</ul>
+    <p class="small muted">A warning only. The label is the final word, including any bioassay or rate exceptions.</p></div>`;
+}
+
+// ---------- Share a field's location ----------
+function fieldPoint(f) {
+  if (!f?.boundary) return null;
+  const p = f.boundary.properties ?? {};
+  if (p.shape === 'pivot') {
+    const span = spanOf(p);
+    if (span >= 360) return p.center;
+    return atBearing(p, p.start + span / 2, p.radius * 0.5);   // middle of a half pivot
+  }
+  const ring = f.boundary.geometry.coordinates[0].slice(0, -1);
+  return ring.reduce((a, x) => [a[0] + x[0] / ring.length, a[1] + x[1] / ring.length], [0, 0]);
+}
+async function shareFields(fields) {
+  const withPts = fields.map((f) => ({ f, pt: fieldPoint(f) }));
+  const missing = withPts.filter((x) => !x.pt).map((x) => x.f.name);
+  const lines = withPts.filter((x) => x.pt).map(({ f, pt }) =>
+    `${f.name}${f.acres != null ? ` (${num(f.acres, 0)} ac)` : ''}: https://www.google.com/maps/search/?api=1&query=${pt[1].toFixed(6)},${pt[0].toFixed(6)}`);
+  if (!lines.length) return toast(`${missing.join(', ')} ${missing.length > 1 ? 'aren\'t' : 'isn\'t'} on the map yet`, true);
+  const text = lines.join('\n');
+  try {
+    if (navigator.share) { await navigator.share({ title: lines.length > 1 ? 'Field locations' : `Field ${fields[0].name}`, text }); }
+    else { await navigator.clipboard.writeText(text); toast(lines.length > 1 ? 'Links copied' : 'Link copied'); }
+  } catch (e) {
+    if (e?.name !== 'AbortError') { try { await navigator.clipboard.writeText(text); toast('Link copied'); } catch { toast('Couldn\'t share — try again', true); } }
+  }
+  if (missing.length) toast(`Not on the map yet: ${missing.join(', ')}`, true);
 }
 
 // =====================================================================
