@@ -710,20 +710,23 @@ async function saveOrder(status, body, message) {
 // =====================================================================
 const fmtLong = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
-function turnoutTotals(lineMap) {
-  const totals = new Map();
-  for (const f of orderParents()) {
-    const l = lineMap.get(f.field_id);
-    if (l?.is_on) totals.set(f.turnout_id, (totals.get(f.turnout_id) || 0) + Number(l.cfs || 0));
-  }
-  return totals;
+// Fields on the water order, in water-order order, grouped by ditch rider.
+function fieldsByRider() {
+  return refs.riders.map((r) => ({
+    rider: r,
+    fields: refs.turnouts.filter((t) => t.rider_id === r.rider_id)
+      .flatMap((t) => orderParents().filter((f) => f.turnout_id === t.turnout_id)),
+  })).filter((g) => g.fields.length);
 }
 
-// Group a list of { turnout, ... } by ditch rider, in rider order.
-function byRider(items) {
-  return refs.riders
-    .map((r) => ({ rider: r, items: items.filter((i) => i.turnout.rider_id === r.rider_id) }))
-    .filter((g) => g.items.length);
+// What one field is doing in an order: off, or on at x CFS (and which halves).
+function fieldState(f, o) {
+  const l = o.lines.get(f.field_id);
+  const on = !!l?.is_on;
+  const subs = subunitsOf(f.field_id);
+  const halves = on && subs.length ? subs.filter((sf) => o.subs.get(sf.field_id)) : [];
+  const name = halves.length && halves.length < subs.length ? halves.map((h) => h.name).join(' + ') : f.name;
+  return { on, cfs: on ? Number(l.cfs || 0) : 0, name, halfKey: halves.map((h) => h.field_id).join(',') };
 }
 
 async function renderHome(el) {
@@ -739,37 +742,39 @@ async function renderHome(el) {
 
   const [current, previous] = recent;
   const changedToday = current?.order_date === today;
-  const none = { lines: new Map() };
+  const none = { lines: new Map(), subs: new Map() };
   const cur = current ? await linesFor(current.order_id) : none;
   const prev = changedToday && previous ? await linesFor(previous.order_id) : none;
 
-  const now = turnoutTotals(cur.lines);
-  const was = turnoutTotals(prev.lines);
 
-  const changes = changedToday
-    ? refs.turnouts
-        .map((t) => ({ turnout: t, a: was.get(t.turnout_id) || 0, b: now.get(t.turnout_id) || 0 }))
-        .filter((c) => Math.abs(c.a - c.b) >= 0.001)
-    : [];
-  const running = refs.turnouts
-    .filter((t) => now.has(t.turnout_id))
-    .map((t) => ({ turnout: t, cfs: now.get(t.turnout_id) }));
+  const groups = fieldsByRider().map((g) => ({
+    rider: g.rider,
+    rows: g.fields.map((f) => ({ f, a: fieldState(f, prev), b: fieldState(f, cur) })),
+  }));
+  const isChange = ({ a, b }) => a.on !== b.on || Math.abs(a.cfs - b.cfs) >= 0.001 || (a.on && b.on && a.halfKey !== b.halfKey);
+  const changeGroups = changedToday
+    ? groups.map((g) => ({ rider: g.rider, rows: g.rows.filter(isChange) })).filter((g) => g.rows.length) : [];
+  const onGroups = groups.map((g) => ({ rider: g.rider, rows: g.rows.filter((r) => r.b.on) })).filter((g) => g.rows.length);
+  const onCount = onGroups.reduce((n, g) => n + g.rows.length, 0);
+  const onCfs = onGroups.reduce((n, g) => n + g.rows.reduce((m, r) => m + r.b.cfs, 0), 0);
 
 
-  // ---- Water changes card
-  const changeLine = ({ turnout, a, b }) => {
-    let value, badge;
-    if (b === 0) { value = 'Off'; badge = '<span class="badge off">Off</span>'; }
-    else if (a === 0) { value = `${num(b)} CFS`; badge = '<span class="badge new">New</span>'; }
-    else { value = `${num(a)} → ${num(b)} CFS`; badge = b > a ? '<span class="badge up">Up</span>' : '<span class="badge down">Down</span>'; }
-    return `<li><span class="li-name">${esc(turnout.name)}</span><span class="li-value">${value} ${badge}</span></li>`;
+  // ---- Water changes card (by field)
+  const changeLine = ({ a, b }) => {
+    let value, badge, name = b.on ? b.name : a.name;
+    if (!b.on) { value = 'Off'; badge = '<span class="badge off">Off</span>'; }
+    else if (!a.on) { value = `On ${num(b.cfs)} CFS`; badge = '<span class="badge new">On</span>'; }
+    else if (a.halfKey !== b.halfKey && Math.abs(a.cfs - b.cfs) < 0.001) { name = b.name; value = `Moved from ${esc(a.name)}`; badge = '<span class="badge up">Move</span>'; }
+    else { value = `${num(a.cfs)} → ${num(b.cfs)} CFS`; badge = b.cfs > a.cfs ? '<span class="badge up">Up</span>' : '<span class="badge down">Down</span>'; }
+    return `<li><span class="li-name">${esc(name)}</span><span class="li-value">${value} ${badge}</span></li>`;
   };
+  const groupHtml = (gs, line) => gs.map((g) => `<div class="group"><h4>${esc(g.rider.name)}</h4>
+    <ul class="list">${g.rows.map(line).join('')}</ul></div>`).join('');
 
   let changesHtml;
   if (changedToday) {
-    changesHtml = changes.length
-      ? byRider(changes).map((g) => `<div class="group"><h4>${esc(g.rider.name)}</h4>
-          <ul class="list">${g.items.map(changeLine).join('')}</ul></div>`).join('')
+    changesHtml = changeGroups.length
+      ? groupHtml(changeGroups, changeLine)
       : `<p class="muted">Today's order is the same as the previous one. No changes.</p>`;
   } else if (todayRows[0]) {
     changesHtml = `<p class="notice">Today's order was saved as a draft but never sent, so it isn't counted.
@@ -786,12 +791,11 @@ async function renderHome(el) {
     : tmr.status === 'draft' ? '<span class="badge down">Draft, not sent</span>'
     : `<span class="badge new">Sent</span> <span class="muted">${tmr.submitted_at ? esc(fmtTime(tmr.submitted_at)) : ''}</span>`;
 
-  // ---- Running card
-  const runningHtml = running.length
-    ? byRider(running).map((g) => `<div class="group"><h4>${esc(g.rider.name)}</h4>
-        <ul class="list">${g.items.map((r) => `<li><span class="li-name">${esc(r.turnout.name)}</span>
-          <span class="li-value">${num(r.cfs)} CFS</span></li>`).join('')}</ul></div>`).join('')
-    : '<p class="muted">Nothing is running.</p>';
+  // ---- On after today's changes (by field)
+  const runningHtml = onGroups.length
+    ? groupHtml(onGroups, ({ b }) => `<li><span class="li-name">${esc(b.name)}</span><span class="li-value">${num(b.cfs)} CFS</span></li>`)
+      + `<p class="muted small total-line">${onCount} field${onCount === 1 ? '' : 's'} · ${num(onCfs)} CFS total</p>`
+    : '<p class="muted">Nothing is on.</p>';
 
   const needsOrder = (!tmr || tmr.status === 'draft') && new Date().getHours() * 60 + new Date().getMinutes() >= 14 * 60 + 30;
 
@@ -809,7 +813,7 @@ async function renderHome(el) {
     <div class="dash-grid">
       <div>
         <section class="card"><h3>Water changes today</h3>${changesHtml}</section>
-        <section class="card"><h3>Running now</h3>${runningHtml}</section>
+        <section class="card"><h3>Water on after today's changes</h3>${runningHtml}</section>
       </div>
       <div>
         <section class="card">
