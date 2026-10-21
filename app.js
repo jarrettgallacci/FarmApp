@@ -35,17 +35,19 @@ async function q(request) {
 // =====================================================================
 // Reference data used across screens
 // =====================================================================
-const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [] };
+const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [] };
 
 async function loadRefs() {
-  const [riders, turnouts, fields, leases, crops] = await Promise.all([
+  const [riders, turnouts, fields, leases, crops, chemicals, operators] = await Promise.all([
     q(sb.from('ditch_riders').select('*').order('sort_order', { nullsFirst: false }).order('name')),
     q(sb.from('turnouts').select('*').order('sort_order', { nullsFirst: false }).order('name')),
     q(sb.from('fields').select('*').order('sort_order', { nullsFirst: false }).order('name')),
     q(sb.from('leases').select('*')),
     q(sb.from('crops').select('*').order('name')),
+    q(sb.from('chemicals').select('*').order('name')),
+    q(sb.from('operators').select('*').order('name')),
   ]);
-  Object.assign(refs, { riders, turnouts, fields, leases, crops });
+  Object.assign(refs, { riders, turnouts, fields, leases, crops, chemicals, operators });
 }
 
 // Deeded unless a lease or partnership is in effect today.
@@ -131,26 +133,25 @@ const CRUD = {
   },
   operators: {
     table: 'operators', pk: 'operator_id', title: 'Operators', singular: 'operator', order: 'name',
-    allowDelete: true,
+    allowDelete: true, refreshRefs: true,
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
-      { key: 'type', label: 'Type', type: 'select', required: true, list: true,
+      { key: 'type', label: 'Type (contractor = work hired out)', type: 'select', required: true, list: true,
         options: () => [['partner', 'Partner'], ['employee', 'Employee'], ['contractor', 'Contractor']] },
       { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
     ],
   },
   chemicals: {
     table: 'chemicals', pk: 'chemical_id', title: 'Chemicals', singular: 'chemical', order: 'name',
-    allowDelete: true,
+    allowDelete: true, refreshRefs: true, search: true,
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
+      { key: 'type', label: 'Type', type: 'select', required: true, list: true, options: () => CHEM_TYPES },
       { key: 'active_ingredient', label: 'Active ingredient', type: 'text', list: true },
-      { key: 'type', label: 'Type', type: 'select', required: true, list: true,
-        options: () => ['fertilizer', 'herbicide', 'insecticide', 'fungicide', 'adjuvant', 'other']
-          .map((t) => [t, t[0].toUpperCase() + t.slice(1)]) },
-      { key: 'unit', label: 'Unit (gal, lb, oz, ton)', type: 'text', required: true, list: true },
-      { key: 'epa_reg_no', label: 'EPA reg. no.', type: 'text', list: true },
-      { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
+      { key: 'manufacturer', label: 'Manufacturer', type: 'text', list: true },
+      { key: 'epa_reg_no', label: 'EPA reg. no.', type: 'text' },
+      { key: 'active', label: 'Active (shows when picking products)', type: 'checkbox', default: true, list: true },
+      { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
   },
   equipment: {
@@ -1208,6 +1209,7 @@ async function renderMap(el) {
         <button data-season="-1" aria-label="Previous season">‹</button>
         <strong class="season">${season}</strong>
         <button data-season="1" aria-label="Next season">›</button>
+        ${mapState.editMode ? '' : `<button class="${mapState.selecting ? 'primary' : ''}" data-act="select">${mapState.selecting ? 'Done selecting' : 'Select fields'}</button>`}
         <button class="${mapState.editMode ? 'primary' : ''}" data-act="edit">${mapState.editMode ? 'Done editing' : 'Edit shapes'}</button>
       </div></div>
     <div class="map-wrap"><div id="map"></div><aside class="card map-side" id="map-side"></aside></div>`;
@@ -1217,8 +1219,16 @@ async function renderMap(el) {
     mapState.season += Number(b.dataset.season);
     renderMap(el);
   }));
+  const sel = $('[data-act=select]', el);
+  if (sel) sel.onclick = () => {
+    mapState.selecting = !mapState.selecting;
+    if (!mapState.selecting) mapState.selected = new Set();
+    renderMap(el);
+  };
   $('[data-act=edit]', el).onclick = () => {
     if (!confirmDiscard()) return;
+    mapState.selecting = false;
+    mapState.selected = new Set();
     mapState.editMode = !mapState.editMode;
     mapState.ed = null;
     renderMap(el);
@@ -1266,17 +1276,49 @@ function drawFields() {
       L.DomEvent.stopPropagation(e);
       if (mapState.ed?.mode === 'draw' || mapState.ed?.mode === 'place') return onMapClick(e);
       if (mapState.editMode) startEdit(f);
+      else if (mapState.selecting) toggleSelect(f);
       else showFieldInfo(f);
     });
+    if (mapState.selected?.has(f.field_id)) layer.setStyle({ color: '#ffd400', weight: 4, dashArray: null });
     mapState.layers.push({ field: f, layer });
   }
 }
 
 // ---------- Side panel ----------
+function toggleSelect(f) {
+  mapState.selected ??= new Set();
+  if (mapState.selected.has(f.field_id)) mapState.selected.delete(f.field_id);
+  else mapState.selected.add(f.field_id);
+  drawFields();
+  drawSide();
+}
+
+function drawSelectSide() {
+  const side = $('#map-side');
+  const ids = [...(mapState.selected ?? [])];
+  const picked = fieldsInOrder().filter((f) => ids.includes(f.field_id));
+  const acres = picked.reduce((t, f) => t + Number(f.acres || 0), 0);
+  side.innerHTML = `<h3>Select fields</h3>
+    <p class="muted small">Click fields on the map to add or remove them.</p>
+    ${picked.length ? `<p><b>${picked.length}</b> field(s) · ${num(acres, 0)} ac</p>
+      <div class="chips">${picked.map((f) => `<span class="chip">${esc(f.name)}</span>`).join('')}</div>
+      <div class="stack">
+        <button class="primary" data-act="log-chem">Log chemical application</button>
+        <button data-act="plan-chem">Plan chemical application</button>
+        <button class="ghost small" data-act="clear">Clear selection</button>
+      </div>` : '<p class="muted">Nothing selected yet.</p>'}`;
+  const go = (status) => openChemForm({ fieldIds: ids, status }, () => { mapState.selected = new Set(); drawFields(); drawSide(); });
+  const b = (n, fn) => { const x = $(`[data-act=${n}]`, side); if (x) x.onclick = fn; };
+  b('log-chem', () => go('done'));
+  b('plan-chem', () => go('planned'));
+  b('clear', () => { mapState.selected = new Set(); drawFields(); drawSide(); });
+}
+
 function drawSide(info) {
   const side = $('#map-side');
   if (!side) return;
   if (mapState.editMode) return drawEditSide();
+  if (mapState.selecting) return drawSelectSide();
   if (info) return;
   // Legend: crops on the map this season, with acres
   const totals = new Map();
@@ -1367,7 +1409,20 @@ function showFieldInfo(f) {
       </div>`).join('') : `<p class="muted">Nothing entered for ${mapState.season}.</p>`}
     <p class="muted small">Outline is ${num(drawn, 1)} ac.</p>
     ${isoSection(f, crops)}
-    <div class="actions"><button data-act="history">Crop history</button></div>`;
+    <div class="actions wrap"><button data-act="history">Crop history</button>
+      <button class="primary" data-act="log-chem">Log chemical</button></div>
+    <h4>Recent chemical</h4><div id="recent-chem"><p class="muted small">Loading…</p></div>`;
+  $('[data-act=log-chem]').onclick = () => openChemForm({ fieldIds: [f.field_id] }, () => showFieldInfo(f));
+  recentChem(f.field_id).then((rows) => {
+    const box = $('#recent-chem');
+    if (!box) return;
+    box.innerHTML = rows.length ? rows.map((r) => `<button class="recent-chem" data-ev="${r.event_id}">
+        <span class="nowrap"><b>${esc(fmtDate(r.applied_on))}</b> ${new Date(r.applied_on + 'T12:00').getFullYear() !== new Date().getFullYear() ? new Date(r.applied_on + 'T12:00').getFullYear() : ''}
+          ${r.status === 'planned' ? '<span class="badge down">Plan</span>' : ''} <span class="muted small">${esc(methodName(r.method))}</span></span>
+        <span class="small">${r.chemical_event_products.map((l) => esc(chemById(l.chemical_id)?.name ?? '?')).join(', ') || '<span class="muted">No products</span>'}</span>
+      </button>`).join('') : '<p class="muted small">No chemical records for this field.</p>';
+    $$('[data-ev]', box).forEach((b) => (b.onclick = () => openChemForm({ event: rows.find((r) => r.event_id === Number(b.dataset.ev)) }, () => showFieldInfo(f))));
+  }).catch(() => {});
   drawRings(crops.some((r) => r.isolation_ft != null) ? f : null);
   $('[data-act=back]').onclick = () => { drawRings(); drawSide(); };
   $('[data-act=history]').onclick = () => openFieldHistory(f.field_id, () => {});
@@ -1612,6 +1667,309 @@ function endEdit() {
 }
 
 // =====================================================================
+// Chemical records: one record per field per pass, with product lines.
+// Opened from the Chemical tab or from fields selected on the map.
+// =====================================================================
+const METHODS = [['spray', 'Spray'], ['chemigation', 'Chemigation'], ['spread', 'Spread'], ['aerial', 'Aerial'], ['worked_in', 'Worked in']];
+const methodName = (m) => METHODS.find(([k]) => k === m)?.[1] ?? '—';
+const CHEM_TYPES = [['herbicide', 'Herbicide'], ['insecticide', 'Insecticide'], ['fungicide', 'Fungicide'], ['fertilizer', 'Fertilizer'],
+  ['adjuvant', 'Adjuvant'], ['soil_amendment', 'Soil amendment'], ['growth_regulator', 'Plant growth regulator'], ['other', 'Other']];
+const RATE_UNITS = ['oz', 'pt', 'qt', 'gal', 'lb', '%'];
+const BASES = [['acre', '/acre'], ['100gal', '/100 gal'], ['tank', '/tank'], ['total', 'total'], ['volume', 'of volume']];
+const chemById = (id) => refs.chemicals.find((c) => c.chemical_id === id);
+const operatorName = (id) => refs.operators.find((o) => o.operator_id === id)?.name ?? '';
+
+function rateText(l) {
+  if (l.rate == null) return l.rate_text ?? '';
+  const r = Number(l.rate);
+  const amount = Number.isInteger(r) ? r : Number(r.toFixed(3));
+  if (l.rate_basis === 'volume') return `${amount}%`;
+  const basis = l.rate_basis === 'tank' ? `/${l.tank_gal ? Number(l.tank_gal) + ' gal ' : ''}tank`
+    : l.rate_basis === '100gal' ? '/100 gal' : l.rate_basis === 'total' ? ' total' : '/a';
+  return `${amount} ${l.rate_unit ?? ''}${basis}`;
+}
+function carrierText(e) {
+  const out = [];
+  if (e.carrier_gpa != null) out.push(`${Number(e.carrier_gpa)} gal/a water`);
+  if (e.pivot_speed_pct != null) out.push(`pivot ${Number(e.pivot_speed_pct)}%`);
+  if (e.water_in != null) out.push(`${Number(e.water_in)} in water`);
+  if (e.runtime_hr != null) out.push(`${Number(e.runtime_hr)} hr run`);
+  if (e.injection_gph != null) out.push(`${Number(e.injection_gph)} gal/hr injection`);
+  return out.join(' · ');
+}
+const eventCrop = (e) => (e.crop_years ? cropName(e.crop_years.crop_id) : e.crop_label ?? '');
+
+const chemState = { season: new Date().getFullYear(), q: '', method: '', type: '', status: '' };
+
+async function renderChem(el) {
+  const s = chemState;
+  const rows = await q(sb.from('chemical_events')
+    .select('*, chemical_event_products(*), crop_years(crop_id, variety)')
+    .gte('applied_on', `${s.season}-01-01`).lte('applied_on', `${s.season}-12-31`)
+    .order('applied_on', { ascending: false }).order('event_id', { ascending: false }));
+  rows.forEach((r) => r.chemical_event_products.sort((a, b) => a.position - b.position));
+  const term = s.q.trim().toLowerCase();
+  const shown = rows.filter((r) =>
+    (!s.method || r.method === s.method) &&
+    (!s.status || r.status === s.status) &&
+    (!s.type || r.chemical_event_products.some((l) => chemById(l.chemical_id)?.type === s.type)) &&
+    (!term || fieldName(r.field_id).toLowerCase().includes(term) ||
+      r.chemical_event_products.some((l) => chemById(l.chemical_id)?.name.toLowerCase().includes(term))));
+  const planned = rows.filter((r) => r.status === 'planned').length;
+
+  el.innerHTML = `
+    <div class="section-head"><h2>Chemical records</h2>
+      <div class="row">
+        <button data-season="-1" aria-label="Previous year">‹</button>
+        <strong class="season">${s.season}</strong>
+        <button data-season="1" aria-label="Next year">›</button>
+        <button class="primary" data-act="add">Add record</button>
+      </div></div>
+    <div class="filters">
+      <input type="search" data-f="q" placeholder="Search field or product…" value="${esc(s.q)}">
+      <select data-f="method"><option value="">All methods</option>${METHODS.map(([k, t]) => `<option value="${k}" ${s.method === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      <select data-f="type"><option value="">All product types</option>${CHEM_TYPES.map(([k, t]) => `<option value="${k}" ${s.type === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      <select data-f="status"><option value="">Done and planned</option><option value="done" ${s.status === 'done' ? 'selected' : ''}>Done</option>
+        <option value="planned" ${s.status === 'planned' ? 'selected' : ''}>Planned${planned ? ` (${planned})` : ''}</option></select>
+    </div>
+    <p class="muted small">${shown.length} of ${rows.length} record(s) in ${s.season}.</p>
+    ${shown.length ? `<div class="card table-wrap"><table class="chem-table">
+      <thead><tr><th>Date</th><th>Field</th><th class="c-crop">Crop</th><th>Method</th><th>Products</th><th class="c-by">Applied by</th><th></th></tr></thead>
+      <tbody>${shown.map((r) => `<tr class="${r.status === 'planned' ? 'is-planned' : ''}">
+        <td class="nowrap">${esc(fmtDate(r.applied_on))}${r.status === 'planned' ? ' <span class="badge down">Plan</span>' : ''}</td>
+        <td class="nowrap"><b>${esc(fieldName(r.field_id))}</b></td>
+        <td class="c-crop">${esc(eventCrop(r))}</td>
+        <td>${esc(methodName(r.method))}${carrierText(r) ? `<div class="muted small">${esc(carrierText(r))}</div>` : ''}</td>
+        <td><div class="prod-list">${r.chemical_event_products.map((l) => {
+          const c = chemById(l.chemical_id);
+          return `<span class="prod"><span class="type-dot t-${esc(c?.type ?? 'other')}"></span>${esc(c?.name ?? '?')} <span class="muted">${esc(rateText(l))}</span></span>`;
+        }).join('')}</div></td>
+        <td class="c-by">${esc(operatorName(r.performed_by))}</td>
+        <td class="r"><button class="small" data-edit="${r.event_id}">Edit</button></td></tr>`).join('')}
+      </tbody></table></div>` : `<div class="empty">No chemical records${rows.length ? ' match these filters' : ` for ${s.season}`}.</div>`}`;
+
+  const reload = () => renderChem(el);
+  $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
+  $('[data-act=add]', el).onclick = () => openChemForm({ fieldIds: [] }, reload);
+  $$('[data-edit]', el).forEach((b) => (b.onclick = () => openChemForm({ event: rows.find((r) => r.event_id === Number(b.dataset.edit)) }, reload)));
+  $$('[data-f]', el).forEach((inp) => {
+    const apply = () => { s[inp.dataset.f] = inp.value; reload().then(() => { const x = $(`[data-f="${inp.dataset.f}"]`, el); if (x?.type === 'search') { x.focus(); x.setSelectionRange(x.value.length, x.value.length); } }); };
+    if (inp.type === 'search') { let t; inp.oninput = () => { clearTimeout(t); t = setTimeout(apply, 300); }; } else inp.onchange = apply;
+  });
+}
+
+// The crop on a field for a date, from crop history (same season, or a stand still in).
+async function cropFor(fieldId, date) {
+  const season = Number(date.slice(0, 4));
+  const rows = (await q(sb.from('crop_years').select('crop_year_id, crop_id, variety, season, sequence, multi_year, end_season, status')
+    .eq('field_id', fieldId).lte('season', season)))
+    .filter((r) => r.season === season || (r.multi_year && (r.end_season == null || r.end_season >= season)))
+    .sort((a, b) => b.season - a.season || a.sequence - b.sequence);
+  return rows;
+}
+
+// opts: { event } to edit, or { fieldIds, date, status } for new records
+async function openChemForm(opts, onDone) {
+  const ev = opts.event;
+  const v = ev ?? { applied_on: opts.date ?? localDate(), status: opts.status ?? 'done', method: 'spray' };
+  const lines = ev ? ev.chemical_event_products.map((l) => ({ ...l })) : [{ rate_unit: 'oz', rate_basis: 'acre' }];
+  let selected = new Set(ev ? [ev.field_id] : opts.fieldIds ?? []);
+  const fields = fieldsInOrder().filter((f) => f.active || selected.has(f.field_id));
+  const chems = [...refs.chemicals].filter((c) => c.active !== false);
+
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.innerHTML = `<form class="form chem-form">
+    <div class="dialog-head"><h3>${ev ? 'Edit' : 'New'} chemical record</h3></div>
+    <div class="row2">
+      <label>Date *<input type="date" name="applied_on" required value="${esc(v.applied_on)}"></label>
+      <label>Status<select name="status">
+        <option value="done" ${v.status !== 'planned' ? 'selected' : ''}>Done</option>
+        <option value="planned" ${v.status === 'planned' ? 'selected' : ''}>Planned</option></select></label>
+    </div>
+    ${ev ? `<label>Field<select name="field_id">${fields.map((f) => `<option value="${f.field_id}" ${f.field_id === ev.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}</select></label>`
+      : `<div class="field-pick"><div class="field-pick-head"><span>Fields * <span class="muted small" id="pick-count"></span></span>
+          <input type="search" id="pick-search" placeholder="Filter…"></div>
+          <div class="pick-list">${fields.map((f) => `<label class="pick" data-name="${esc(f.name.toLowerCase())}">
+            <input type="checkbox" value="${f.field_id}" ${selected.has(f.field_id) ? 'checked' : ''}>
+            <span>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</span>${f.acres != null ? `<span class="muted small">${num(f.acres, 0)} ac</span>` : ''}</label>`).join('')}</div>
+          <p class="muted small">Saving makes one record for each field picked.</p></div>`}
+    <p class="muted small" id="crop-line"></p>
+    <div class="row2">
+      <label>Method<select name="method">${METHODS.map(([k, t]) => `<option value="${k}" ${v.method === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label>Applied by<select name="performed_by"><option value="">—</option>
+        ${refs.operators.filter((o) => o.active || o.operator_id === v.performed_by).map((o) =>
+          `<option value="${o.operator_id}" ${o.operator_id === v.performed_by ? 'selected' : ''}>${esc(o.name)}${o.type === 'contractor' ? ' (contractor)' : ''}</option>`).join('')}
+      </select></label>
+    </div>
+    <div class="row2" data-for="spray aerial">
+      <label>Water (gal/acre)<input type="number" step="any" min="0" name="carrier_gpa" value="${esc(v.carrier_gpa ?? '')}"></label>
+      <label>Hours to complete<input type="number" step="any" min="0" name="hours" value="${esc(v.hours ?? '')}"></label>
+    </div>
+    <div data-for="chemigation">
+      <div class="row2">
+        <label>Pivot speed (%)<input type="number" step="any" min="0" max="100" name="pivot_speed_pct" value="${esc(v.pivot_speed_pct ?? '')}" placeholder="100 = full speed"></label>
+        <label>Water (inches)<input type="number" step="any" min="0" name="water_in" value="${esc(v.water_in ?? '')}"></label>
+      </div>
+      <div class="row2">
+        <label>Run time (hours)<input type="number" step="any" min="0" name="runtime_hr" value="${esc(v.runtime_hr ?? '')}"></label>
+        <label>Injection rate (gal/hr)<input type="number" step="any" min="0" name="injection_gph" value="${esc(v.injection_gph ?? '')}"></label>
+      </div>
+    </div>
+    <div class="lines-head"><b>Products</b><span class="muted small">Start typing a product name</span></div>
+    <div id="lines"></div>
+    <button type="button" class="small" data-act="add-line">+ Add product</button>
+    <datalist id="chem-options"></datalist>
+    <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
+    ${ev?.base_solution ? `<p class="muted small">Original record: "${esc(ev.base_solution)}"${ev.crop_label ? `, crop "${esc(ev.crop_label)}"` : ''}</p>` : ''}
+    <div class="actions">
+      ${ev ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
+      <span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div></form>`;
+
+  const form = $('form', dlg);
+  const el = form.elements;
+
+  // Product suggestions: fertilizers first for chemigation
+  const fillOptions = () => {
+    const fertFirst = el.method.value === 'chemigation';
+    const list = [...chems].sort((a, b) => (fertFirst ? Number(b.type === 'fertilizer') - Number(a.type === 'fertilizer') : 0) || a.name.localeCompare(b.name));
+    $('#chem-options', dlg).innerHTML = list.map((c) => `<option value="${esc(c.name)}">${esc(CHEM_TYPES.find(([k]) => k === c.type)?.[1] ?? '')}</option>`).join('');
+  };
+  const drawLines = () => {
+    $('#lines', dlg).innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}">
+      <input class="l-name" list="chem-options" placeholder="Product" value="${esc(chemById(l.chemical_id)?.name ?? l.name ?? '')}" autocomplete="off">
+      <input class="l-rate" type="number" step="any" min="0" placeholder="Rate" value="${esc(l.rate ?? '')}">
+      <select class="l-unit">${RATE_UNITS.map((u) => `<option ${l.rate_unit === u ? 'selected' : ''}>${u}</option>`).join('')}</select>
+      <select class="l-basis">${BASES.map(([k, t]) => `<option value="${k}" ${(l.rate_basis ?? 'acre') === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      <input class="l-tank" type="number" step="any" min="0" placeholder="Tank gal" value="${esc(l.tank_gal ?? '')}" ${l.rate_basis === 'tank' ? '' : 'hidden'}>
+      <button type="button" class="small ghost" data-rm="${i}" aria-label="Remove">✕</button>
+      ${l.rate == null && l.rate_text ? `<span class="muted small l-orig">Recorded as "${esc(l.rate_text)}"</span>` : ''}
+    </div>`).join('');
+    $$('.line', dlg).forEach((row) => {
+      const l = lines[Number(row.dataset.i)];
+      $('.l-name', row).oninput = (e) => { l.name = e.target.value; l.chemical_id = chems.find((c) => c.name.toLowerCase() === e.target.value.trim().toLowerCase())?.chemical_id; };
+      $('.l-rate', row).oninput = (e) => { l.rate = e.target.value === '' ? null : Number(e.target.value); };
+      $('.l-unit', row).onchange = (e) => { l.rate_unit = e.target.value; };
+      $('.l-basis', row).onchange = (e) => { l.rate_basis = e.target.value; $('.l-tank', row).hidden = e.target.value !== 'tank'; };
+      $('.l-tank', row).oninput = (e) => { l.tank_gal = e.target.value === '' ? null : Number(e.target.value); };
+    });
+    $$('[data-rm]', dlg).forEach((b) => (b.onclick = () => { lines.splice(Number(b.dataset.rm), 1); drawLines(); }));
+  };
+  const syncMethod = () => {
+    $$('[data-for]', dlg).forEach((x) => (x.hidden = !x.dataset.for.split(' ').includes(el.method.value)));
+    fillOptions();
+  };
+  const pickedIds = () => (ev ? [Number(el.field_id.value)] : $$('.pick-list input:checked', dlg).map((c) => Number(c.value)));
+  const showCrop = async () => {
+    const ids = pickedIds();
+    const line = $('#crop-line', dlg);
+    if (ids.length !== 1 || !el.applied_on.value) { line.textContent = ''; return; }
+    const crops = await cropFor(ids[0], el.applied_on.value);
+    line.textContent = crops.length ? `Crop: ${crops.map((c) => cropName(c.crop_id) + (c.variety ? ` (${c.variety})` : '')).join(', ')}`
+      : ev?.crop_label ? `Crop as recorded: ${ev.crop_label}` : 'No crop in this field\'s history for that season.';
+  };
+  if (!ev) {
+    const count = () => { $('#pick-count', dlg).textContent = `${pickedIds().length} picked`; showCrop(); };
+    $$('.pick-list input', dlg).forEach((c) => (c.onchange = count));
+    $('#pick-search', dlg).oninput = (e) => {
+      const t = e.target.value.toLowerCase();
+      $$('.pick', dlg).forEach((p) => (p.hidden = t && !p.dataset.name.includes(t)));
+    };
+    count();
+  } else el.field_id.onchange = showCrop;
+  el.applied_on.onchange = showCrop;
+  el.method.onchange = syncMethod;
+  $('[data-act=add-line]', dlg).onclick = () => { lines.push({ rate_unit: 'oz', rate_basis: 'acre' }); drawLines(); $$('.l-name', dlg).at(-1)?.focus(); };
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  drawLines();
+  syncMethod();
+  showCrop();
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const ids = pickedIds();
+    if (!ids.length) return toast('Pick at least one field', true);
+    const used = lines.filter((l) => (l.name ?? chemById(l.chemical_id)?.name ?? '').trim());
+    // New product names: offer to add them to the list
+    const unknown = [...new Set(used.filter((l) => !l.chemical_id).map((l) => l.name.trim()))];
+    if (unknown.length) {
+      if (!confirm(`Add ${unknown.length === 1 ? 'a new product' : 'new products'} to your list?\n\n${unknown.join('\n')}\n\nYou can set the type under Setup → Chemicals.`)) return;
+      try {
+        const added = await q(sb.from('chemicals').insert(unknown.map((name) => ({ name, type: 'other' }))).select());
+        refs.chemicals.push(...added);
+        used.forEach((l) => { if (!l.chemical_id) l.chemical_id = added.find((c) => c.name.toLowerCase() === l.name.trim().toLowerCase())?.chemical_id; });
+      } catch { return; }
+    }
+    const val = (k) => (el[k] ? el[k].value.trim() : '');
+    const numOrNull = (k) => (val(k) === '' ? null : Number(val(k)));
+    const method = val('method');
+    const base = {
+      applied_on: val('applied_on'), status: val('status'), method,
+      performed_by: val('performed_by') ? Number(val('performed_by')) : null,
+      carrier_gpa: ['spray', 'aerial'].includes(method) ? numOrNull('carrier_gpa') : null,
+      hours: ['spray', 'aerial'].includes(method) ? numOrNull('hours') : null,
+      pivot_speed_pct: method === 'chemigation' ? numOrNull('pivot_speed_pct') : null,
+      water_in: method === 'chemigation' ? numOrNull('water_in') : null,
+      runtime_hr: method === 'chemigation' ? numOrNull('runtime_hr') : null,
+      injection_gph: method === 'chemigation' ? numOrNull('injection_gph') : null,
+      notes: val('notes') || null,
+    };
+    const lineRows = (eventId) => used.map((l, i) => ({
+      event_id: eventId, chemical_id: l.chemical_id, position: i + 1,
+      rate: l.rate ?? null, rate_unit: l.rate == null ? null : l.rate_unit ?? 'oz', rate_basis: l.rate == null ? null : l.rate_basis ?? 'acre',
+      tank_gal: l.rate_basis === 'tank' ? l.tank_gal ?? null : null,
+      rate_text: l.rate == null ? l.rate_text ?? null : null,
+    }));
+    const btn = $('button[type=submit]', form);
+    btn.disabled = true;
+    try {
+      for (const fid of ids) {
+        const crops = await cropFor(fid, base.applied_on);
+        const keepLink = ev && ev.field_id === fid && ev.crop_year_id && crops.some((c) => c.crop_year_id === ev.crop_year_id);
+        const row = { ...base, field_id: fid, crop_year_id: keepLink ? ev.crop_year_id : crops[0]?.crop_year_id ?? null };
+        let eventId;
+        if (ev) {
+          await q(sb.from('chemical_events').update(row).eq('event_id', ev.event_id));
+          await q(sb.from('chemical_event_products').delete().eq('event_id', ev.event_id));
+          eventId = ev.event_id;
+        } else {
+          eventId = (await q(sb.from('chemical_events').insert(row).select('event_id').single())).event_id;
+        }
+        if (used.length) await q(sb.from('chemical_event_products').insert(lineRows(eventId)));
+      }
+      dlg.close();
+      toast(ids.length > 1 ? `Saved ${ids.length} records` : 'Saved');
+      onDone?.();
+    } catch {
+      btn.disabled = false;
+    }
+  };
+  const del = $('[data-act=del]', dlg);
+  if (del) del.onclick = async () => {
+    if (!confirm('Delete this chemical record?')) return;
+    try {
+      await q(sb.from('chemical_events').delete().eq('event_id', ev.event_id));
+      dlg.close();
+      toast('Deleted');
+      onDone?.();
+    } catch { /* shown */ }
+  };
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+// Recent records for one field (map side panel)
+async function recentChem(fieldId, limit = 5) {
+  const rows = await q(sb.from('chemical_events').select('*, chemical_event_products(*)')
+    .eq('field_id', fieldId).order('applied_on', { ascending: false }).limit(limit));
+  rows.forEach((r) => r.chemical_event_products.sort((a, b) => a.position - b.position));
+  return rows;
+}
+
+// =====================================================================
 // Setup: reference lists
 // =====================================================================
 let setupTab = 'riders';
@@ -1633,6 +1991,7 @@ const VIEWS = {
   fields: (el) => renderCrud(CRUD.fields, el),
   crops: renderCrops,
   map: renderMap,
+  chem: renderChem,
   setup: renderSetup,
 };
 let currentView = 'home';

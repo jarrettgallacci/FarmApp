@@ -378,3 +378,48 @@ fieldset.contract legend { font-size: .88rem; font-weight: 600; padding: 0 .3rem
 .iso-list li.conflict { color: var(--danger); font-weight: 600; }
 .conflict-note { color: var(--danger); }
 label.check.small { font-size: .88rem; display: flex; align-items: center; gap: .5rem; margin: .3rem 0 .5rem; }
+
+/* Chemical records */
+.filters { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .6rem; }
+.filters input, .filters select { width: auto; flex: 1 1 160px; }
+.chem-table td { vertical-align: top; white-space: normal; }
+.chem-table .nowrap, .nowrap { white-space: nowrap; }
+.chem-table tr.is-planned td { background: var(--amber-soft); }
+.prod-list { display: flex; flex-direction: column; gap: .15rem; }
+.prod { display: inline-flex; align-items: center; gap: .35rem; font-size: .88rem; }
+.type-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #94a3b8; }
+.t-herbicide { background: #c0392b; } .t-insecticide { background: #7c3aed; } .t-fungicide { background: #0891b2; }
+.t-fertilizer { background: #3a9d5d; } .t-adjuvant { background: #94a3b8; } .t-soil_amendment { background: #a16207; }
+.t-growth_regulator { background: #db2777; }
+@media (max-width: 760px) { .chem-table .c-crop, .chem-table .c-by { display: none; } }
+.chem-form .field-pick { border: 1px solid var(--border); border-radius: 10px; padding: .6rem; }
+.field-pick-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-bottom: .4rem; font-size: .88rem; color: var(--muted); }
+.field-pick-head input { max-width: 160px; }
+.pick-list { max-height: 200px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .1rem .6rem; }
+.pick { display: flex; align-items: center; gap: .45rem; padding: .3rem .2rem; cursor: pointer; font-size: .9rem; color: var(--text) !important; flex-direction: row !important; }
+.pick input[type=checkbox] { width: 34px; height: 20px; }
+.pick input[type=checkbox]::after { width: 14px; height: 14px; }
+.pick input[type=checkbox]:checked::after { transform: translateX(14px); }
+.pick .muted { margin-left: auto; }
+.lines-head { display: flex; justify-content: space-between; align-items: baseline; margin-top: .3rem; }
+.line { display: grid; grid-template-columns: 1fr 5.5rem 4.5rem 6.5rem auto; gap: .4rem; align-items: center; margin-bottom: .4rem; }
+.line .l-tank { grid-column: 2 / span 2; }
+.line .l-orig { grid-column: 1 / -1; }
+@media (max-width: 560px) { .line { grid-template-columns: 1fr 1fr 1fr auto; } .line .l-name { grid-column: 1 / -1; } }
+.chips { display: flex; flex-wrap: wrap; gap: .3rem; margin: .4rem 0 .8rem; }
+.chip { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: .15rem .6rem; font-size: .82rem; font-weight: 600; }
+.stack { display: flex; flex-direction: column; gap: .5rem; }
+.actions.wrap { flex-wrap: wrap; }
+.recent-chem { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; width: 100%; text-align: left; border: 0;
+  border-bottom: 1px solid var(--border); border-radius: 0; padding: .45rem 0; background: none; }
+.recent-chem:hover { background: var(--accent-tint); }
+@media (max-width: 760px) {
+  .chem-table thead { display: none; }
+  .chem-table, .chem-table tbody, .chem-table tr, .chem-table td { display: block; }
+  .chem-table tr { position: relative; padding: .6rem 0; border-bottom: 1px solid var(--border); }
+  .chem-table td { border: 0; padding: .1rem 0; }
+  .chem-table td.nowrap { display: inline; margin-right: .5rem; }
+  .chem-table td.r { position: absolute; top: .5rem; right: 0; }
+  .chem-table tr.is-planned td { background: none; }
+  .chem-table tr.is-planned { background: var(--amber-soft); }
+}
