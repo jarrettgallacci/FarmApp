@@ -82,6 +82,7 @@ const CRUD = {
   fields: {
     table: 'fields', pk: 'field_id', title: 'Fields', singular: 'field', order: ['sort_order', 'name'],
     search: true, refreshRefs: true, allowDelete: true,
+    tabs: [{ key: 'active', label: 'Active fields', test: (r) => r.active }, { key: 'inactive', label: 'Inactive fields', test: (r) => !r.active }],
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'farm_unit', label: 'Farm unit', type: 'text', list: true },
@@ -95,7 +96,7 @@ const CRUD = {
         options: (row) => refs.fields
           .filter((f) => !f.parent_field_id && f.field_id !== row?.field_id)
           .map((f) => [f.field_id, f.name]) },
-      { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
+      { key: 'active', label: 'Active', type: 'checkbox', default: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
     // Split halves share the parent's turnout, so they can't have their own.
@@ -229,11 +230,14 @@ async function renderCrud(cfg, el) {
   for (const col of [].concat(cfg.order)) req = req.order(col, { nullsFirst: false });
   const rows = await q(req);
   const cols = cfg.columns.filter((c) => c.list);
-  const st = (cfg.state ??= { q: '', f: {}, sort: cfg.sorts?.[0]?.[0] ?? '' });
+  const st = (cfg.state ??= { q: '', f: {}, sort: cfg.sorts?.[0]?.[0] ?? '', tab: cfg.tabs?.[0]?.key });
   const filters = cfg.filters ?? [];
+  const tab = cfg.tabs?.find((t) => t.key === st.tab);
   el.innerHTML = `
     <div class="section-head"><h2>${esc(cfg.title)}</h2>
       <button class="primary" data-act="add">Add ${esc(cfg.singular)}</button></div>
+    ${cfg.tabs ? `<div class="subtabs">${cfg.tabs.map((t) => `<button class="${t.key === st.tab ? 'active' : ''}" data-tab="${t.key}">
+      ${esc(t.label)} <span class="muted">${rows.filter(t.test).length}</span></button>`).join('')}</div>` : ''}
     ${cfg.search || filters.length || cfg.sorts ? `<div class="filters">
       ${cfg.search ? `<input type="search" class="search" placeholder="Search ${esc(cfg.title.toLowerCase())}…" value="${esc(st.q)}">` : ''}
       ${filters.map((f) => `<select data-filter="${f.key}"><option value="">${esc(f.all)}</option>${f.options().map(([v, t]) =>
@@ -247,7 +251,8 @@ async function renderCrud(cfg, el) {
   const reload = () => renderCrud(cfg, el);
   const draw = () => {
     const term = st.q.trim().toLowerCase();
-    let shown = rows.filter((r) => filters.every((f) => !st.f[f.key] || f.test(r, st.f[f.key])) &&
+    const pool = tab ? rows.filter(tab.test) : rows;
+    let shown = pool.filter((r) => filters.every((f) => !st.f[f.key] || f.test(r, st.f[f.key])) &&
       (!term || cols.some((c) => String(display(c, r) ?? '').toLowerCase().includes(term))));
     const sorter = cfg.sorts?.find(([k]) => k === st.sort)?.[2];
     if (sorter) shown = [...shown].sort((a, b) => sorter(a, b) || String(a.name ?? '').localeCompare(String(b.name ?? ''), undefined, { numeric: true }));
@@ -256,15 +261,16 @@ async function renderCrud(cfg, el) {
           ? `<td><span class="swatch" style="background:${esc(r[c.key] || c.fallback(r))}"></span></td>`
           : `<td>${esc(display(c, r))}</td>`).join('')}
         <td class="nowrap"><button class="small" data-edit="${r[cfg.pk]}">Edit</button>${cfg.rowAction ? ` <button class="small primary" data-row-act="${r[cfg.pk]}">${esc(cfg.rowAction.label)}</button>` : ''}</td></tr>`).join('')
-      : `<tr><td colspan="${cols.length + 1}" class="muted">${rows.length ? 'Nothing matches.' : 'Nothing here yet.'}</td></tr>`;
+      : `<tr><td colspan="${cols.length + 1}" class="muted">${pool.length ? 'Nothing matches.' : 'Nothing here yet.'}</td></tr>`;
     const count = $('[data-count]', el);
-    if (count) count.textContent = `${shown.length} of ${rows.length}`;
+    if (count) count.textContent = `${shown.length} of ${pool.length}`;
     $$('[data-edit]', el).forEach((b) => (b.onclick = () =>
       openForm(cfg, rows.find((r) => String(r[cfg.pk]) === b.dataset.edit), reload)));
     $$('[data-row-act]', el).forEach((b) => (b.onclick = () =>
       cfg.rowAction.fn(rows.find((r) => String(r[cfg.pk]) === b.dataset.rowAct), reload)));
   };
   $('[data-act=add]', el).onclick = () => openForm(cfg, null, reload);
+  $$('[data-tab]', el).forEach((b) => (b.onclick = () => { st.tab = b.dataset.tab; reload(); }));
   const search = $('.search', el);
   if (search) search.oninput = () => { st.q = search.value; draw(); };
   $$('[data-filter]', el).forEach((s) => (s.onchange = () => { st.f[s.dataset.filter] = s.value; draw(); }));
