@@ -438,3 +438,9 @@ table.rules td { white-space: normal; vertical-align: top; }
 .rot-warn .muted { color: #9f4b56; }
 .rot-flag { display: inline-block; margin-left: .35rem; font-size: .74rem; font-weight: 700; color: #be123c; }
 .rot-key { color: #e11d48; font-weight: 600; }
+
+/* Setup / list tables: wrap long text, scroll inside the card so both scrollbars stay reachable */
+.crud-wrap { max-height: calc(100vh - 230px); overflow: auto; padding-top: 0; }
+table.crud thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; padding-top: 1rem; }
+table.crud td { white-space: normal; max-width: 260px; overflow-wrap: anywhere; vertical-align: top; }
+table.crud td:last-child { white-space: nowrap; max-width: none; text-align: right; }

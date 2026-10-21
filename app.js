@@ -146,14 +146,15 @@ const CRUD = {
     allowDelete: true, refreshRefs: true, search: true,
     rowAction: { label: 'Label', fn: (row, reload) => openLabelDialog(chemById(row.chemical_id) ?? row, reload) },
     columns: [
-      { key: 'name', label: 'Name', type: 'text', required: true, list: true },
+      { key: 'name_list', label: 'Name', list: true, form: false, compute: (r) => r.name + (r.active === false ? ' (inactive)' : '') },
+      { key: 'name', label: 'Name', type: 'text', required: true },
       { key: 'type', label: 'Type', type: 'select', required: true, list: true, options: () => CHEM_TYPES },
-      { key: 'active_ingredient', label: 'Active ingredient', type: 'text', list: true },
-      { key: 'manufacturer', label: 'Manufacturer', type: 'text', list: true },
+      { key: 'active_ingredient', label: 'Active ingredient', listLabel: 'Active ingr.', type: 'text', list: true },
+      { key: 'manufacturer', label: 'Manufacturer', listLabel: 'Maker', type: 'text', list: true },
       { key: 'label_status', label: 'Label', list: true, form: false,
-        compute: (r) => [r.label_path ? 'PDF' : null, r.label_source ? (r.label_checked ? 'checked' : 'data not checked') : null].filter(Boolean).join(' · ') },
+        compute: (r) => [r.label_path ? 'PDF' : null, r.label_source ? (r.label_checked ? '✓ checked' : 'not checked') : null].filter(Boolean).join(' · ') },
       { key: 'epa_reg_no', label: 'EPA reg. no.', type: 'text' },
-      { key: 'active', label: 'Active (shows when picking products)', type: 'checkbox', default: true, list: true },
+      { key: 'active', label: 'Active (shows when picking products)', type: 'checkbox', default: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
   },
@@ -215,8 +216,8 @@ async function renderCrud(cfg, el) {
     <div class="section-head"><h2>${esc(cfg.title)}</h2>
       <button class="primary" data-act="add">Add ${esc(cfg.singular)}</button></div>
     ${cfg.search ? `<input type="search" class="search" placeholder="Search ${esc(cfg.title.toLowerCase())}…">` : ''}
-    <div class="card table-wrap"><table>
-      <thead><tr>${cols.map((c) => `<th>${esc(c.label)}</th>`).join('')}<th></th></tr></thead>
+    <div class="card table-wrap crud-wrap"><table class="crud">
+      <thead><tr>${cols.map((c) => `<th>${esc(c.listLabel ?? c.label)}</th>`).join('')}<th></th></tr></thead>
       <tbody>${rows.length ? rows.map((r) => `<tr>
           ${cols.map((c) => c.type === 'color'
             ? `<td><span class="swatch" style="background:${esc(r[c.key] || c.fallback(r))}"></span></td>`
@@ -1713,7 +1714,7 @@ function endEdit() {
 const METHODS = [['spray', 'Spray'], ['chemigation', 'Chemigation'], ['spread', 'Spread'], ['aerial', 'Aerial'], ['worked_in', 'Worked in']];
 const methodName = (m) => METHODS.find(([k]) => k === m)?.[1] ?? '—';
 const CHEM_TYPES = [['herbicide', 'Herbicide'], ['insecticide', 'Insecticide'], ['fungicide', 'Fungicide'], ['fertilizer', 'Fertilizer'],
-  ['adjuvant', 'Adjuvant'], ['soil_amendment', 'Soil amendment'], ['growth_regulator', 'Plant growth regulator'], ['other', 'Other']];
+  ['adjuvant', 'Adjuvant'], ['soil_amendment', 'Soil amendment'], ['growth_regulator', 'Growth regulator'], ['other', 'Other']];
 const RATE_UNITS = ['oz', 'pt', 'qt', 'gal', 'lb', '%'];
 const BASES = [['acre', '/acre'], ['100gal', '/100 gal'], ['tank', '/tank'], ['total', 'total'], ['volume', 'of volume']];
 const chemById = (id) => refs.chemicals.find((c) => c.chemical_id === id);
