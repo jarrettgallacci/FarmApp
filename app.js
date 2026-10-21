@@ -59,7 +59,16 @@ function currentAgreement(fieldId) {
 function tenureOf(f) {
   const a = currentAgreement(f.field_id) ?? (f.parent_field_id ? currentAgreement(f.parent_field_id) : null);
   if (!a) return 'Deeded';
-  return a.agreement_type === 'partnership' ? `Partnership (${a.lessor})` : `Leased (${a.lessor})`;
+  const label = { partnership: 'Partnership', leased_out: 'Leased out' }[a.agreement_type] ?? 'Leased';
+  return `${label} (${a.lessor})`;
+}
+
+// The agreement leasing this field OUT to someone else at any point in a season, if any.
+function leasedOutIn(fieldId, season) {
+  const f = fieldById(fieldId);
+  const ids = [fieldId, f?.parent_field_id].filter(Boolean);
+  return refs.leases.find((l) => ids.includes(l.field_id) && l.agreement_type === 'leased_out'
+    && l.start_date <= `${season}-12-31` && (!l.end_date || l.end_date >= `${season}-01-01`)) ?? null;
 }
 const fieldById = (id) => refs.fields.find((f) => f.field_id === Number(id));
 const fieldName = (id) => fieldById(id)?.name ?? '';
@@ -161,6 +170,7 @@ const CRUD = {
       { key: 'name', label: 'Crop', type: 'text', required: true, list: true },
       { key: 'yield_unit', label: 'Usual yield unit', type: 'select', list: true,
         options: () => [['bu', 'Bushels (bu)'], ['ton', 'Tons'], ['cwt', 'Hundredweight (cwt)'], ['lb', 'Pounds (lb)']] },
+      { key: 'multi_year', label: 'Usually a multi-year stand', type: 'checkbox', default: false, list: true },
       { key: 'active', label: 'Active (shows in the crop list)', type: 'checkbox', default: true, list: true },
     ],
   },
@@ -171,8 +181,8 @@ const CRUD = {
       { key: 'field_id', label: 'Field', type: 'select', num: true, required: true, list: true,
         options: () => refs.fields.map((f) => [f.field_id, f.name]) },
       { key: 'agreement_type', label: 'Type', type: 'select', required: true, list: true, default: 'lease',
-        options: () => [['lease', 'Lease'], ['partnership', 'Partnership']] },
-      { key: 'lessor', label: 'Landowner (lessor or partner grower)', type: 'text', required: true, list: true },
+        options: () => [['lease', 'Lease (we rent it)'], ['partnership', 'Partnership'], ['leased_out', 'Leased out (we rent it to them)']] },
+      { key: 'lessor', label: 'Other party (landowner, partner grower, or tenant)', type: 'text', required: true, list: true },
       { key: 'start_date', label: 'Start date', type: 'date', required: true, list: true },
       { key: 'end_date', label: 'End date', type: 'date', list: true },
       { key: 'rate', label: 'Rate (leave blank for partnerships)', type: 'number', step: '0.01', list: true },
@@ -306,7 +316,30 @@ const orderState = {
   prev: new Map(),    // previous submitted order's lines, for change notes
   prevDate: null,
   dirty: false,       // edited since last save
+  water: new Map(),   // field_id -> { running_now, running_since, last_watered }
 };
+
+// Optional extra: if this can't load, the order screen still works without the notes.
+async function loadWaterStatus() {
+  const { data, error } = await sb.from('field_water_status').select('*');
+  orderState.water = error ? new Map() : new Map(data.map((r) => [r.field_id, r]));
+}
+
+function waterNote(fieldId) {
+  const w = orderState.water.get(fieldId);
+  if (!w) return '';
+  const daysAgo = (iso) => Math.round((new Date(localDate() + 'T12:00:00') - new Date(iso + 'T12:00:00')) / 864e5);
+  const fmt = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' });
+  if (w.running_now && w.running_since) {
+    const d = daysAgo(w.running_since);
+    return `On since ${fmt(w.running_since)}${d > 0 ? ` · ${d} day${d === 1 ? '' : 's'}` : ''}`;
+  }
+  if (w.last_watered) {
+    const d = daysAgo(w.last_watered);
+    return `Last water ${fmt(w.last_watered)} · ${d === 0 ? 'today' : d === 1 ? 'yesterday' : `${d} days ago`}`;
+  }
+  return 'No water on record';
+}
 
 const orderParents = () => refs.fields.filter((f) => f.active && !f.parent_field_id && f.turnout_id);
 const subunitsOf = (id) => refs.fields.filter((f) => f.active && f.parent_field_id === id);
@@ -378,7 +411,7 @@ async function renderOrder(el) {
     orderState.date = addDays(orderState.date, Number(b.dataset.shift));
     renderOrder(el);
   }));
-  await loadOrder(orderState.date);
+  await Promise.all([loadOrder(orderState.date), loadWaterStatus()]);
   drawOrder($('#order-body', el));
 }
 
@@ -438,14 +471,14 @@ function drawOrder(body) {
           html += `<div class="field-row"><span class="field-name">${esc(f.name)}</span>${moveBtns('fields', f.field_id)}</div>`;
         } else if (subs.length) {
           html += `<div class="field-row parent ${l.is_on ? 'on' : ''}" data-row="${f.field_id}">
-              <span class="field-name">${esc(f.name)}<small>on when either half is on</small></span>${cfsInput}<span class="toggle-spacer"></span></div>
+              <span class="field-name">${esc(f.name)}<small>${waterNote(f.field_id)}</small></span>${cfsInput}<span class="toggle-spacer"></span></div>
             ${subs.map((sf) => `<label class="field-row sub ${s.subs.get(sf.field_id) ? 'on' : ''}" data-subrow="${sf.field_id}">
-              <span class="field-name">${esc(sf.name)}</span>
+              <span class="field-name">${esc(sf.name)}<small>${waterNote(sf.field_id)}</small></span>
               <input type="checkbox" data-sub="${sf.field_id}" data-parent="${f.field_id}" ${s.subs.get(sf.field_id) ? 'checked' : ''}>
             </label>`).join('')}`;
         } else {
           html += `<div class="field-row ${l.is_on ? 'on' : ''}" data-row="${f.field_id}">
-            <label class="field-name" for="on-${f.field_id}">${esc(f.name)}</label>${cfsInput}
+            <label class="field-name" for="on-${f.field_id}">${esc(f.name)}<small>${waterNote(f.field_id)}</small></label>${cfsInput}
             <input type="checkbox" id="on-${f.field_id}" data-on="${f.field_id}" ${l.is_on ? 'checked' : ''}></div>`;
         }
       }
@@ -615,6 +648,7 @@ async function saveOrder(status, body, message) {
     if (subs.length) await q(sb.from('water_order_subunits').insert(subs));
 
     Object.assign(s, { orderId: order.order_id, status: order.status, submittedAt: order.submitted_at, dirty: false });
+    await loadWaterStatus();
     toast(message ?? (status === 'submitted' ? 'Order marked as sent' : 'Draft saved'));
     drawOrder(body);
     return true;
@@ -789,13 +823,31 @@ function fieldsInOrder() {
   return out;
 }
 
+// "Year 2 of stand" for a multi-year crop in a later season.
+function standNote(r, season) {
+  if (!r.multi_year) return '';
+  const year = season - r.season + 1;
+  const end = r.end_season != null ? (r.end_season === season ? ' · last year' : '') : '';
+  return `<span class="stand-note">${year === 1 ? 'New stand' : `Year ${year} of stand`}${end}</span>`;
+}
+function plantedCell(r, season) {
+  if (r.grown_by) return `<span class="badge off">Grown by ${esc(r.grown_by)}</span>`;
+  if (r.season !== season) return `<span class="muted small">Planted ${r.season}</span>`;
+  return esc(fmtDate(r.planting_date)) + (r.acres != null ? ` <span class="muted small">· ${num(r.acres, 0)} ac</span>` : '');
+}
+const seasonSpan = (r) => !r.multi_year ? String(r.season)
+  : r.end_season == null ? `${r.season}–` : r.end_season === r.season ? String(r.season) : `${r.season}–${r.end_season}`;
+
 function yieldText(r) {
   return r.total_yield != null ? `${Number(r.total_yield).toLocaleString()} ${esc(r.yield_unit ?? '')}` : '<span class="muted">—</span>';
 }
 
 async function renderCrops(el) {
-  const rows = await q(sb.from('crop_year_summary').select('*').eq('season', cropSeason)
-    .order('sequence').order('crop_year_id'));
+  // This season's crops, plus multi-year stands planted earlier that are still in.
+  const rows = (await q(sb.from('crop_year_summary').select('*').lte('season', cropSeason)
+    .or(`season.eq.${cropSeason},multi_year.eq.true`)
+    .order('season').order('sequence').order('crop_year_id')))
+    .filter((r) => r.season === cropSeason || (r.multi_year && (r.end_season == null || r.end_season >= cropSeason)));
   const byField = new Map();
   rows.forEach((r) => byField.set(r.field_id, [...(byField.get(r.field_id) ?? []), r]));
   const fields = fieldsInOrder().filter((f) => f.active || byField.has(f.field_id));
@@ -816,10 +868,11 @@ async function renderCrops(el) {
     list.forEach((r, i) => {
       body += `<tr>${i === 0 ? nameCell(list.length) : ''}
         <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span>${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}
+          ${standNote(r, cropSeason)}
           ${r.variety ? `<span class="v-inline">${esc(r.variety)}</span>` : ''}</td>
         <td class="c-variety">${esc(r.variety ?? '')}</td>
-        <td class="c-planted">${esc(fmtDate(r.planting_date))}${r.acres != null ? ` <span class="muted small">· ${num(r.acres, 0)} ac</span>` : ''}</td>
-        <td class="r c-yield">${yieldText(r)}</td>
+        <td class="c-planted">${plantedCell(r, cropSeason)}</td>
+        <td class="r c-yield">${r.grown_by || r.multi_year ? '<span class="muted">—</span>' : yieldText(r)}</td>
         <td class="r"><button class="small" data-edit-cy="${r.crop_year_id}">Edit</button>
           ${i === list.length - 1 ? `<button class="small ghost" data-add="${f.field_id}" title="Add another crop or variety">+</button>` : ''}</td>
       </tr>`;
@@ -863,9 +916,9 @@ async function openFieldHistory(fieldId, onChange) {
     ${rows.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Season</th><th>Crop</th><th>Variety</th><th>Planted</th><th class="r">Yield</th><th></th></tr></thead>
       <tbody>${rows.map((r) => `<tr>
-        <td><b>${r.season}</b>${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}</td>
+        <td><b>${seasonSpan(r)}</b>${r.multi_year && r.end_season == null ? ' <span class="muted small">still in</span>' : ''}${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}</td>
         <td><span class="crop-tag">${esc(cropName(r.crop_id))}</span></td><td>${esc(r.variety ?? '')}</td>
-        <td>${esc(fmtDate(r.planting_date))}</td><td class="r">${yieldText(r)}</td>
+        <td>${plantedCell(r, r.season)}</td><td class="r">${r.grown_by ? '<span class="muted">—</span>' : yieldText(r)}</td>
         <td class="r"><button class="small" data-edit-cy="${r.crop_year_id}">Edit</button></td></tr>`).join('')}
       </tbody></table></div>` : '<p class="muted">No crops recorded for this field yet.</p>'}
     <div class="actions"><span class="spacer"></span><button data-act="close">Close</button></div></div>`;
@@ -906,14 +959,22 @@ async function openCropYear(row, defaults, onDone) {
     <label>Crop *<select name="crop_id" required><option value="">Choose…</option>
       ${crops.map((c) => `<option value="${c.crop_id}" ${c.crop_id === v.crop_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
     </select></label>
+    <label class="check"><input type="checkbox" name="multi_year" ${v.multi_year ? 'checked' : ''}> Multi-year stand</label>
+    <label id="end-wrap">Last season in the field<select name="end_season"></select></label>
     <label>Variety<input name="variety" list="variety-options" autocomplete="off" value="${esc(v.variety ?? '')}"
       placeholder="Start typing — past varieties appear">
       <datalist id="variety-options"></datalist></label>
-    <div class="row2">
-      <label>Planting date<input type="date" name="planting_date" value="${esc(v.planting_date ?? '')}"></label>
-      <label>Acres planted<input type="number" name="acres" step="0.1" min="0" value="${esc(v.acres ?? '')}"></label>
+    <div id="leased-out" class="leased-out">
+      <p class="small">This field is leased out this season. Only crop and variety are kept, no planting or harvest data.</p>
+      <label>Grown by<input name="grown_by" value="${esc(v.grown_by ?? '')}"></label>
     </div>
-    <p class="muted small" id="acres-hint"></p>
+    <div id="our-crop">
+      <div class="row2">
+        <label>Planting date<input type="date" name="planting_date" value="${esc(v.planting_date ?? '')}"></label>
+        <label>Acres planted<input type="number" name="acres" step="0.1" min="0" value="${esc(v.acres ?? '')}"></label>
+      </div>
+      <p class="muted small" id="acres-hint"></p>
+    </div>
     <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
     <div class="actions">
       ${row ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
@@ -933,10 +994,33 @@ async function openCropYear(row, defaults, onDone) {
     $('#acres-hint', dlg).textContent = f?.acres != null
       ? `Leave acres blank if the whole field (${num(f.acres, 0)} ac) is in this crop.` : '';
   };
-  el.crop_id.onchange = fillVarieties;
-  el.field_id.onchange = acresHint;
+  const syncStand = () => {
+    const show = el.multi_year.checked;
+    $('#end-wrap', dlg).hidden = !show;
+    const start = Number(el.season.value) || new Date().getFullYear();
+    const keep = el.end_season.value || (v.end_season ?? '');
+    el.end_season.innerHTML = '<option value="">Still in the field</option>' +
+      Array.from({ length: 11 }, (_, i) => start + i)
+        .map((y) => `<option value="${y}" ${String(y) === String(keep) ? 'selected' : ''}>${y}</option>`).join('');
+  };
+  const syncLeasedOut = () => {
+    const lease = el.field_id.value && el.season.value ? leasedOutIn(Number(el.field_id.value), Number(el.season.value)) : null;
+    const out = !!lease || !!(row?.grown_by);
+    $('#leased-out', dlg).hidden = !out;
+    $('#our-crop', dlg).hidden = out;
+    if (out && !el.grown_by.value && lease) el.grown_by.value = lease.lessor;
+  };
+  el.crop_id.onchange = () => {
+    fillVarieties();
+    if (!row) { el.multi_year.checked = !!refs.crops.find((c) => c.crop_id === Number(el.crop_id.value))?.multi_year; syncStand(); }
+  };
+  el.field_id.onchange = () => { acresHint(); syncLeasedOut(); };
+  el.season.oninput = () => { syncStand(); syncLeasedOut(); };
+  el.multi_year.onchange = syncStand;
   fillVarieties();
   acresHint();
+  syncStand();
+  syncLeasedOut();
 
   form.onsubmit = async (e) => {
     e.preventDefault();
@@ -950,7 +1034,15 @@ async function openCropYear(row, defaults, onDone) {
       planting_date: val('planting_date') || null,
       acres: val('acres') === '' ? null : Number(val('acres')),
       notes: val('notes') || null,
+      multi_year: el.multi_year.checked,
+      end_season: el.multi_year.checked && val('end_season') ? Number(val('end_season')) : null,
+      grown_by: null,
     };
+    if (!$('#leased-out', dlg).hidden) {
+      data.grown_by = val('grown_by') || null;
+      data.planting_date = null;
+      data.acres = null;
+    }
     // Reuse the spelling already on file ("dekalb 51-20" -> "DeKalb 51-20").
     if (data.variety) {
       const match = varietiesFor(data.crop_id).find((x) => x.toLowerCase() === data.variety.toLowerCase());

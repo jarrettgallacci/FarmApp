@@ -327,3 +327,9 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
   .crop-table th, .crop-table td { white-space: normal; }
   .crop-table .field-cell, .crop-tag { white-space: nowrap; }
 }
+
+/* Multi-year stands and leased-out ground */
+.stand-note { display: inline-block; margin-left: .35rem; font-size: .76rem; color: var(--green); font-weight: 600; }
+.leased-out { background: var(--gray-soft); border-radius: 10px; padding: .7rem .8rem; display: flex; flex-direction: column; gap: .5rem; }
+.leased-out p { margin: 0; color: var(--muted); }
+#our-crop { display: flex; flex-direction: column; gap: .75rem; }
