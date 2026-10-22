@@ -3470,7 +3470,7 @@ async function renderSsCal(box) {
         <li>Turn the meters on. When seed starts falling, tap <b>Start</b>. At about <b>${st.sec} seconds</b> the phone buzzes and beeps. Turn the meters off, and tap <b>Stop</b> when seed stops falling. The measured time is used for the math.</li>
         <li>Weigh each bag in <b>grams</b> and enter it by row.</li>
         <li>Tap <b>Save test</b>, set the controller to the suggested RPM, and test again. Each saved test sharpens the suggestion.</li>
-        <li>Rows flagged as off from the others won't be fixed by RPM, since each bin's two rows share it. Check that row's sponge, tube and drop.</li>
+        <li>The RPM is set from the average of every row you caught. Rows or pairs flagged as off can't be fixed with RPM, since one setting drives them all. Check that row's sponge, tube and drop, or that bin's feeder.</li>
         <li>In the field, hold the speed you entered. The RPM is fixed, so faster means less seed and slower means more.</li>
       </ol></div>
       <div id="cal-log"></div>`;
@@ -3540,19 +3540,23 @@ async function renderSsCal(box) {
     // Each row vs the average; each bin's own RPM if the controller can set bins separately.
     const rowTable = () => {
       if (rowsIn.length < 2 || !avg) return '';
-      const bins = [1, 2, 3, 4].map((b) => { const r = rowsIn.filter((x) => x.bin === b); return r.length ? { b, avg: r.reduce((a, x) => a + x.g, 0) / r.length } : null; }).filter(Boolean);
+      const bins = [1, 2, 3, 4].map((b) => { const r = rowsIn.filter((x) => x.bin === b); return r.length ? { b, n: r.length, rows: r.map((x) => x.row).join(), avg: r.reduce((a, x) => a + x.g, 0) / r.length } : null; }).filter(Boolean);
       return `<div class="cal-stat"><span class="stat-label">By row (vs the average of ${rowsIn.length} rows)</span>
         <table class="cal-rows"><thead><tr><th>Row</th><th>g</th><th>lb/ac</th><th>vs avg</th></tr></thead><tbody>
         ${rowsIn.map((r) => { const d = (r.g / avg - 1) * 100, rt = rateOf(r.g); return `<tr class="${Math.abs(d) > 5 ? 'off' : ''}"><td>${r.row} <span class="muted">bin ${r.bin}</span></td><td>${r.g}</td><td>${rt != null ? rt.toFixed(1) : '—'}</td><td>${d >= 0 ? '+' : ''}${d.toFixed(1)}%${Math.abs(d) > 5 ? ' ⚠' : ''}</td></tr>`; }).join('')}
         </tbody></table>
-        ${rowsIn.some((r) => Math.abs(r.g / avg - 1) > 0.05) ? '<span class="muted small">⚠ More than 5% off the other rows. Check that row’s sponge, tube and drop; RPM changes both rows on a bin.</span>' : ''}
-        ${bins.length > 1 && (sugg != null || rpm > 0) && tgt > 0 ? `<span class="muted small">If bins can be set separately: ${bins.map((x) => `bin ${x.b} <b>${fmtRpm((close ? rpm : sugg) * (avg / x.avg))}</b>`).join(' · ')} RPM</span>` : ''}</div>`;
+        ${rowsIn.some((r) => Math.abs(r.g / avg - 1) > 0.05) ? '<span class="muted small">⚠ More than 5% off the other rows. Check that row’s sponge, tube and drop; the one RPM setting moves every row together.</span>' : ''}
+        ${bins.length > 1 ? `<span class="stat-label" style="margin-top:.4rem">By pair (bin) vs the average</span>
+        <table class="cal-rows"><thead><tr><th>Bin</th><th>Rows</th><th>Avg g</th><th>vs avg</th></tr></thead><tbody>
+        ${bins.map((x) => { const d = (x.avg / avg - 1) * 100; return `<tr class="${Math.abs(d) > 5 ? 'off' : ''}"><td>${x.b}</td><td>${x.n === 2 ? `${x.b * 2 - 1}–${x.b * 2}` : x.rows}</td><td>${x.avg.toFixed(1)}</td><td>${d >= 0 ? '+' : ''}${d.toFixed(1)}%${Math.abs(d) > 5 ? ' ⚠' : ''}</td></tr>`; }).join('')}
+        </tbody></table>
+        ${bins.some((x) => Math.abs(x.avg / avg - 1) > 0.05) ? '<span class="muted small">⚠ A whole pair off together points at that bin (feeder, sponge set, drive) rather than one row’s tube.</span>' : ''}` : ''}</div>`;
     };
     const speeds = mph > 0 && fit && tgt > 0 ? [-1, -0.5, 0, 0.5, 1].map((d) => mph + d).filter((m) => m > 0) : [];
 
     const suggCard = sugg == null ? (tgt > 0 && !(mph > 0) ? '<p class="muted small">Enter the planting speed. Without a drive wheel, the rate depends on it.</p>'
         : tgt > 0 && !st.crop ? '<p class="muted small">Pick the crop (and variety) to get a suggested RPM and use past tests.</p>' : '')
-      : `<div class="cal-stat ${close ? 'ok' : ''}"><span class="stat-label">${fit.start ? 'Suggested starting RPM' : 'Suggested RPM'} · all rows at ${mph} mph</span>
+      : `<div class="cal-stat ${close ? 'ok' : ''}"><span class="stat-label">${fit.start ? 'Suggested starting RPM' : 'Suggested RPM'} · averaged over ${rowsIn.length || 'all'} rows at ${mph} mph</span>
           <span class="cal-settings">${rpm > 0 && !fit.start && !close ? `<span>Now <b>${fmtRpm(rpm)}</b></span><span class="cal-arrow">→</span>` : ''}
           <span><b class="stat-value">${close ? fmtRpm(rpm) : fmtRpm(sugg)}</b> RPM</span></span>
           <span class="muted small">${close ? 'Within 3% of target. Leave it here.' : how}${!okRange(sugg) ? ` <b>That's outside the controller's ${RPM_MIN}–${RPM_MAX} RPM range. Change the sponge set or the speed.</b>` : ''}</span>
