@@ -1523,14 +1523,15 @@ function toggleSelect(f) {
 function drawSelectSide() {
   const side = $('#map-side');
   const ids = [...(mapState.selected ?? [])];
-  const picked = fieldsInOrder().filter((f) => ids.includes(f.field_id));
+  const picked = ids.map(fieldById).filter(Boolean);   // in the order they were tapped
   const acres = picked.reduce((t, f) => t + Number(f.acres || 0), 0);
   side.innerHTML = `<h3>Select fields</h3>
-    <p class="muted small">Click fields on the map to add or remove them.</p>
+    <p class="muted small">Click fields on the map to add or remove them. For a load, tap them in the order you'll do them.</p>
     ${picked.length ? `<p><b>${picked.length}</b> field(s) · ${num(acres, 0)} ac</p>
-      <div class="chips">${picked.map((f) => `<span class="chip">${esc(f.name)}</span>`).join('')}</div>
+      <div class="chips">${picked.map((f, i) => `<span class="chip"><b>${i + 1}</b> ${esc(f.name)}</span>`).join('')}</div>
       <div class="stack">
-        <button class="primary" data-act="log-chem">Log chemical application</button>
+        <button class="primary" data-act="start-load">Start a load</button>
+        <button data-act="log-chem">Log chemical application</button>
         <button data-act="plan-chem">Plan chemical application</button>
         <button data-act="share">Share locations</button>
         <button class="ghost small" data-act="clear">Clear selection</button>
@@ -1539,6 +1540,7 @@ function drawSelectSide() {
   const b = (n, fn) => { const x = $(`[data-act=${n}]`, side); if (x) x.onclick = fn; };
   b('log-chem', () => go('done'));
   b('plan-chem', () => go('planned'));
+  b('start-load', () => openChemForm({ fieldIds: ids, asLoad: true, keepOrder: true }, () => { mapState.selected = new Set(); drawFields(); drawSide(); }));
   b('clear', () => { mapState.selected = new Set(); drawFields(); drawSide(); });
   b('share', () => shareFields(picked));
 }
@@ -2068,7 +2070,7 @@ async function openChemForm(opts, onDone) {
           <div class="pick-list">${fields.map((f) => `<label class="pick" data-name="${esc(f.name.toLowerCase())}">
             <input type="checkbox" value="${f.field_id}" ${selected.has(f.field_id) ? 'checked' : ''}>
             <span>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</span>${f.acres != null ? `<span class="muted small">${num(f.acres, 0)} ac</span>` : ''}</label>`).join('')}</div>
-          <p class="muted small">${asLoad ? 'Fields are queued in the order shown; you can reorder them in the load.' : 'Saving makes one record for each field picked.'}</p></div>`}
+          <p class="muted small">${asLoad ? (opts.keepOrder ? 'Fields are queued in the order you tapped them on the map; you can reorder them in the load.' : 'Fields are queued in the order shown; you can reorder them in the load.') : 'Saving makes one record for each field picked.'}</p></div>`}
     <p class="muted small" id="crop-line"></p>
     <div class="row2">
       <label>Method<select name="method">${METHODS.map(([k, t]) => `<option value="${k}" ${v.method === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
@@ -2245,7 +2247,10 @@ async function openChemForm(opts, onDone) {
     const btn = $('button[type=submit]', form);
     btn.disabled = true;
     try {
-      const ordered = asLoad ? fieldsInOrder().map((f) => f.field_id).filter((id) => ids.includes(id)) : ids;
+      const tapped = (opts.fieldIds ?? []).filter((id) => ids.includes(id));
+      const ordered = !asLoad ? ids : opts.keepOrder
+        ? [...tapped, ...fieldsInOrder().map((f) => f.field_id).filter((id) => ids.includes(id) && !tapped.includes(id))]
+        : fieldsInOrder().map((f) => f.field_id).filter((id) => ids.includes(id));
       for (const [n, fid] of ordered.entries()) {
         const crops = await cropFor(fid, base.applied_on);
         const keepLink = ev && ev.field_id === fid && ev.crop_year_id && crops.some((c) => c.crop_year_id === ev.crop_year_id);
