@@ -139,6 +139,9 @@ const CRUD = {
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'type', label: 'Type (contractor = work hired out)', type: 'select', required: true, list: true,
         options: () => [['partner', 'Partner'], ['employee', 'Employee'], ['contractor', 'Contractor']] },
+      { key: 'license_no', label: 'Pesticide license / certification no.', type: 'text', list: true, listLabel: 'License no.' },
+      { key: 'phone', label: 'Phone', type: 'text' },
+      { key: 'address', label: 'Address', type: 'textarea' },
       { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
     ],
   },
@@ -1929,6 +1932,35 @@ function carrierText(e) {
 const eventCrop = (e) => (e.crop_years ? cropName(e.crop_years.crop_id) : e.crop_label ?? '');
 
 const chemState = { season: new Date().getFullYear(), q: '', method: '', type: '', status: '' };
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const NON_PESTICIDE = ['fertilizer', 'adjuvant', 'soil_amendment'];
+const isPesticide = (c) => !!c && !NON_PESTICIDE.includes(c.type);
+const pad2 = (n) => String(n).padStart(2, '0');
+function toLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+const clock = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '');
+function wxText(e) {
+  const out = [];
+  if (e.started_at) out.push(`${clock(e.started_at)}${e.stopped_at ? '–' + clock(e.stopped_at) : ' →'}`);
+  if (e.wind_mph != null) out.push(`wind ${e.wind_dir ?? ''} ${Number(e.wind_mph)}${e.wind_mph_max != null && Number(e.wind_mph_max) !== Number(e.wind_mph) ? '–' + Number(e.wind_mph_max) : ''} mph`.replace('  ', ' '));
+  if (e.temp_f != null) out.push(`${Number(e.temp_f)}°F`);
+  return out.join(' · ');
+}
+
+// Current weather at a field (weather service estimate, not a measurement).
+async function weatherNow(fieldId) {
+  const f = fieldById(fieldId);
+  const pt = fieldPoint(f) ?? [FARM_LON, FARM_LAT];
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${pt[1].toFixed(4)}&longitude=${pt[0].toFixed(4)}` +
+    '&current=temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FLos_Angeles';
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('weather ' + res.status);
+  const c = (await res.json()).current;
+  return { temp_f: Math.round(c.temperature_2m), wind_mph: Math.round(c.wind_speed_10m), gust_mph: Math.round(c.wind_gusts_10m), wind_dir: compass(c.wind_direction_10m) };
+}
 
 async function renderChem(el) {
   const s = chemState;
@@ -1945,6 +1977,8 @@ async function renderChem(el) {
     (!term || fieldName(r.field_id).toLowerCase().includes(term) ||
       r.chemical_event_products.some((l) => chemById(l.chemical_id)?.name.toLowerCase().includes(term))));
   const planned = rows.filter((r) => r.status === 'planned').length;
+  // (tolerates the loads table not existing yet)
+  const openLoads = (await sb.from('chemical_loads').select('*, chemical_events(event_id, status, started_at, stopped_at)').eq('status', 'open').order('created_at')).data ?? [];
 
   el.innerHTML = `
     <div class="section-head"><h2>Chemical records</h2>
@@ -1952,8 +1986,15 @@ async function renderChem(el) {
         <button data-season="-1" aria-label="Previous year">‹</button>
         <strong class="season">${s.season}</strong>
         <button data-season="1" aria-label="Next year">›</button>
+        <button data-act="load">Start a load</button>
         <button class="primary" data-act="add">Add record</button>
       </div></div>
+    ${openLoads.length ? `<section class="card loads-card"><h3>Loads in progress</h3><ul class="list">${openLoads.map((l) => {
+      const evs = l.chemical_events; const done = evs.filter((e) => e.status === 'done').length;
+      const running = evs.some((e) => e.started_at && !e.stopped_at);
+      return `<li><span class="li-name"><b>${esc(l.name || methodName(l.method) + ' load')}</b> <span class="muted small">${esc(fmtDate(l.applied_on))}</span></span>
+        <span class="li-value">${running ? '<span class="badge new">Running</span> ' : ''}${done} of ${evs.length} done <button class="small primary" data-load="${l.load_id}">Open</button></span></li>`;
+    }).join('')}</ul></section>` : ''}
     <div class="filters">
       <input type="search" data-f="q" placeholder="Search field or product…" value="${esc(s.q)}">
       <select data-f="method"><option value="">All methods</option>${METHODS.map(([k, t]) => `<option value="${k}" ${s.method === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
@@ -1968,7 +2009,7 @@ async function renderChem(el) {
         <td class="nowrap">${esc(fmtDate(r.applied_on))}${r.status === 'planned' ? ' <span class="badge down">Plan</span>' : ''}</td>
         <td class="nowrap"><b>${esc(fieldName(r.field_id))}</b></td>
         <td class="c-crop">${esc(eventCrop(r))}</td>
-        <td>${esc(methodName(r.method))}${carrierText(r) ? `<div class="muted small">${esc(carrierText(r))}</div>` : ''}</td>
+        <td>${esc(methodName(r.method))}${carrierText(r) ? `<div class="muted small">${esc(carrierText(r))}</div>` : ''}${wxText(r) ? `<div class="muted small">${esc(wxText(r))}</div>` : ''}</td>
         <td><div class="prod-list">${r.chemical_event_products.map((l) => {
           const c = chemById(l.chemical_id);
           return `<span class="prod"><span class="type-dot t-${esc(c?.type ?? 'other')}"></span>${esc(c?.name ?? '?')} <span class="muted">${esc(rateText(l))}</span></span>`;
@@ -1980,6 +2021,8 @@ async function renderChem(el) {
   const reload = () => renderChem(el);
   $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
   $('[data-act=add]', el).onclick = () => openChemForm({ fieldIds: [] }, reload);
+  $('[data-act=load]', el).onclick = () => openChemForm({ fieldIds: [], asLoad: true }, reload);
+  $$('[data-load]', el).forEach((b) => (b.onclick = () => openLoad(Number(b.dataset.load), reload)));
   $$('[data-edit]', el).forEach((b) => (b.onclick = () => openChemForm({ event: rows.find((r) => r.event_id === Number(b.dataset.edit)) }, reload)));
   $$('[data-f]', el).forEach((inp) => {
     const apply = () => { s[inp.dataset.f] = inp.value; reload().then(() => { const x = $(`[data-f="${inp.dataset.f}"]`, el); if (x?.type === 'search') { x.focus(); x.setSelectionRange(x.value.length, x.value.length); } }); };
@@ -2000,7 +2043,8 @@ async function cropFor(fieldId, date) {
 // opts: { event } to edit, or { fieldIds, date, status } for new records
 async function openChemForm(opts, onDone) {
   const ev = opts.event;
-  const v = ev ?? { applied_on: opts.date ?? localDate(), status: opts.status ?? 'done', method: 'spray' };
+  const asLoad = !!opts.asLoad;
+  const v = ev ?? { applied_on: opts.date ?? localDate(), status: asLoad ? 'planned' : opts.status ?? 'done', method: 'spray' };
   const lines = ev ? ev.chemical_event_products.map((l) => ({ ...l })) : [{ rate_unit: 'oz', rate_basis: 'acre' }];
   let selected = new Set(ev ? [ev.field_id] : opts.fieldIds ?? []);
   const fields = fieldsInOrder().filter((f) => f.active || selected.has(f.field_id));
@@ -2009,12 +2053,14 @@ async function openChemForm(opts, onDone) {
   const dlg = $('#dialog');
   dlg.classList.add('wide');
   dlg.innerHTML = `<form class="form chem-form">
-    <div class="dialog-head"><h3>${ev ? 'Edit' : 'New'} chemical record</h3></div>
+    <div class="dialog-head"><h3>${asLoad ? 'New load' : `${ev ? 'Edit' : 'New'} chemical record`}</h3></div>
+    ${asLoad ? '<p class="muted small">Set up the tank mix once, pick the fields to queue, then start and stop each field as you get to it.</p>' : ''}
     <div class="row2">
       <label>Date *<input type="date" name="applied_on" required value="${esc(v.applied_on)}"></label>
-      <label>Status<select name="status">
+      ${asLoad ? `<label>Load name<input name="load_name" placeholder="e.g. Grass seed – Huskie mix"></label>`
+        : `<label>Status<select name="status">
         <option value="done" ${v.status !== 'planned' ? 'selected' : ''}>Done</option>
-        <option value="planned" ${v.status === 'planned' ? 'selected' : ''}>Planned</option></select></label>
+        <option value="planned" ${v.status === 'planned' ? 'selected' : ''}>Planned</option></select></label>`}
     </div>
     ${ev ? `<label>Field<select name="field_id">${fields.map((f) => `<option value="${f.field_id}" ${f.field_id === ev.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}</select></label>`
       : `<div class="field-pick"><div class="field-pick-head"><span>Fields * <span class="muted small" id="pick-count"></span></span>
@@ -2022,7 +2068,7 @@ async function openChemForm(opts, onDone) {
           <div class="pick-list">${fields.map((f) => `<label class="pick" data-name="${esc(f.name.toLowerCase())}">
             <input type="checkbox" value="${f.field_id}" ${selected.has(f.field_id) ? 'checked' : ''}>
             <span>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</span>${f.acres != null ? `<span class="muted small">${num(f.acres, 0)} ac</span>` : ''}</label>`).join('')}</div>
-          <p class="muted small">Saving makes one record for each field picked.</p></div>`}
+          <p class="muted small">${asLoad ? 'Fields are queued in the order shown; you can reorder them in the load.' : 'Saving makes one record for each field picked.'}</p></div>`}
     <p class="muted small" id="crop-line"></p>
     <div class="row2">
       <label>Method<select name="method">${METHODS.map(([k, t]) => `<option value="${k}" ${v.method === k ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
@@ -2049,13 +2095,33 @@ async function openChemForm(opts, onDone) {
     <div id="lines"></div>
     <button type="button" class="small" data-act="add-line">+ Add product</button>
     <datalist id="chem-options"></datalist>
+    ${asLoad ? `<label class="check"><input type="checkbox" name="record_times" checked> Record start/stop times and weather for each field <span class="muted small">(required for pesticides; uncheck for fertilizer-only loads)</span></label>`
+      : `<details class="wx-fields" ${ev?.started_at || ev?.wind_mph != null ? 'open' : ''}><summary>Times and weather <span class="muted small">(required for pesticides)</span></summary>
+      <div class="row2">
+        <label>Start<input type="datetime-local" name="started_at" value="${esc(toLocalInput(v.started_at))}"></label>
+        <label>Stop<input type="datetime-local" name="stopped_at" value="${esc(toLocalInput(v.stopped_at))}"></label>
+      </div>
+      <div class="row4">
+        <label>Wind from<select name="wind_dir"><option value="">—</option>${COMPASS.map((d) => `<option ${v.wind_dir === d ? 'selected' : ''}>${d}</option>`).join('')}</select></label>
+        <label>Wind mph<input type="number" step="any" min="0" name="wind_mph" value="${esc(v.wind_mph ?? '')}"></label>
+        <label>to mph<input type="number" step="any" min="0" name="wind_mph_max" value="${esc(v.wind_mph_max ?? '')}" placeholder="if it varied"></label>
+        <label>Temp °F<input type="number" step="any" name="temp_f" value="${esc(v.temp_f ?? '')}"></label>
+      </div>
+      <div class="row2">
+        <label>Gusts mph<input type="number" step="any" min="0" name="gust_mph" value="${esc(v.gust_mph ?? '')}"></label>
+        <label>Weather from<select name="weather_source"><option value="">—</option>
+          <option value="measured" ${v.weather_source === 'measured' ? 'selected' : ''}>Measured at the field</option>
+          <option value="auto" ${v.weather_source === 'auto' ? 'selected' : ''}>Weather service estimate</option></select></label>
+      </div>
+      <label>People who applied it<input name="applied_by_names" value="${esc(v.applied_by_names ?? '')}" placeholder="Names, if not just the operator above"></label>
+      </details>`}
     <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
     ${ev?.base_solution ? `<p class="muted small">Original record: "${esc(ev.base_solution)}"${ev.crop_label ? `, crop "${esc(ev.crop_label)}"` : ''}</p>` : ''}
     <div class="actions">
       ${ev ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
       <span class="spacer"></span>
       <button type="button" data-act="cancel">Cancel</button>
-      <button type="submit" class="primary">Save</button>
+      <button type="submit" class="primary">${asLoad ? 'Create load' : 'Save'}</button>
     </div></form>`;
 
   const form = $('form', dlg);
@@ -2135,8 +2201,32 @@ async function openChemForm(opts, onDone) {
     const val = (k) => (el[k] ? el[k].value.trim() : '');
     const numOrNull = (k) => (val(k) === '' ? null : Number(val(k)));
     const method = val('method');
+    const status = asLoad ? 'planned' : val('status');
+    const tsOrNull = (k) => (val(k) ? new Date(val(k)).toISOString() : null);
+    const timesWx = asLoad ? {} : {
+      started_at: tsOrNull('started_at'), stopped_at: tsOrNull('stopped_at'), wind_dir: val('wind_dir') || null,
+      wind_mph: numOrNull('wind_mph'), wind_mph_max: numOrNull('wind_mph_max'), gust_mph: numOrNull('gust_mph'),
+      temp_f: numOrNull('temp_f'), weather_source: val('weather_source') || null, applied_by_names: val('applied_by_names') || null,
+    };
+    const pesticide = used.some((l) => isPesticide(chemById(l.chemical_id)));
+    if (asLoad && !el.record_times.checked && pesticide &&
+      !confirm('This load has pesticide products. Washington requires start/stop times and weather for those. Skip them anyway?')) return;
+    if (!asLoad && status === 'done' && pesticide && (!timesWx.started_at || timesWx.wind_mph == null || timesWx.temp_f == null) &&
+      !confirm('This record has pesticide products but is missing start time, wind or temperature (required in Washington). Save anyway?')) return;
+    let loadId = null;
+    if (asLoad) {
+      try {
+        loadId = (await q(sb.from('chemical_loads').insert({
+          name: val('load_name') || null, applied_on: val('applied_on'), method,
+          performed_by: val('performed_by') ? Number(val('performed_by')) : null,
+          carrier_gpa: ['spray', 'aerial'].includes(method) ? numOrNull('carrier_gpa') : null,
+          record_times: el.record_times.checked, notes: val('notes') || null,
+        }).select('load_id').single())).load_id;
+      } catch { return; }
+    }
     const base = {
-      applied_on: val('applied_on'), status: val('status'), method,
+      ...timesWx, load_id: loadId,
+      applied_on: val('applied_on'), status, method,
       performed_by: val('performed_by') ? Number(val('performed_by')) : null,
       carrier_gpa: ['spray', 'aerial'].includes(method) ? numOrNull('carrier_gpa') : null,
       hours: ['spray', 'aerial'].includes(method) ? numOrNull('hours') : null,
@@ -2155,10 +2245,13 @@ async function openChemForm(opts, onDone) {
     const btn = $('button[type=submit]', form);
     btn.disabled = true;
     try {
-      for (const fid of ids) {
+      const ordered = asLoad ? fieldsInOrder().map((f) => f.field_id).filter((id) => ids.includes(id)) : ids;
+      for (const [n, fid] of ordered.entries()) {
         const crops = await cropFor(fid, base.applied_on);
         const keepLink = ev && ev.field_id === fid && ev.crop_year_id && crops.some((c) => c.crop_year_id === ev.crop_year_id);
         const row = { ...base, field_id: fid, crop_year_id: keepLink ? ev.crop_year_id : crops[0]?.crop_year_id ?? null };
+        if (asLoad) { row.queue_pos = n + 1; row.acres_treated = fieldById(fid)?.acres ?? null; }
+        if (ev) { delete row.load_id; }
         let eventId;
         if (ev) {
           await q(sb.from('chemical_events').update(row).eq('event_id', ev.event_id));
@@ -2171,8 +2264,9 @@ async function openChemForm(opts, onDone) {
       }
       rotationCache.at = 0;
       dlg.close();
-      toast(ids.length > 1 ? `Saved ${ids.length} records` : 'Saved');
+      toast(asLoad ? `Load created with ${ids.length} field(s)` : ids.length > 1 ? `Saved ${ids.length} records` : 'Saved');
       onDone?.();
+      if (asLoad) openLoad(loadId, onDone);
     } catch {
       btn.disabled = false;
     }
@@ -2189,6 +2283,154 @@ async function openChemForm(opts, onDone) {
   };
   dlg.onclose = () => dlg.classList.remove('wide');
   if (!dlg.open) dlg.showModal();
+}
+
+// =====================================================================
+// Loads: one tank mix, a queue of fields. Start/Stop stamps the times and
+// pulls the weather at that field; each field becomes its own record.
+// =====================================================================
+let loadTimer = null;
+async function openLoad(loadId, onChange) {
+  const [load] = await q(sb.from('chemical_loads').select('*').eq('load_id', loadId));
+  if (!load) return toast('Load not found', true);
+  const evs = await q(sb.from('chemical_events').select('*, chemical_event_products(*)').eq('load_id', loadId)
+    .order('queue_pos', { nullsFirst: false }).order('event_id'));
+  const mix = evs[0]?.chemical_event_products.sort((a, b) => a.position - b.position) ?? [];
+  const times = load.record_times;
+  const running = evs.find((e) => e.started_at && !e.stopped_at);
+  const done = evs.filter((e) => e.status === 'done');
+  const acresDone = done.reduce((n, e) => n + Number(e.acres_treated || 0), 0);
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  const elapsed = (e) => { const m = Math.round((Date.now() - new Date(e.started_at)) / 60000); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+  const row = (e, i) => {
+    const f = fieldById(e.field_id);
+    const isRun = e === running, isDone = e.status === 'done';
+    const state = isDone ? `<span class="badge new">Done</span>` : isRun ? `<span class="badge up">Running</span>` : `<span class="badge off">Queued</span>`;
+    const info = isDone ? wxText(e) || (times ? '' : 'Done') : isRun ? `Started ${clock(e.started_at)} · <span data-elapsed="${e.started_at}">${elapsed(e)}</span>${e.wind_mph != null ? ' · ' + esc(wxText({ ...e, started_at: null })) : ''}` : '';
+    let btns = '';
+    if (isRun) btns = `<button class="danger" data-stop="${e.event_id}">Stop</button>`;
+    else if (!isDone) btns = times
+      ? `<button class="primary" data-start="${e.event_id}" ${running ? 'disabled title="Stop the running field first"' : ''}>Start</button>`
+      : `<button class="primary" data-done="${e.event_id}">Done</button>`;
+    else btns = `<button class="small ghost" data-edit-ev="${e.event_id}">Edit</button>`;
+    const move = !isDone && !isRun ? `<span class="move"><button class="icon" data-mv="${i}:-1" aria-label="Move up">↑</button><button class="icon" data-mv="${i}:1" aria-label="Move down">↓</button></span>` : '';
+    return `<li class="load-row ${isRun ? 'running' : ''} ${isDone ? 'done' : ''}">
+      <div class="lr-main"><b>${esc(f?.name ?? '?')}</b> <span class="muted small">${e.acres_treated != null ? num(e.acres_treated, 0) + ' ac' : ''}</span> ${state}
+        ${info ? `<div class="muted small">${info}</div>` : ''}</div>
+      <div class="lr-act">${move}${!isDone && !isRun ? `<button class="small ghost" data-rm-ev="${e.event_id}" aria-label="Remove from load">✕</button>` : ''}${btns}</div></li>`;
+  };
+  dlg.innerHTML = `<div class="form load-view">
+    <div class="dialog-head"><div><h3>${esc(load.name || methodName(load.method) + ' load')}</h3>
+      <p class="muted small">${esc(fmtDate(load.applied_on))} · ${esc(methodName(load.method))}${load.carrier_gpa != null ? ` · ${Number(load.carrier_gpa)} gal/a water` : ''}${load.performed_by ? ` · ${esc(operatorName(load.performed_by))}` : ''}</p></div>
+      <button data-act="close">Close</button></div>
+    <div class="prod-list">${mix.map((l) => { const c = chemById(l.chemical_id); return `<span class="prod"><span class="type-dot t-${esc(c?.type ?? 'other')}"></span>${esc(c?.name ?? '?')} <span class="muted">${esc(rateText(l))}</span></span>`; }).join('')}</div>
+    <p class="muted small">${done.length} of ${evs.length} fields done · ${num(acresDone, 0)} acres${times ? ' · Start stamps the time and pulls the weather at that field; Stop stamps the end time.' : ''}</p>
+    <ul class="load-list">${evs.map(row).join('')}</ul>
+    <div class="actions">
+      <button data-act="add-fields">+ Add fields</button>
+      <span class="spacer"></span>
+      <button class="primary" data-act="finish">${done.length === evs.length ? 'Close out load' : 'Finish load'}</button>
+    </div>
+    ${times ? '<p class="muted small">Weather is a weather-service estimate for the field. If you take a reading with a meter, edit the record and set "Weather from" to measured.</p>' : ''}
+  </div>`;
+  const reopen = () => { onChange?.(); return openLoad(loadId, onChange); };
+  clearInterval(loadTimer);
+  loadTimer = setInterval(() => $$('[data-elapsed]', dlg).forEach((x) => (x.textContent = elapsed({ started_at: x.dataset.elapsed }))), 30000);
+  dlg.onclose = () => { clearInterval(loadTimer); dlg.classList.remove('wide'); };
+  $('[data-act=close]', dlg).onclick = () => dlg.close();
+  const evById = (id) => evs.find((e) => e.event_id === Number(id));
+  const busy = (b) => { b.disabled = true; b.textContent = '…'; };
+  $$('[data-start]', dlg).forEach((b) => (b.onclick = async () => {
+    busy(b);
+    const e = evById(b.dataset.start);
+    const patch = { started_at: new Date().toISOString(), applied_on: localDate() };
+    try { Object.assign(patch, await weatherNow(e.field_id), { weather_source: 'auto' }); }
+    catch { toast('Started. Weather couldn\'t load - add it when you stop or edit the record.', true); }
+    try { await q(sb.from('chemical_events').update(patch).eq('event_id', e.event_id)); } catch { /* shown */ }
+    reopen();
+  }));
+  $$('[data-stop]', dlg).forEach((b) => (b.onclick = async () => {
+    busy(b);
+    const e = evById(b.dataset.stop);
+    const patch = { stopped_at: new Date().toISOString(), status: 'done' };
+    try {
+      const w = await weatherNow(e.field_id);
+      if (e.wind_mph == null) Object.assign(patch, w, { weather_source: 'auto' });
+      else {
+        const lo = Math.min(Number(e.wind_mph), w.wind_mph), hi = Math.max(Number(e.wind_mph_max ?? e.wind_mph), w.wind_mph);
+        Object.assign(patch, { wind_mph: lo, wind_mph_max: hi > lo ? hi : null, gust_mph: Math.max(Number(e.gust_mph ?? 0), w.gust_mph) });
+      }
+    } catch { /* keep start-time weather */ }
+    try { await q(sb.from('chemical_events').update(patch).eq('event_id', e.event_id)); rotationCache.at = 0; } catch { /* shown */ }
+    reopen();
+  }));
+  $$('[data-done]', dlg).forEach((b) => (b.onclick = async () => {
+    busy(b);
+    try { await q(sb.from('chemical_events').update({ status: 'done', applied_on: localDate() }).eq('event_id', Number(b.dataset.done))); rotationCache.at = 0; } catch { /* shown */ }
+    reopen();
+  }));
+  $$('[data-rm-ev]', dlg).forEach((b) => (b.onclick = async () => {
+    if (!confirm(`Take ${fieldName(evById(b.dataset.rmEv).field_id)} out of this load?`)) return;
+    try { await q(sb.from('chemical_events').delete().eq('event_id', Number(b.dataset.rmEv))); } catch { /* shown */ }
+    reopen();
+  }));
+  $$('[data-mv]', dlg).forEach((b) => (b.onclick = async () => {
+    const [i, d] = b.dataset.mv.split(':').map(Number);
+    const j = i + d;
+    if (j < 0 || j >= evs.length || evs[j].status === 'done' || evs[j] === running) return;
+    const list = [...evs]; [list[i], list[j]] = [list[j], list[i]];
+    try { await Promise.all(list.map((e, n) => q(sb.from('chemical_events').update({ queue_pos: n + 1 }).eq('event_id', e.event_id)))); } catch { /* shown */ }
+    reopen();
+  }));
+  $$('[data-edit-ev]', dlg).forEach((b) => (b.onclick = () => openChemForm({ event: evById(b.dataset.editEv) }, reopen)));
+  $('[data-act=add-fields]', dlg).onclick = () => addFieldsToLoad(load, evs, mix, reopen);
+  $('[data-act=finish]', dlg).onclick = async () => {
+    if (running) return toast('Stop the running field first', true);
+    const left = evs.filter((e) => e.status !== 'done');
+    if (left.length && !confirm(`${left.length} field(s) weren't done. They'll be removed from this load. Finish anyway?`)) return;
+    try {
+      if (left.length) await q(sb.from('chemical_events').delete().in('event_id', left.map((e) => e.event_id)));
+      await q(sb.from('chemical_loads').update({ status: 'closed' }).eq('load_id', loadId));
+      dlg.close(); toast('Load finished'); onChange?.();
+    } catch { /* shown */ }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+function addFieldsToLoad(load, evs, mix, onDone) {
+  const inLoad = new Set(evs.map((e) => e.field_id));
+  const fields = fieldsInOrder().filter((f) => f.active && !inLoad.has(f.field_id));
+  const dlg = $('#dialog');
+  dlg.innerHTML = `<form class="form"><h3>Add fields to the load</h3>
+    <input type="search" id="pick-search" placeholder="Filter…">
+    <div class="pick-list">${fields.map((f) => `<label class="pick" data-name="${esc(f.name.toLowerCase())}"><input type="checkbox" value="${f.field_id}">
+      <span>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</span>${f.acres != null ? `<span class="muted small">${num(f.acres, 0)} ac</span>` : ''}</label>`).join('')}</div>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="back">Back</button><button class="primary">Add</button></div></form>`;
+  $('#pick-search', dlg).oninput = (e) => { const t = e.target.value.toLowerCase(); $$('.pick', dlg).forEach((p) => (p.hidden = t && !p.dataset.name.includes(t))); };
+  $('[data-act=back]', dlg).onclick = onDone;
+  $('form', dlg).onsubmit = async (e) => {
+    e.preventDefault();
+    const ids = $$('.pick-list input:checked', dlg).map((c) => Number(c.value));
+    if (!ids.length) return onDone();
+    const tmpl = evs[0] ?? {};
+    let pos = Math.max(0, ...evs.map((x) => x.queue_pos ?? 0));
+    try {
+      for (const fid of ids) {
+        const crops = await cropFor(fid, load.applied_on);
+        const ev = (await q(sb.from('chemical_events').insert({
+          field_id: fid, load_id: load.load_id, queue_pos: ++pos, status: 'planned', applied_on: load.applied_on,
+          method: load.method, performed_by: load.performed_by, carrier_gpa: load.carrier_gpa, notes: load.notes,
+          hours: null, pivot_speed_pct: tmpl.pivot_speed_pct ?? null, water_in: tmpl.water_in ?? null,
+          acres_treated: fieldById(fid)?.acres ?? null, crop_year_id: crops[0]?.crop_year_id ?? null,
+        }).select('event_id').single())).event_id;
+        if (mix.length) await q(sb.from('chemical_event_products').insert(mix.map((l) => ({
+          event_id: ev, chemical_id: l.chemical_id, position: l.position, rate: l.rate, rate_unit: l.rate_unit,
+          rate_basis: l.rate_basis, tank_gal: l.tank_gal, rate_text: l.rate_text }))));
+      }
+    } catch { /* shown */ }
+    onDone();
+  };
 }
 
 // Recent records for one field (map side panel)
