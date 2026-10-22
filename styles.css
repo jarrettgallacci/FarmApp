@@ -544,3 +544,20 @@ a.button-like { text-decoration: none; }
 .cal-speeds .on { font-weight: 700; color: var(--accent); }
 .cal-grid > *, .cal-inputs .row2 > *, .seg > * { min-width: 0; }
 .cal-inputs input, .cal-inputs select { width: 100%; min-width: 0; box-sizing: border-box; }
+.ss-rows { display: grid; grid-template-columns: repeat(4, 1fr); gap: .45rem; }
+.ss-rows label { display: flex; flex-direction: column; gap: .15rem; font-weight: 600; min-width: 0; }
+.ss-rows label small { font-weight: 400; color: var(--muted); font-size: .72rem; }
+.ss-rows label.bin-a { padding-left: .1rem; }
+.cal-timer { border: 1px solid var(--border); border-radius: var(--radius); padding: .7rem .9rem; display: flex; flex-direction: column; gap: .5rem; background: var(--surface); }
+.cal-timer.running { border-color: var(--accent); background: var(--accent-soft); }
+.cal-timer.done { border-color: var(--amber); background: var(--amber-soft); }
+.cal-clock { display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap; }
+.cal-clock #ss-clock { font-size: 2.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cal-timer-btns { display: grid; grid-template-columns: 1fr 1fr auto; gap: .4rem; }
+.cal-timer-btns button { padding: .7rem; font-size: 1rem; }
+.cal-rows { width: 100%; font-size: .85rem; border-collapse: collapse; }
+.cal-rows th, .cal-rows td { padding: .2rem .3rem; text-align: right; border-top: 1px solid var(--border); }
+.cal-rows th:first-child, .cal-rows td:first-child { text-align: left; }
+.cal-rows tr.off td { color: var(--danger); font-weight: 600; }
+.cal-stat { min-width: 0; overflow-x: auto; }
+.cal-speeds th, .cal-speeds td { padding: .2rem .15rem; font-size: .78rem; }
