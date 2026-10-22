@@ -2033,8 +2033,9 @@ async function openWorkForm(opts, onDone) {
     </div>
     <div class="row2">
       <label>Start date *<input type="date" name="performed_on" required value="${esc(v.performed_on)}"></label>
-      <label>End date <span class="muted small">(if more than one day)</span><input type="date" name="end_date" value="${esc(v.end_date ?? '')}"></label>
+      <label>End date<input type="date" name="end_date" value="${esc(v.end_date ?? '')}"></label>
     </div>
+    <p class="muted small form-hint">Leave the end date blank if it was done in one day.</p>
     <label data-plant>Crop and variety *<select name="crop_year_id"></select></label>
     <p class="muted small" data-plant id="cy-hint"></p>
     <div class="row2">
