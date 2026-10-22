@@ -3185,18 +3185,61 @@ function renderTools(el) {
   (TOOLS.find((t) => t.id === toolOpen) ?? TOOLS[0]).render($('#tool-box', el));
 }
 
-function renderGpCal(box) {
-  let st = { spacing: 12, target: '', tubes: [''], acre: 0.1, turns: 24.33, box: 'Large', setting: { Large: '', Small: '' }, history: [] };
-  try { st = { ...st, ...JSON.parse(localStorage.getItem('gp-cal') || '{}') }; } catch { /* storage unavailable */ }
+const norm = (v) => String(v ?? '').trim().toLowerCase();
+// Least-squares line through (exposed %, grams per tire turn). One distinct setting → through zero.
+function calFit(pts) {
+  const p = pts.filter((t) => t.x > 0 && t.y > 0);
+  if (!p.length) return null;
+  const xs = new Set(p.map((t) => Math.round(t.x * 100)));
+  if (xs.size >= 2) {
+    const n = p.length, mx = p.reduce((a, t) => a + t.x, 0) / n, my = p.reduce((a, t) => a + t.y, 0) / n;
+    const sxx = p.reduce((a, t) => a + (t.x - mx) ** 2, 0), sxy = p.reduce((a, t) => a + (t.x - mx) * (t.y - my), 0);
+    const b = sxy / sxx;
+    if (b > 0) return { a: my - b * mx, b, line: true, n };
+  }
+  return { a: 0, b: p.reduce((a, t) => a + t.y, 0) / p.reduce((a, t) => a + t.x, 0), line: false, n: p.length };
+}
+
+async function renderGpCal(box) {
+  box.innerHTML = '<p class="muted">Loading…</p>';
+  let tests = [], noTable = false;
+  const loadTests = async () => {
+    const r = await sb.from('planter_cal_tests').select('*').order('created_at', { ascending: false }).limit(1000);
+    noTable = !!r.error; tests = r.data ?? [];
+  };
+  await loadTests();
+  const drills = refs.equipment.filter((e) => e.active !== false && /great plains/i.test(`${e.make ?? ''} ${e.name ?? ''}`));
+  let st = { spacing: 12, target: '', tubes: [''], acre: 0.1, turns: 24.33, box: 'Large', full: { Large: '', Small: '' }, mm: { Large: '', Small: '' },
+    drill: drills.length === 1 ? drills[0].equipment_id : '', crop: '', variety: '', lot: '' };
+  try { const saved = JSON.parse(localStorage.getItem('gp-cal2') || '{}'); st = { ...st, ...saved }; } catch { /* storage unavailable */ }
   const units = () => (Number(st.spacing) === 6 ? 40 : 20);
-  const save = () => { try { localStorage.setItem('gp-cal', JSON.stringify(st)); } catch { /* ignore */ } };
+  const save = () => { try { localStorage.setItem('gp-cal2', JSON.stringify(st)); } catch { /* ignore */ } };
+  const sameSeed = (t, level) => t.crop_id === Number(st.crop) && (level === 'crop' || norm(t.variety) === norm(st.variety)) && (level !== 'lot' || norm(t.seed_lot) === norm(st.lot));
+  const sameRig = (t) => (!st.drill || t.equipment_id === Number(st.drill)) && t.seed_box === st.box;
+  const fullMm = () => {
+    if (Number(st.full[st.box]) > 0) return Number(st.full[st.box]);
+    const t = tests.find((x) => sameRig(x) && x.full_mm > 0);
+    return t ? Number(t.full_mm) : 0;
+  };
+  const daysAgo = (d) => (Date.now() - new Date(d + 'T12:00').getTime()) / 864e5;
+  const fmtMm = (v) => (Math.round(v * 10) / 10).toFixed(1);
+
   const draw = () => {
     const turnsWhole = Math.floor(st.turns);
     const frac = st.turns - turnsWhole;
+    const full = fullMm();
+    const varieties = [...new Set(tests.filter((t) => t.crop_id === Number(st.crop) && t.variety).map((t) => t.variety))];
     box.innerHTML = `
       <h3>Great Plains drill calibration</h3>
+      ${noTable ? '<p class="form-hint">Tests can’t be saved yet. Run <b>planter_cal_tests.sql</b> in Supabase to turn on the test log. The calculator still works.</p>' : ''}
       <div class="cal-grid">
         <div class="cal-inputs">
+          <label>Drill<select data-f="drill"><option value="">—</option>${(drills.length ? drills : refs.equipment.filter((e) => doesWork(e, 'planting'))).map((e) => `<option value="${e.equipment_id}" ${Number(st.drill) === e.equipment_id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select></label>
+          <div class="row2">
+            <label>Crop<select data-f="crop"><option value="">—</option>${refs.crops.filter((c) => c.active !== false || c.crop_id === Number(st.crop)).map((c) => `<option value="${c.crop_id}" ${Number(st.crop) === c.crop_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+            <label>Variety<input data-f="variety" list="cal-varieties" value="${esc(st.variety)}"><datalist id="cal-varieties">${varieties.map((v) => `<option value="${esc(v)}">`).join('')}</datalist></label>
+          </div>
+          <label>Seed lot <span class="muted small">(optional)</span><input data-f="lot" value="${esc(st.lot)}"></label>
           <div class="seg" role="group" aria-label="Row spacing">
             <button type="button" data-sp="12" class="${Number(st.spacing) === 12 ? 'on' : ''}">12" spacing<small>20 units</small></button>
             <button type="button" data-sp="6" class="${Number(st.spacing) === 6 ? 'on' : ''}">6" spacing<small>40 units</small></button>
@@ -3205,9 +3248,13 @@ function renderGpCal(box) {
             <button type="button" data-box="Large" class="${st.box === 'Large' ? 'on' : ''}">Large seed box</button>
             <button type="button" data-box="Small" class="${st.box === 'Small' ? 'on' : ''}">Small seed box</button>
           </div>
-          <label>Current meter setting (0–100)<input type="number" inputmode="decimal" step="any" min="0" max="100" data-setting value="${esc(st.setting[st.box] ?? '')}"></label>
-          <div class="cal-turns">Turn the drive tire <b>${st.turns} revolutions</b> <span class="muted small">(${st.acre} acre)</span></div>
+          <div class="row2">
+            <label>Fully open (mm)<input type="number" inputmode="decimal" step="any" min="0" data-mm="full" value="${esc(full || '')}"></label>
+            <label>Exposed now (mm)<input type="number" inputmode="decimal" step="any" min="0" data-mm="cur" value="${esc(st.mm[st.box] ?? '')}"></label>
+          </div>
+          <div class="muted small" id="cal-pct"></div>
           <label>Target rate (lb/acre)<input type="number" inputmode="decimal" step="any" min="0" data-k="target" value="${esc(st.target)}"></label>
+          <div class="cal-turns">Turn the drive tire <b>${st.turns} revolutions</b> <span class="muted small">(${st.acre} acre)</span></div>
           <div class="lines-head"><b>Seed caught (grams)</b><span class="muted small">One tube; add more to average them</span></div>
           ${st.tubes.map((g, i) => `<div class="tube-row"><label>Tube ${i + 1}<input type="number" inputmode="decimal" step="any" min="0" data-tube="${i}" value="${esc(g)}"></label>
             ${st.tubes.length > 1 ? `<button type="button" class="icon" data-rm-tube="${i}" aria-label="Remove tube">✕</button>` : ''}</div>`).join('')}
@@ -3216,81 +3263,134 @@ function renderGpCal(box) {
             <div class="row2"><label>Area per test (acres)<input type="number" step="any" min="0" data-k="acre" value="${esc(st.acre)}"></label>
             <label>Drive tire turns for that area<input type="number" step="any" min="0" data-k="turns" value="${esc(st.turns)}"></label></div>
           </details>
-          <button type="button" class="ghost small" data-act="clear">Clear</button>
+          <button type="button" class="ghost small" data-act="clear">Clear grams and target</button>
         </div>
         <div class="cal-out" id="cal-out"></div>
       </div>
       <div class="cal-steps"><h4>How to run the test</h4><ol>
-        <li>Set the drill to <b>${Number(st.spacing)}" spacing</b> (${units()} units running) and the meter to the setting you want to check.</li>
+        <li>Set the drill to <b>${Number(st.spacing)}" spacing</b> (${units()} units running). Measure the exposed seed cup on side 1 with calipers and enter it as <b>Exposed now</b>. Measure a fully open cup once per box and enter it as <b>Fully open</b>.</li>
         <li>Put a catch bag or cup on <b>one seed tube</b>.</li>
-        <li>Mark the drive tire, then turn it <b>${st.turns} revolutions</b>: ${turnsWhole} full turns${frac > 0.01 ? ` plus <b>${Math.round(frac * 100) / 100} of a turn</b> (about ${Math.round(frac * 360)}° — roughly ${Math.abs(frac - 1/3) < 0.03 ? 'a third' : Math.abs(frac - 0.5) < 0.03 ? 'half' : Math.abs(frac - 0.25) < 0.03 ? 'a quarter' : Math.abs(frac - 0.75) < 0.03 ? 'three quarters' : Math.round(frac * 8) + '/8'} of a turn)` : ''}. That's ${st.acre} acre of travel.</li>
+        <li>Mark the drive tire, then turn it <b>${st.turns} revolutions</b>: ${turnsWhole} full turns${frac > 0.01 ? ` plus <b>${Math.round(frac * 100) / 100} of a turn</b> (about ${Math.round(frac * 360)}° — roughly ${Math.abs(frac - 1 / 3) < 0.03 ? 'a third' : Math.abs(frac - 0.5) < 0.03 ? 'half' : Math.abs(frac - 0.25) < 0.03 ? 'a quarter' : Math.abs(frac - 0.75) < 0.03 ? 'three quarters' : Math.round(frac * 8) + '/8'} of a turn)` : ''}. That's ${st.acre} acre of travel.</li>
         <li>Weigh the seed in <b>grams</b> and enter it. Catch more tubes and enter each for a better average.</li>
-        <li>Tap <b>Save this test</b>, move the ${st.box.toLowerCase()} box meter to the suggested setting, and run the test again. From the second test on, the suggestion uses your last two tests, so it gets closer each time.</li>
-      </ol></div>`;
-    const calc = () => {
-      const tgt = Number(st.target);
-      const grams = st.tubes.map(Number).filter((g) => g > 0);
-      const avg = grams.length ? grams.reduce((a, b) => a + b, 0) / grams.length : null;
-      const expected = tgt > 0 ? (tgt * st.acre * G_PER_LB) / units() : null;
-      const actual = avg != null && st.acre > 0 ? (avg * units()) / G_PER_LB / st.acre : null;
-      const diff = actual != null && tgt > 0 ? ((actual - tgt) / tgt) * 100 : null;
-      const tone = diff == null ? '' : Math.abs(diff) <= 3 ? 'ok' : Math.abs(diff) <= 10 ? 'warn' : 'bad';
-      $('#cal-out', box).innerHTML = `
-        <div class="cal-stat"><span class="stat-label">Target per tube</span><span class="stat-value">${expected != null ? expected.toFixed(1) : '—'}<small> g</small></span>
-          <span class="muted small">What one tube should catch at ${tgt > 0 ? tgt : '—'} lb/ac</span></div>
-        <div class="cal-stat ${tone}"><span class="stat-label">Actual rate${grams.length > 1 ? ` (avg of ${grams.length} tubes)` : ''}</span><span class="stat-value">${actual != null ? actual.toFixed(1) : '—'}<small> lb/ac</small></span>
-          ${diff != null ? `<span class="cal-diff">${diff >= 0 ? '+' : ''}${diff.toFixed(1)}% ${diff >= 0 ? 'over' : 'under'} target${Math.abs(diff) <= 3 ? ' · close enough' : ''}</span>` : '<span class="muted small">Enter grams caught</span>'}</div>
-        ${suggestHtml(tgt, actual, diff)}`;
-      const sv = $('[data-act=save-test]', box);
-      if (sv) sv.onclick = () => {
-        st.history = [{ box: st.box, spacing: Number(st.spacing), setting: Number(st.setting[st.box]), rate: Math.round(actual * 100) / 100, at: new Date().toISOString() }, ...(st.history || [])].slice(0, 20);
-        const next = lastSuggestion;
-        if (next != null) st.setting[st.box] = String(next);
-        st.tubes = [''];
-        save(); draw();
-      };
-    };
-    let lastSuggestion = null;
-    const suggestHtml = (tgt, actual, diff) => {
-      lastSuggestion = null;
-      const cur = Number(st.setting[st.box]);
-      const hasCur = st.setting[st.box] !== '' && st.setting[st.box] != null && cur > 0;
-      if (actual == null || !(tgt > 0)) return '';
-      if (!hasCur) {
-        return Math.abs(diff) > 0.5 ? `<p class="muted small">Enter the current meter setting to get a suggested setting. Rough guide: move it about <b>${Math.abs((tgt / actual - 1) * 100).toFixed(0)}% ${actual > tgt ? 'lower' : 'higher'}</b>.</p>` : '';
+        <li>Tap <b>Save test</b>, set side 1 to the suggested measurement, and test again. Each saved test sharpens the next suggestion.</li>
+        <li>When it's on target, match side 2 to the same caliper measurement.</li>
+      </ol></div>
+      <div id="cal-log"></div>`;
+    drawLog();
+    calc();
+    wire();
+  };
+
+  const drawLog = () => {
+    const el = $('#cal-log', box);
+    if (noTable) { el.innerHTML = ''; return; }
+    const mine = st.crop ? tests.filter((t) => sameSeed(t, 'variety')) : tests;
+    const rows = mine.slice(0, 15);
+    el.innerHTML = `<div class="cal-steps"><h4>${st.crop ? `Saved tests: ${esc(cropName(Number(st.crop)))}${st.variety ? ' ' + esc(st.variety) : ''}` : 'Recent saved tests'}</h4>
+      ${rows.length ? `<div class="table-wrap"><table class="cal-log"><thead><tr><th>Date</th><th>Box</th><th>Spacing</th><th>Exposed</th><th>Caught</th><th>Rate</th><th>Target</th><th></th></tr></thead><tbody>
+      ${rows.map((t) => `<tr><td>${esc(t.tested_on)}</td><td>${esc(t.seed_box ?? '')}</td><td>${t.spacing_in ?? ''}"</td>
+        <td>${t.exposed_mm ?? '—'} mm${t.exposed_pct != null ? ` <span class="muted">(${Number(t.exposed_pct).toFixed(1)}%)</span>` : ''}</td>
+        <td>${t.grams_avg ?? ''} g</td><td><b>${t.actual_lb_ac ?? ''}</b></td><td>${t.target_lb_ac ?? ''}</td>
+        <td><button type="button" class="icon" data-del-test="${t.test_id}" aria-label="Delete test">✕</button></td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted small">None yet.</p>'}</div>`;
+    $$('[data-del-test]', el).forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this test?')) return;
+      await q(sb.from('planter_cal_tests').delete().eq('test_id', Number(b.dataset.delTest)));
+      await loadTests(); drawLog(); calc();
+    }));
+  };
+
+  let pending = null; // what Save would write
+  const calc = () => {
+    const tgt = Number(st.target);
+    const full = fullMm();
+    const cur = Number(st.mm[st.box]);
+    const pct = full > 0 && cur >= 0 && st.mm[st.box] !== '' ? (cur / full) * 100 : null;
+    $('#cal-pct', box).innerHTML = pct != null ? `Side 1 is <b>${pct.toFixed(1)}%</b> open${cur > full ? ' — <b>more than fully open; check the readings</b>' : ''}` : (full ? '' : 'Measure a fully open cup once for this box.');
+    const grams = st.tubes.map(Number).filter((g) => g > 0);
+    const avg = grams.length ? grams.reduce((a, b) => a + b, 0) / grams.length : null;
+    const expected = tgt > 0 ? (tgt * st.acre * G_PER_LB) / units() : null;
+    const actual = avg != null && st.acre > 0 ? (avg * units()) / G_PER_LB / st.acre : null;
+    const diff = actual != null && tgt > 0 ? ((actual - tgt) / tgt) * 100 : null;
+    const tone = diff == null ? '' : Math.abs(diff) <= 3 ? 'ok' : Math.abs(diff) <= 10 ? 'warn' : 'bad';
+
+    // Points for the fit: this seed + drill + box, saved in the last 14 days, plus the reading on screen.
+    const recent = st.crop ? tests.filter((t) => sameSeed(t, 'variety') && sameRig(t) && daysAgo(t.tested_on) <= 14 && t.exposed_pct > 0 && t.grams_avg > 0 && t.turns > 0) : [];
+    const pts = recent.map((t) => ({ x: Number(t.exposed_pct), y: Number(t.grams_avg) / Number(t.turns) }));
+    if (pct > 0 && avg) pts.push({ x: pct, y: avg / st.turns });
+    let fit = calFit(pts), how = '';
+    if (fit) {
+      how = fit.line ? `Line through ${fit.n} tests of this seed on this box (last 14 days).`
+        : fit.n === 1 ? 'Assumes 0 mm exposed drops no seed, so seed is proportional to exposure. Save this test and the next one will use both.'
+        : 'Proportional to exposure, from tests at this setting.';
+    } else if (st.crop && expected) {
+      // Starting point from older history: same lot, then same variety, then same crop.
+      for (const [level, label] of [['lot', 'this seed lot'], ['variety', 'this variety'], ['crop', 'this crop (other varieties — rough only)']]) {
+        if (level === 'lot' && !st.lot) continue;
+        if (level !== 'crop' && !st.variety) continue;
+        const h = tests.filter((t) => sameSeed(t, level) && t.seed_box === st.box && t.exposed_pct > 0 && t.grams_avg > 0 && t.turns > 0);
+        if (!h.length) continue;
+        const ks = h.map((t) => Number(t.grams_avg) / Number(t.turns) / Number(t.exposed_pct)).sort((a, b) => a - b);
+        fit = { a: 0, b: ks[Math.floor(ks.length / 2)], start: true };
+        how = `Starting point from ${h.length} past test${h.length > 1 ? 's' : ''} of ${label}, last on ${h[0].tested_on}. Run a test to confirm.`;
+        break;
       }
-      // A previous test on this box and spacing at a different setting → draw a line through both points.
-      const prev = (st.history || []).find((h) => h.box === st.box && h.spacing === Number(st.spacing) && h.setting !== cur && h.rate > 0);
-      let sugg, how;
-      if (prev && Math.abs(actual - prev.rate) > 0.01) {
-        const slope = (actual - prev.rate) / (cur - prev.setting);
-        sugg = slope > 0 ? cur + (tgt - actual) / slope : null;
-        how = `Based on this test and your last one at setting ${prev.setting} (${prev.rate} lb/ac).`;
-      }
-      if (sugg == null) {
-        sugg = cur * (tgt / actual);
-        how = 'Assumes the rate changes in proportion to the setting. After your next test it will use both tests and get more accurate.';
-      }
-      const clamped = Math.min(100, Math.max(0, sugg));
-      const shown = Math.round(clamped * 2) / 2;
-      lastSuggestion = Math.abs(diff) > 3 ? shown : null;
-      const close = Math.abs(diff) <= 3;
-      return `<div class="cal-stat"><span class="stat-label">${st.box} box setting</span>
-          <span class="cal-settings"><span>Current <b>${cur}</b></span><span class="cal-arrow">→</span><span>Suggested <b class="stat-value">${close ? cur : shown}</b></span></span>
-          <span class="muted small">${close ? 'Within 3% of target. Leave it here.' : how}${sugg > 100 || sugg < 0 ? ' <b>That is past the end of the 0–100 scale. Check the spacing, the box, or the meter.</b>' : ''}</span>
-          ${close ? '' : `<button type="button" class="small" data-act="save-test">Save this test and set meter to ${shown}</button>`}</div>`;
+    }
+    let sugg = null;
+    if (fit && expected) {
+      const sPct = (expected / st.turns - fit.a) / fit.b;
+      sugg = { pct: sPct, mm: full > 0 ? (sPct / 100) * full : null };
+    }
+    const close = diff != null && Math.abs(diff) <= 3;
+    pending = actual != null && pct != null ? { avg, actual, pct, full, cur, grams, tgt, nextMm: !close && sugg?.mm != null && sugg.pct >= 0 && sugg.pct <= 100 ? Math.round(sugg.mm * 10) / 10 : null } : null;
+
+    const suggCard = !sugg ? (expected && !st.crop ? '<p class="muted small">Pick the crop (and variety) to get a suggested setting and use past tests.</p>'
+        : expected && !(full > 0) ? '<p class="muted small">Enter the fully open measurement to get a suggested setting in mm.</p>' : '')
+      : `<div class="cal-stat ${close ? 'ok' : ''}"><span class="stat-label">${fit.start ? 'Suggested starting setting' : 'Suggested setting'} · ${st.box} box</span>
+          <span class="cal-settings">${pct != null && !fit.start && !close ? `<span>Now <b>${fmtMm(cur)} mm</b></span><span class="cal-arrow">→</span>` : ''}
+          <span><b class="stat-value">${close ? fmtMm(cur) : sugg.mm != null ? fmtMm(sugg.mm) : '—'}</b> mm</span>
+          <span class="muted">${(close ? pct : sugg.pct).toFixed(1)}% open</span></span>
+          <span class="muted small">${close ? 'Within 3% of target. Leave it here and set side 2 to the same measurement.' : how}${sugg.pct > 100 || sugg.pct < 0 ? ' <b>That is past fully open/closed. Check the spacing, box, or readings.</b>' : ''}</span></div>`;
+
+    $('#cal-out', box).innerHTML = `
+      <div class="cal-stat"><span class="stat-label">Target per tube</span><span class="stat-value">${expected != null ? expected.toFixed(1) : '—'}<small> g</small></span>
+        <span class="muted small">What one tube should catch at ${tgt > 0 ? tgt : '—'} lb/ac</span></div>
+      <div class="cal-stat ${tone}"><span class="stat-label">Actual rate${grams.length > 1 ? ` (avg of ${grams.length} tubes)` : ''}</span><span class="stat-value">${actual != null ? actual.toFixed(1) : '—'}<small> lb/ac</small></span>
+        ${diff != null ? `<span class="cal-diff">${diff >= 0 ? '+' : ''}${diff.toFixed(1)}% ${diff >= 0 ? 'over' : 'under'} target${close ? ' · close enough' : ''}</span>` : '<span class="muted small">Enter grams caught</span>'}</div>
+      ${suggCard}
+      ${pending && !noTable ? `<button type="button" class="primary" data-act="save-test" ${st.crop ? '' : 'disabled'}>Save test${pending.nextMm != null ? ` and set to ${fmtMm(pending.nextMm)} mm` : ''}</button>${st.crop ? '' : '<span class="muted small">Pick a crop to save.</span>'}` : ''}`;
+    const sv = $('[data-act=save-test]', box);
+    if (sv) sv.onclick = async () => {
+      const p = pending; sv.disabled = true;
+      const row = { equipment_id: st.drill ? Number(st.drill) : null, seed_box: st.box, spacing_in: Number(st.spacing), units: units(),
+        crop_id: Number(st.crop), variety: st.variety.trim() || null, seed_lot: st.lot.trim() || null, target_lb_ac: p.tgt || null,
+        full_mm: p.full, exposed_mm: p.cur, exposed_pct: Math.round(p.pct * 100) / 100, acre: st.acre, turns: st.turns,
+        grams: p.grams, grams_avg: Math.round(p.avg * 100) / 100, actual_lb_ac: Math.round(p.actual * 100) / 100, tested_on: localDate() };
+      try { await q(sb.from('planter_cal_tests').insert(row)); } catch { sv.disabled = false; return; }
+      toast('Test saved');
+      if (p.nextMm != null) st.mm[st.box] = String(p.nextMm);
+      st.tubes = ['']; save();
+      await loadTests(); draw();
     };
-    const inputs = () => {
-      $$('[data-k]', box).forEach((i) => (i.oninput = () => { st[i.dataset.k] = i.dataset.k === 'target' ? i.value : Number(i.value) || 0; save(); if (i.dataset.k === 'target') calc(); else draw(); }));
-      $$('[data-tube]', box).forEach((i) => (i.oninput = () => { st.tubes[Number(i.dataset.tube)] = i.value; save(); calc(); }));
-    };
+  };
+
+  const wire = () => {
+    $$('[data-f]', box).forEach((i) => (i.onchange = i.oninput = () => {
+      st[i.dataset.f] = i.value; save();
+      if (i.tagName === 'SELECT') draw(); else { drawLog(); calc(); }
+    }));
+    $$('[data-mm]', box).forEach((i) => (i.oninput = () => {
+      if (i.dataset.mm === 'full') st.full[st.box] = i.value; else st.mm[st.box] = i.value;
+      save(); calc();
+    }));
+    $$('[data-k]', box).forEach((i) => (i.oninput = () => { st[i.dataset.k] = i.dataset.k === 'target' ? i.value : Number(i.value) || 0; save(); if (i.dataset.k === 'target') calc(); }));
+    $$('[data-k=acre], [data-k=turns]', box).forEach((i) => (i.onchange = () => draw()));
+    $$('[data-tube]', box).forEach((i) => (i.oninput = () => { st.tubes[Number(i.dataset.tube)] = i.value; save(); calc(); }));
     $$('[data-sp]', box).forEach((b) => (b.onclick = () => { st.spacing = Number(b.dataset.sp); save(); draw(); }));
     $$('[data-box]', box).forEach((b) => (b.onclick = () => { st.box = b.dataset.box; save(); draw(); }));
-    $('[data-setting]', box).oninput = (e) => { st.setting[st.box] = e.target.value; save(); calc(); };
     $$('[data-rm-tube]', box).forEach((b) => (b.onclick = () => { st.tubes.splice(Number(b.dataset.rmTube), 1); save(); draw(); }));
     $('[data-act=add-tube]', box).onclick = () => { st.tubes.push(''); save(); draw(); $$('[data-tube]', box).at(-1)?.focus(); };
-    $('[data-act=clear]', box).onclick = () => { st.target = ''; st.tubes = ['']; st.history = []; save(); draw(); };
-    inputs(); calc();
+    $('[data-act=clear]', box).onclick = () => { st.target = ''; st.tubes = ['']; save(); draw(); };
   };
   draw();
 }

@@ -534,3 +534,5 @@ a.button-like { text-decoration: none; }
 .cal-turns { background: var(--accent-soft); border-radius: var(--radius); padding: .55rem .8rem; }
 .cal-settings { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; }
 .cal-arrow { color: var(--muted); }
+.cal-log { font-size: .85rem; }
+.cal-log td, .cal-log th { padding: .3rem .45rem; white-space: nowrap; }
