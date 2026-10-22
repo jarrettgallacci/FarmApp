@@ -1992,7 +1992,9 @@ function endEdit() {
 // Work records: one record per field per pass (tillage, planting, ...).
 // Planting adds seed and planter details and links to the crop year.
 // =====================================================================
-const workState = { season: new Date().getFullYear(), op: '', q: '' };
+const workState = { season: new Date().getFullYear(), op: '', q: '', view: 'records' };
+const HARVEST_STAGES = [['swath', 'Swath / cut'], ['merge', 'Merge / lift'], ['thresh', 'Combine / thresh'], ['other', 'Other']];
+const stageName = (k) => HARVEST_STAGES.find(([x]) => x === k)?.[1] ?? '';
 const PLANT_LABELS = ['Female', 'Male 1', 'Male 2', 'Male 3'];
 const dateRange = (a, b) => (b && b !== a ? `${fmtDate(a)}–${fmtDate(b)}` : fmtDate(a));
 const actualRate = (d, acres) => (d?.seed_used != null && Number(acres) > 0 ? Number(d.seed_used) / Number(acres) : null);
@@ -2000,6 +2002,7 @@ const rateFmt = (n, unit) => (n == null ? '' : `${Number(n).toLocaleString(undef
 
 async function renderWork(el) {
   const s = workState;
+  if (s.view === 'harvest') return renderHarvest(el);
   const { data, error } = await sb.from('work_events')
     .select('*, planting_details(*), crop_years(crop_id, variety)')
     .gte('performed_on', `${s.season}-01-01`).lte('performed_on', `${s.season}-12-31`)
@@ -2016,6 +2019,7 @@ async function renderWork(el) {
   const rows = data.filter((r) => (!s.op || r.operation === s.op) &&
     (!term || fieldName(r.field_id).toLowerCase().includes(term) || equipName(r.equipment_id).toLowerCase().includes(term)));
   el.innerHTML = `
+    ${workViewTabs()}
     <div class="section-head"><h2>Work records</h2>
       <div class="row">
         <button data-season="-1" aria-label="Previous year">‹</button>
@@ -2036,13 +2040,14 @@ async function renderWork(el) {
         const crop = ch.cy ? `${cropName(ch.cy.crop_id)}${ch.cy.variety ? ' · ' + ch.cy.variety : ''}${ch.auto && ch.cy.season ? ` ${ch.cy.season}` : ''}${ch.auto ? ' (auto)' : ''}` : r.operation === 'tillage' ? 'next crop not entered' : '';
         return `<tr><td class="nowrap">${esc(dateRange(r.performed_on, r.end_date))}</td>
           <td><b>${esc(fieldName(r.field_id))}</b></td>
-          <td>${esc(workLabel(r.operation))}${d?.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}${crop ? `<div class="muted small">${esc(crop)}</div>` : ''}${patText(r, d) ? `<div class="muted small">${esc(patText(r, d))}</div>` : ''}</td>
+          <td>${esc(workLabel(r.operation))}${r.harvest_stage ? ` · ${esc(stageName(r.harvest_stage))}` : ''}${d?.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}${crop ? `<div class="muted small">${esc(crop)}</div>` : ''}${patText(r, d) ? `<div class="muted small">${esc(patText(r, d))}</div>` : ''}</td>
           <td>${esc([equipName(r.tractor_id), equipName(r.equipment_id)].filter(Boolean).join(' + '))}</td>
           <td class="r">${r.acres != null ? num(r.acres, 1) : ''}${r.cost_total != null ? `<div class="muted small">${money(r.cost_total, 0)}</div>` : ''}</td>
           <td>${esc(operatorName(r.performed_by))}</td>
           <td class="r"><button class="small" data-edit="${r.event_id}">Edit</button></td></tr>`;
       }).join('')}</tbody></table></div>` : `<div class="empty">No work records${data.length ? ' match' : ` for ${s.season}`}.</div>`}`;
   const reload = () => renderWork(el);
+  wireWorkViewTabs(el);
   $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
   $('[data-act=add]', el).onclick = () => openWorkForm({}, reload);
   $$('[data-edit]', el).forEach((b) => (b.onclick = () => openWorkForm({ eventId: Number(b.dataset.edit) }, reload)));
@@ -2062,7 +2067,7 @@ async function openWorkForm(opts, onDone) {
   let ev = null;
   if (opts.eventId) [ev] = await q(sb.from('work_events').select('*, planting_details(*)').eq('event_id', opts.eventId));
   const d = (Array.isArray(ev?.planting_details) ? ev.planting_details[0] : ev?.planting_details) ?? {};
-  const v = ev ?? { operation: opts.operation ?? 'planting', performed_on: localDate(), field_id: opts.fieldId ?? null, crop_year_id: opts.cropYearId ?? null };
+  const v = ev ?? { operation: opts.operation ?? 'planting', performed_on: localDate(), field_id: opts.fieldId ?? null, crop_year_id: opts.cropYearId ?? null, harvest_stage: opts.stage ?? null };
   const bands = ev ? await q(sb.from('chemical_events').select('*, chemical_event_products(*)').eq('work_event_id', ev.event_id)) : [];
   const types = refs.workTypes.filter((w) => w.active || w.operation === v.operation);
   const pat = v.pattern ?? d.pattern ?? '';           // older planting records kept these on planting_details
@@ -2076,6 +2081,7 @@ async function openWorkForm(opts, onDone) {
       <label>Work *<select name="operation" required>${types.map((w) => `<option value="${esc(w.operation)}" ${w.operation === v.operation ? 'selected' : ''}>${esc(workLabel(w.operation))}</option>`).join('')}</select></label>
       <label>Field *<select name="field_id" required><option value="">Choose…</option>${fields.map((f) => `<option value="${f.field_id}" ${f.field_id === v.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}</select></label>
     </div>
+    <label data-harvest>Harvest pass<select name="harvest_stage"><option value="">—</option>${HARVEST_STAGES.map(([k, l]) => `<option value="${k}" ${v.harvest_stage === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     <div class="row2">
       <label>Start date *<input type="date" name="performed_on" required value="${esc(v.performed_on)}"></label>
       <label>End date<input type="date" name="end_date" value="${esc(v.end_date ?? '')}"></label>
@@ -2217,6 +2223,7 @@ async function openWorkForm(opts, onDone) {
   const sync = () => {
     const planting = op() === 'planting';
     $$('[data-plant]', dlg).forEach((x) => (x.hidden = !planting));
+    $$('[data-harvest]', dlg).forEach((x) => (x.hidden = op() !== 'harvest'));
     el.crop_year_id.required = planting;
     $$('[data-stagger]', dlg).forEach((x) => (x.hidden = !el.staggered.checked));
     fillEquip(); plateLabel(); showCost();
@@ -2255,6 +2262,7 @@ async function openWorkForm(opts, onDone) {
       tractor_id: numOrNull('tractor_id'), equipment_id: numOrNull('equipment_id'), performed_by: numOrNull('performed_by'),
       acres: numOrNull('acres'), notes: val('notes') || null, crop_year_id: numOrNull('crop_year_id'),
       pattern: val('pattern') || null, heading_deg: val('pattern') === 'straight' ? numOrNull('heading_deg') : null,
+      ...(op() === 'harvest' || ev?.harvest_stage ? { harvest_stage: op() === 'harvest' ? val('harvest_stage') || null : null } : {}),
     };
     // Freeze the cost with today's rate.
     const cr = workRate(row.operation, row.equipment_id);
@@ -2272,6 +2280,10 @@ async function openWorkForm(opts, onDone) {
       // Until the newer SQL files are run, save without those columns rather than failing.
       const write = (r) => (ev ? sb.from('work_events').update(r).eq('event_id', id) : sb.from('work_events').insert(r).select('event_id').single());
       let res = await write(row);
+      if (res.error && /harvest_stage/.test(res.error.message ?? '')) {
+        delete row.harvest_stage; res = await write(row);
+        if (!res.error) toast('Saved, but the harvest pass needs harvest.sql run in Supabase', true);
+      }
       if (res.error && /cost_per_acre|cost_total|cost_basis/.test(res.error.message ?? '')) {
         const { cost_per_acre, cost_total, cost_basis, ...rest } = row;
         res = await write(rest);
@@ -2300,6 +2312,194 @@ async function openWorkForm(opts, onDone) {
       dlg.close(); toast('Deleted'); onDone?.();
     } catch { /* shown */ }
   };
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+// ---- Work tab: Records | Harvest
+function workViewTabs() {
+  return `<div class="subtabs">${[['records', 'Work records'], ['harvest', 'Harvest & yield']].map(([k, l]) =>
+    `<button data-wview="${k}" class="${workState.view === k ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+}
+function wireWorkViewTabs(el) {
+  $$('[data-wview]', el).forEach((b) => (b.onclick = () => { workState.view = b.dataset.wview; renderWork(el); }));
+}
+const lbFmt = (v) => (v == null ? '—' : Math.round(v).toLocaleString());
+const sumTickets = (cy) => (cy.harvest_records ?? []).reduce((n, t) => n + Number(t.yield || 0), 0);
+const cyAcres = (cy) => (cy.acres != null ? Number(cy.acres) : fieldById(cy.field_id)?.acres != null ? Number(fieldById(cy.field_id).acres) : null);
+// Average actual clean-out from settled crops: same variety first, then same crop.
+function cleanoutHistory(hist, cropId, variety, exceptId) {
+  const settled = hist.filter((h) => h.crop_year_id !== exceptId && h.clean_lb != null && sumTickets(h) > 0 && h.crop_id === cropId);
+  const avg = (list) => (list.length ? (list.reduce((n, h) => n + Number(h.clean_lb) / sumTickets(h), 0) / list.length) * 100 : null);
+  const sameVar = variety ? settled.filter((h) => norm(h.variety) === norm(variety)) : [];
+  if (sameVar.length) return { pct: avg(sameVar), n: sameVar.length, of: variety };
+  if (settled.length) return { pct: avg(settled), n: settled.length, of: cropName(cropId) };
+  return null;
+}
+const yieldOf = (cy, hist) => {
+  const dirt = sumTickets(cy);
+  const h = cleanoutHistory(hist, cy.crop_id, cy.variety, cy.crop_year_id);
+  const estPct = cy.est_cleanout_pct != null ? Number(cy.est_cleanout_pct) : h?.pct ?? null;
+  const actualPct = cy.clean_lb != null && dirt > 0 ? (Number(cy.clean_lb) / dirt) * 100 : null;
+  const clean = cy.clean_lb != null ? Number(cy.clean_lb) : estPct != null && dirt > 0 ? dirt * estPct / 100 : null;
+  return { dirt, estPct, estFromHistory: cy.est_cleanout_pct == null && h != null, actualPct, clean, settled: cy.clean_lb != null, hist: h };
+};
+
+async function renderHarvest(el) {
+  const s = workState;
+  const sel = 'crop_year_id, field_id, crop_id, variety, season, sequence, acres, status, grown_by, planting_date, multi_year, end_season, est_cleanout_pct, clean_lb, settled_on, settlement_ref, harvest_notes, harvest_records(*)';
+  const [{ data, error }, histRes, passRes] = await Promise.all([
+    sb.from('crop_years').select(sel).eq('season', s.season),
+    sb.from('crop_years').select('crop_year_id, crop_id, variety, clean_lb, harvest_records(yield)').not('clean_lb', 'is', null),
+    sb.from('work_events').select('event_id, field_id, crop_year_id, performed_on, harvest_stage, operation').eq('operation', 'harvest').gte('performed_on', `${s.season}-01-01`).lte('performed_on', `${s.season + 1}-06-30`),
+  ]);
+  if (error) {
+    el.innerHTML = `${workViewTabs()}<div class="empty">Harvest isn't set up yet. Run <b>harvest.sql</b> in Supabase first.</div>`;
+    wireWorkViewTabs(el); return;
+  }
+  const hist = histRes.data ?? [];
+  const passes = passRes.data ?? [];
+  const term = s.q.trim().toLowerCase();
+  const crops = data.filter((c) => !c.grown_by && (!term || fieldName(c.field_id).toLowerCase().includes(term) || cropName(c.crop_id).toLowerCase().includes(term)))
+    .sort((a, b) => fieldsInOrder().findIndex((f) => f.field_id === a.field_id) - fieldsInOrder().findIndex((f) => f.field_id === b.field_id) || a.sequence - b.sequence);
+  const passesFor = (cy) => passes.filter((p) => p.crop_year_id === cy.crop_year_id || (!p.crop_year_id && p.field_id === cy.field_id && autoCropYear('harvest', p.performed_on, data.filter((c) => c.field_id === cy.field_id))?.crop_year_id === cy.crop_year_id));
+  el.innerHTML = `
+    ${workViewTabs()}
+    <div class="section-head"><h2>Harvest & yield</h2>
+      <div class="row">
+        <button data-season="-1" aria-label="Previous year">‹</button>
+        <strong class="season">${s.season}</strong>
+        <button data-season="1" aria-label="Next year">›</button>
+      </div></div>
+    <div class="filters"><input type="search" data-f="q" placeholder="Search field or crop…" value="${esc(s.q)}"></div>
+    <p class="muted small">Dirt = scale tickets. Clean = settlement, or an estimate (<i>est.</i>) from the clean-out % until the settlement comes in.</p>
+    ${crops.length ? `<div class="card table-wrap"><table class="harvest-table">
+      <thead><tr><th>Field</th><th>Crop</th><th>Passes</th><th class="r">Dirt lb</th><th class="r">Clean-out</th><th class="r">Clean lb</th><th class="r">Clean lb/ac</th><th></th></tr></thead>
+      <tbody>${crops.map((cy) => {
+        const y = yieldOf(cy, hist), ac = cyAcres(cy), ps = passesFor(cy);
+        const tickets = (cy.harvest_records ?? []).length;
+        return `<tr><td><b>${esc(fieldName(cy.field_id))}</b></td>
+          <td>${esc(cropName(cy.crop_id))}${cy.variety ? `<div class="muted small">${esc(cy.variety)}</div>` : ''}</td>
+          <td class="small">${ps.length ? esc([...new Set(ps.map((p) => stageName(p.harvest_stage) || 'Harvest'))].join(', ')) : '<span class="muted">—</span>'}</td>
+          <td class="r">${y.dirt ? lbFmt(y.dirt) : '—'}${tickets ? `<div class="muted small">${tickets} ticket${tickets > 1 ? 's' : ''}</div>` : ''}</td>
+          <td class="r">${y.actualPct != null ? `<b>${y.actualPct.toFixed(1)}%</b>` : y.estPct != null ? `${y.estPct.toFixed(1)}% <i class="muted">est.</i>` : '—'}</td>
+          <td class="r">${y.clean != null ? (y.settled ? `<b>${lbFmt(y.clean)}</b>` : `${lbFmt(y.clean)} <i class="muted">est.</i>`) : '—'}</td>
+          <td class="r">${y.clean != null && ac ? `${lbFmt(y.clean / ac)}${y.settled ? '' : ' <i class="muted">est.</i>'}` : '—'}</td>
+          <td class="r"><button class="small" data-open="${cy.crop_year_id}">Open</button></td></tr>`;
+      }).join('')}</tbody></table></div>` : `<div class="empty">No crops entered for ${s.season}.</div>`}`;
+  const reload = () => renderHarvest(el);
+  wireWorkViewTabs(el);
+  $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
+  $$('[data-f]', el).forEach((inp) => { let t; inp.oninput = () => { clearTimeout(t); t = setTimeout(() => { s.q = inp.value; reload(); }, 300); }; });
+  $$('[data-open]', el).forEach((b) => (b.onclick = () => openHarvest(Number(b.dataset.open), reload)));
+}
+
+async function openHarvest(cropYearId, onDone) {
+  const sel = 'crop_year_id, field_id, crop_id, variety, season, sequence, acres, planting_date, multi_year, end_season, est_cleanout_pct, clean_lb, settled_on, settlement_ref, harvest_notes, harvest_records(*)';
+  const [[cy], hist] = await Promise.all([
+    q(sb.from('crop_years').select(sel).eq('crop_year_id', cropYearId)),
+    q(sb.from('crop_years').select('crop_year_id, crop_id, variety, clean_lb, harvest_records(yield)').not('clean_lb', 'is', null)),
+  ]);
+  const cys = (await sb.from('crop_years').select('crop_year_id, field_id, crop_id, variety, season, sequence, planting_date, multi_year, end_season').eq('field_id', cy.field_id)).data ?? [];
+  const passes = ((await sb.from('work_events').select('*').eq('field_id', cy.field_id).eq('operation', 'harvest')
+    .gte('performed_on', `${cy.season}-01-01`).lte('performed_on', `${cy.season + 1}-06-30`).order('performed_on')).data ?? [])
+    .filter((p) => p.crop_year_id === cy.crop_year_id || (!p.crop_year_id && autoCropYear('harvest', p.performed_on, cys)?.crop_year_id === cy.crop_year_id));
+  const tickets = [...(cy.harvest_records ?? [])].sort((a, b) => String(a.harvested_on).localeCompare(String(b.harvested_on)) || a.harvest_id - b.harvest_id);
+  const ac = cyAcres(cy);
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  const reopen = () => openHarvest(cropYearId, onDone);
+  const draw = () => {
+    const y = yieldOf({ ...cy, harvest_records: tickets }, hist);
+    dlg.innerHTML = `<form class="form harvest-form">
+      <div class="dialog-head"><h3>Harvest · ${esc(fieldName(cy.field_id))}</h3>
+        <p class="muted small">${esc(cyName(cy))}${ac ? ` · ${num(ac, 1)} ac` : ''}</p></div>
+
+      <div class="lines-head"><b>Harvest passes</b><button type="button" class="small" data-act="add-pass">+ Log pass</button></div>
+      ${passes.length ? `<ul class="list">${passes.map((p) => `<li><span class="li-name"><b>${esc(stageName(p.harvest_stage) || 'Harvest')}</b>
+        <span class="muted small">${esc([dateRange(p.performed_on, p.end_date), [equipName(p.tractor_id), equipName(p.equipment_id)].filter(Boolean).join(' + '), operatorName(p.performed_by)].filter(Boolean).join(' · '))}</span></span>
+        <span class="li-value"><button type="button" class="small" data-pass="${p.event_id}">Open</button></span></li>`).join('')}</ul>`
+        : '<p class="muted small">None yet. Log each pass (swath/cut, merge/lift, combine/thresh) with its machine and operator.</p>'}
+
+      <div class="lines-head"><b>Scale tickets</b><span class="muted small">"In the dirt" pounds</span></div>
+      <div class="table-wrap"><table class="tickets">
+        <thead><tr><th>Date</th><th>Ticket #</th><th class="r">Lb</th><th></th></tr></thead>
+        <tbody>${tickets.map((t) => `<tr><td>${esc(t.harvested_on ?? '')}</td><td>${esc(t.ticket_no ?? '')}</td><td class="r">${lbFmt(t.yield)}</td>
+          <td class="r"><button type="button" class="icon" data-del-ticket="${t.harvest_id}" aria-label="Delete ticket">✕</button></td></tr>`).join('')}
+          <tr class="ticket-new"><td><input type="date" name="t_date" value="${esc(tickets.at(-1)?.harvested_on ?? localDate())}"></td>
+            <td><input name="t_no" placeholder="#"></td>
+            <td><input type="number" inputmode="decimal" step="any" min="0" name="t_lb" placeholder="lb"></td>
+            <td><button type="button" class="small primary" data-act="add-ticket">Add</button></td></tr>
+        </tbody>
+        <tfoot><tr><td colspan="2"><b>Total in the dirt</b></td><td class="r"><b>${lbFmt(y.dirt)}</b></td><td></td></tr>
+          ${ac && y.dirt ? `<tr><td colspan="2" class="muted">per acre</td><td class="r muted">${lbFmt(y.dirt / ac)}</td><td></td></tr>` : ''}</tfoot>
+      </table></div>
+
+      <div class="lines-head"><b>Clean-out</b></div>
+      <div class="row2">
+        <label>Estimated clean-out (%)<input type="number" inputmode="decimal" step="any" min="0" max="100" name="est_cleanout_pct" value="${esc(cy.est_cleanout_pct ?? '')}" placeholder="${y.hist ? y.hist.pct.toFixed(1) : ''}"></label>
+        <div class="hv-est">${y.estPct != null && y.dirt ? `Estimated clean: <b>${lbFmt(y.dirt * y.estPct / 100)} lb</b>${ac ? ` · ${lbFmt(y.dirt * y.estPct / 100 / ac)} lb/ac` : ''}` : ''}</div>
+      </div>
+      <p class="muted small">${y.hist ? `Your history: <b>${y.hist.pct.toFixed(1)}%</b> average on ${y.hist.n} settled field${y.hist.n > 1 ? 's' : ''} of ${esc(y.hist.of)}.${cy.est_cleanout_pct == null ? ' Used as the estimate until you enter one.' : ''}` : 'No settled history for this crop yet. Each settlement you enter builds it.'}</p>
+
+      <div class="lines-head"><b>Settlement</b><span class="muted small">Net clean pounds you're paid on</span></div>
+      <div class="row2">
+        <label>Clean lb<input type="number" inputmode="decimal" step="any" min="0" name="clean_lb" value="${esc(cy.clean_lb ?? '')}"></label>
+        <label>Settled on<input type="date" name="settled_on" value="${esc(cy.settled_on ?? '')}"></label>
+      </div>
+      <label>Lot / settlement #<input name="settlement_ref" value="${esc(cy.settlement_ref ?? '')}"></label>
+      <p class="hv-actual" id="hv-actual"></p>
+      <label>Notes<textarea name="harvest_notes" rows="2">${esc(cy.harvest_notes ?? '')}</textarea></label>
+      <div class="actions"><span class="spacer"></span>
+        <button type="button" data-act="cancel">Close</button>
+        <button type="submit" class="primary">Save</button></div>
+    </form>`;
+    const form = $('form', dlg), el = form.elements;
+    const showActual = () => {
+      const clean = Number(el.clean_lb.value);
+      const est = el.est_cleanout_pct.value === '' ? y.hist?.pct ?? null : Number(el.est_cleanout_pct.value);
+      const box = $('#hv-actual', dlg);
+      if (clean > 0 && y.dirt > 0) {
+        const pct = (clean / y.dirt) * 100;
+        box.innerHTML = `Actual clean-out <b>${pct.toFixed(1)}%</b>${ac ? ` · <b>${lbFmt(clean / ac)}</b> clean lb/ac` : ''}${est != null ? ` <span class="muted">(estimate was ${est.toFixed(1)}%, ${pct - est >= 0 ? '+' : ''}${(pct - est).toFixed(1)} pts)</span>` : ''}`;
+      } else box.innerHTML = clean > 0 ? '<span class="muted">Add scale tickets to work out the clean-out %.</span>' : '';
+    };
+    el.clean_lb.oninput = showActual; el.est_cleanout_pct.oninput = showActual; showActual();
+    $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+    // Opening a pass leaves this dialog, so save what's typed here first.
+    const patchNow = () => {
+      const n = (k) => (el[k].value === '' ? null : Number(el[k].value));
+      return { est_cleanout_pct: n('est_cleanout_pct'), clean_lb: n('clean_lb'), settled_on: el.settled_on.value || null,
+        settlement_ref: el.settlement_ref.value.trim() || null, harvest_notes: el.harvest_notes.value.trim() || null };
+    };
+    const saveQuiet = async () => { try { await q(sb.from('crop_years').update(patchNow()).eq('crop_year_id', cy.crop_year_id)); } catch { /* shown */ } };
+    $('[data-act=add-pass]', dlg).onclick = async () => { await saveQuiet(); openWorkForm({ operation: 'harvest', fieldId: cy.field_id, cropYearId: cy.crop_year_id,
+      stage: ['swath', 'merge', 'thresh'].find((st) => !passes.some((p) => p.harvest_stage === st)) ?? 'other' }, () => { onDone?.(); reopen(); }); };
+    $$('[data-pass]', dlg).forEach((b) => (b.onclick = async () => { await saveQuiet(); openWorkForm({ eventId: Number(b.dataset.pass) }, () => { onDone?.(); reopen(); }); }));
+    $('[data-act=add-ticket]', dlg).onclick = async () => {
+      const lb = Number(el.t_lb.value);
+      if (!(lb > 0)) { toast('Enter the pounds on the ticket', true); el.t_lb.focus(); return; }
+      try {
+        const [t] = await q(sb.from('harvest_records').insert({ crop_year_id: cy.crop_year_id, harvested_on: el.t_date.value || localDate(), yield: lb, unit: 'lb',
+          ticket_no: el.t_no.value.trim() || null, stage: 'ticket' }).select('*'));
+        tickets.push(t); stash(); draw(); onDone?.();
+        $('input[name=t_lb]', dlg).focus();
+      } catch { /* shown */ }
+    };
+    el.t_lb.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('[data-act=add-ticket]', dlg).click(); } };
+    $$('[data-del-ticket]', dlg).forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this ticket?')) return;
+      try { await q(sb.from('harvest_records').delete().eq('harvest_id', Number(b.dataset.delTicket))); tickets.splice(tickets.findIndex((t) => t.harvest_id === Number(b.dataset.delTicket)), 1); stash(); draw(); onDone?.(); } catch { /* shown */ }
+    }));
+    // Keep unsaved settlement typing across redraws (adding a ticket redraws).
+    const stash = () => { ['est_cleanout_pct', 'clean_lb', 'settled_on', 'settlement_ref', 'harvest_notes'].forEach((k) => { cy[k] = el[k].value === '' ? null : el[k].value; }); };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const patch = patchNow();
+      try { await q(sb.from('crop_years').update(patch).eq('crop_year_id', cy.crop_year_id)); dlg.close(); toast('Saved'); onDone?.(); } catch { /* shown */ }
+    };
+  };
+  draw();
   dlg.onclose = () => dlg.classList.remove('wide');
   if (!dlg.open) dlg.showModal();
 }

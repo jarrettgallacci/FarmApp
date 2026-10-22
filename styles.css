@@ -566,3 +566,10 @@ a.button-like { text-decoration: none; }
 .rate-grid label { display: flex; flex-direction: column; gap: .25rem; font-weight: 600; min-width: 0; }
 .money-in { display: flex; align-items: center; gap: .3rem; font-weight: 400; }
 .money-in input { width: 100%; min-width: 0; }
+.harvest-table td, .harvest-table th { white-space: nowrap; }
+.tickets { width: 100%; }
+.tickets input { width: 100%; min-width: 0; box-sizing: border-box; }
+.tickets td { padding: .25rem .3rem; }
+.ticket-new td { border-top: 1px dashed var(--border); }
+.hv-est { align-self: end; padding-bottom: .5rem; }
+.hv-actual:empty { display: none; }
