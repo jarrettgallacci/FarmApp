@@ -532,3 +532,5 @@ a.button-like { text-decoration: none; }
 .cal-steps { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: .6rem; }
 .cal-steps ol { margin: .3rem 0 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: .35rem; }
 .cal-turns { background: var(--accent-soft); border-radius: var(--radius); padding: .55rem .8rem; }
+.cal-settings { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; }
+.cal-arrow { color: var(--muted); }

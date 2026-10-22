@@ -3186,7 +3186,7 @@ function renderTools(el) {
 }
 
 function renderGpCal(box) {
-  let st = { spacing: 12, target: '', tubes: [''], acre: 0.1, turns: 24.33 };
+  let st = { spacing: 12, target: '', tubes: [''], acre: 0.1, turns: 24.33, box: 'Large', setting: { Large: '', Small: '' }, history: [] };
   try { st = { ...st, ...JSON.parse(localStorage.getItem('gp-cal') || '{}') }; } catch { /* storage unavailable */ }
   const units = () => (Number(st.spacing) === 6 ? 40 : 20);
   const save = () => { try { localStorage.setItem('gp-cal', JSON.stringify(st)); } catch { /* ignore */ } };
@@ -3201,6 +3201,11 @@ function renderGpCal(box) {
             <button type="button" data-sp="12" class="${Number(st.spacing) === 12 ? 'on' : ''}">12" spacing<small>20 units</small></button>
             <button type="button" data-sp="6" class="${Number(st.spacing) === 6 ? 'on' : ''}">6" spacing<small>40 units</small></button>
           </div>
+          <div class="seg" role="group" aria-label="Seed box">
+            <button type="button" data-box="Large" class="${st.box === 'Large' ? 'on' : ''}">Large seed box</button>
+            <button type="button" data-box="Small" class="${st.box === 'Small' ? 'on' : ''}">Small seed box</button>
+          </div>
+          <label>Current meter setting (0–100)<input type="number" inputmode="decimal" step="any" min="0" max="100" data-setting value="${esc(st.setting[st.box] ?? '')}"></label>
           <div class="cal-turns">Turn the drive tire <b>${st.turns} revolutions</b> <span class="muted small">(${st.acre} acre)</span></div>
           <label>Target rate (lb/acre)<input type="number" inputmode="decimal" step="any" min="0" data-k="target" value="${esc(st.target)}"></label>
           <div class="lines-head"><b>Seed caught (grams)</b><span class="muted small">One tube; add more to average them</span></div>
@@ -3220,7 +3225,7 @@ function renderGpCal(box) {
         <li>Put a catch bag or cup on <b>one seed tube</b>.</li>
         <li>Mark the drive tire, then turn it <b>${st.turns} revolutions</b>: ${turnsWhole} full turns${frac > 0.01 ? ` plus <b>${Math.round(frac * 100) / 100} of a turn</b> (about ${Math.round(frac * 360)}° — roughly ${Math.abs(frac - 1/3) < 0.03 ? 'a third' : Math.abs(frac - 0.5) < 0.03 ? 'half' : Math.abs(frac - 0.25) < 0.03 ? 'a quarter' : Math.abs(frac - 0.75) < 0.03 ? 'three quarters' : Math.round(frac * 8) + '/8'} of a turn)` : ''}. That's ${st.acre} acre of travel.</li>
         <li>Weigh the seed in <b>grams</b> and enter it. Catch more tubes and enter each for a better average.</li>
-        <li>Adjust the meter and repeat until the actual rate is close to target.</li>
+        <li>Tap <b>Save this test</b>, move the ${st.box.toLowerCase()} box meter to the suggested setting, and run the test again. From the second test on, the suggestion uses your last two tests, so it gets closer each time.</li>
       </ol></div>`;
     const calc = () => {
       const tgt = Number(st.target);
@@ -3235,16 +3240,56 @@ function renderGpCal(box) {
           <span class="muted small">What one tube should catch at ${tgt > 0 ? tgt : '—'} lb/ac</span></div>
         <div class="cal-stat ${tone}"><span class="stat-label">Actual rate${grams.length > 1 ? ` (avg of ${grams.length} tubes)` : ''}</span><span class="stat-value">${actual != null ? actual.toFixed(1) : '—'}<small> lb/ac</small></span>
           ${diff != null ? `<span class="cal-diff">${diff >= 0 ? '+' : ''}${diff.toFixed(1)}% ${diff >= 0 ? 'over' : 'under'} target${Math.abs(diff) <= 3 ? ' · close enough' : ''}</span>` : '<span class="muted small">Enter grams caught</span>'}</div>
-        ${diff != null && Math.abs(diff) > 0.5 ? `<p class="muted small">If the meter scale is roughly proportional, try moving the setting about <b>${Math.abs((tgt / actual - 1) * 100).toFixed(0)}% ${actual > tgt ? 'lower' : 'higher'}</b>, then test again.</p>` : ''}`;
+        ${suggestHtml(tgt, actual, diff)}`;
+      const sv = $('[data-act=save-test]', box);
+      if (sv) sv.onclick = () => {
+        st.history = [{ box: st.box, spacing: Number(st.spacing), setting: Number(st.setting[st.box]), rate: Math.round(actual * 100) / 100, at: new Date().toISOString() }, ...(st.history || [])].slice(0, 20);
+        const next = lastSuggestion;
+        if (next != null) st.setting[st.box] = String(next);
+        st.tubes = [''];
+        save(); draw();
+      };
+    };
+    let lastSuggestion = null;
+    const suggestHtml = (tgt, actual, diff) => {
+      lastSuggestion = null;
+      const cur = Number(st.setting[st.box]);
+      const hasCur = st.setting[st.box] !== '' && st.setting[st.box] != null && cur > 0;
+      if (actual == null || !(tgt > 0)) return '';
+      if (!hasCur) {
+        return Math.abs(diff) > 0.5 ? `<p class="muted small">Enter the current meter setting to get a suggested setting. Rough guide: move it about <b>${Math.abs((tgt / actual - 1) * 100).toFixed(0)}% ${actual > tgt ? 'lower' : 'higher'}</b>.</p>` : '';
+      }
+      // A previous test on this box and spacing at a different setting → draw a line through both points.
+      const prev = (st.history || []).find((h) => h.box === st.box && h.spacing === Number(st.spacing) && h.setting !== cur && h.rate > 0);
+      let sugg, how;
+      if (prev && Math.abs(actual - prev.rate) > 0.01) {
+        const slope = (actual - prev.rate) / (cur - prev.setting);
+        sugg = slope > 0 ? cur + (tgt - actual) / slope : null;
+        how = `Based on this test and your last one at setting ${prev.setting} (${prev.rate} lb/ac).`;
+      }
+      if (sugg == null) {
+        sugg = cur * (tgt / actual);
+        how = 'Assumes the rate changes in proportion to the setting. After your next test it will use both tests and get more accurate.';
+      }
+      const clamped = Math.min(100, Math.max(0, sugg));
+      const shown = Math.round(clamped * 2) / 2;
+      lastSuggestion = Math.abs(diff) > 3 ? shown : null;
+      const close = Math.abs(diff) <= 3;
+      return `<div class="cal-stat"><span class="stat-label">${st.box} box setting</span>
+          <span class="cal-settings"><span>Current <b>${cur}</b></span><span class="cal-arrow">→</span><span>Suggested <b class="stat-value">${close ? cur : shown}</b></span></span>
+          <span class="muted small">${close ? 'Within 3% of target. Leave it here.' : how}${sugg > 100 || sugg < 0 ? ' <b>That is past the end of the 0–100 scale. Check the spacing, the box, or the meter.</b>' : ''}</span>
+          ${close ? '' : `<button type="button" class="small" data-act="save-test">Save this test and set meter to ${shown}</button>`}</div>`;
     };
     const inputs = () => {
       $$('[data-k]', box).forEach((i) => (i.oninput = () => { st[i.dataset.k] = i.dataset.k === 'target' ? i.value : Number(i.value) || 0; save(); if (i.dataset.k === 'target') calc(); else draw(); }));
       $$('[data-tube]', box).forEach((i) => (i.oninput = () => { st.tubes[Number(i.dataset.tube)] = i.value; save(); calc(); }));
     };
     $$('[data-sp]', box).forEach((b) => (b.onclick = () => { st.spacing = Number(b.dataset.sp); save(); draw(); }));
+    $$('[data-box]', box).forEach((b) => (b.onclick = () => { st.box = b.dataset.box; save(); draw(); }));
+    $('[data-setting]', box).oninput = (e) => { st.setting[st.box] = e.target.value; save(); calc(); };
     $$('[data-rm-tube]', box).forEach((b) => (b.onclick = () => { st.tubes.splice(Number(b.dataset.rmTube), 1); save(); draw(); }));
     $('[data-act=add-tube]', box).onclick = () => { st.tubes.push(''); save(); draw(); $$('[data-tube]', box).at(-1)?.focus(); };
-    $('[data-act=clear]', box).onclick = () => { st.target = ''; st.tubes = ['']; save(); draw(); };
+    $('[data-act=clear]', box).onclick = () => { st.target = ''; st.tubes = ['']; st.history = []; save(); draw(); };
     inputs(); calc();
   };
   draw();
