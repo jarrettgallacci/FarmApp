@@ -208,7 +208,7 @@ const CRUD = {
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
       { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
-      { key: 'planting_settings', label: 'Planting settings to record (planters only, one per line)', type: 'textarea' },
+      { key: 'planting_settings', label: 'Planting settings to record (planters only, one per line; for a choice write "Name: Option A | Option B")', type: 'textarea' },
       { key: 'work', label: 'Used for', list: true, form: false, compute: (r) => (r.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', ') },
       { key: 'verified_on', label: 'Last checked (seen on the farm)', listLabel: 'Checked', type: 'date', list: true },
       { key: 'photos', label: 'Photos', list: true, form: false, compute: (r) => (r.equipment_photos?.[0]?.count ? `📷 ${r.equipment_photos[0].count}` : '') },
@@ -2125,12 +2125,22 @@ async function openWorkForm(opts, onDone) {
   const plateLabel = () => {
     captureSettings();
     const p = refs.equipment.find((e) => e.equipment_id === Number(el.equipment_id.value));
-    let names = (p?.planting_settings ?? '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    // A line like "Seed box: Large | Small" becomes a choice; anything else is a text box.
+    const lines = (p?.planting_settings ?? '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const choices = {};
+    let names = lines.map((l) => {
+      const m = l.match(/^([^:]+):\s*(.+\|.+)$/);
+      if (!m) return l;
+      choices[m[1].trim()] = m[2].split('|').map((x) => x.trim()).filter(Boolean);
+      return m[1].trim();
+    });
     const extra = origKeys.filter((k) => settingVals[k] && !names.includes(k));   // only from the saved record
     if (!names.length && !extra.length) names = ['Settings'];
     $('#settings-title', dlg).textContent = p ? `${p.name} settings` : 'Planter settings';
     $('#settings-hint', dlg).textContent = p?.planting_settings ? '' : (p ? 'No setting list for this planter yet; add one in Setup → Equipment' : 'Pick a planter');
-    $('#settings-box', dlg).innerHTML = [...names, ...extra].map((k) => `<label>${esc(k)}${extra.includes(k) ? ' <span class="muted small">(other planter)</span>' : ''}<input data-setting="${esc(k)}" value="${esc(settingVals[k] ?? '')}"></label>`).join('');
+    $('#settings-box', dlg).innerHTML = [...names, ...extra].map((k) => `<label>${esc(k)}${extra.includes(k) ? ' <span class="muted small">(other planter)</span>' : ''}${choices[k]
+      ? `<select data-setting="${esc(k)}"><option value="">—</option>${[...new Set([...choices[k], settingVals[k]].filter(Boolean))].map((o) => `<option ${o === settingVals[k] ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`
+      : `<input data-setting="${esc(k)}" value="${esc(settingVals[k] ?? '')}">`}</label>`).join('');
   };
   const syncPattern = () => { $$('[data-heading]', dlg).forEach((x) => (x.hidden = el.pattern.value !== 'straight')); };
   el.pattern.onchange = syncPattern; syncPattern();
