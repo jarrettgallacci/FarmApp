@@ -35,7 +35,7 @@ async function q(request) {
 // =====================================================================
 // Reference data used across screens
 // =====================================================================
-const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [], workTypes: [], equipment: [] };
+const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [], workTypes: [], equipment: [], appRates: [] };
 
 async function loadRefs() {
   const [riders, turnouts, fields, leases, crops, chemicals, operators] = await Promise.all([
@@ -51,7 +51,35 @@ async function loadRefs() {
   // Work types (tolerates the table/columns not being set up yet)
   refs.workTypes = (await sb.from('operation_types').select('*').order('sort_order', { nullsFirst: false }).order('operation')).data ?? [];
   refs.equipment = (await sb.from('equipment').select('*, equipment_work_types(operation)').order('name')).data ?? [];
+  refs.appRates = (await sb.from('application_rates').select('*')).data ?? [];
 }
+// ---- Cost rates ($/acre). Machine override first, then the work type's / application method's rate.
+const money = (v, d = 2) => (v == null || v === '' ? '' : '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }));
+function workRate(operation, equipmentId) {
+  const m = refs.equipment.find((e) => e.equipment_id === Number(equipmentId));
+  if (m?.cost_per_acre != null) return { rate: Number(m.cost_per_acre), basis: m.name };
+  const w = refs.workTypes.find((x) => x.operation === operation);
+  if (w?.cost_per_acre != null) return { rate: Number(w.cost_per_acre), basis: `${workLabel(operation)} rate` };
+  return { rate: null, basis: null };
+}
+function appRate(method, sprayerId) {
+  const m = method === 'spray' ? refs.equipment.find((e) => e.equipment_id === Number(sprayerId)) : null;
+  if (m?.cost_per_acre != null) return { rate: Number(m.cost_per_acre), basis: m.name };
+  const r = refs.appRates.find((x) => x.method === method);
+  if (r?.cost_per_acre != null) return { rate: Number(r.cost_per_acre), basis: `${methodName(method)} rate` };
+  return { rate: null, basis: null };
+}
+// Which crop a work pass is charged to. Tillage prepares the NEXT crop; everything else belongs to the crop standing in the field.
+const cyKey = (c) => c.planting_date ?? `${c.season}-12-31`;
+function autoCropYear(operation, date, cys) {
+  if (!date) return null;
+  if (operation === 'tillage') return [...cys].sort((a, b) => cyKey(a).localeCompare(cyKey(b)) || a.sequence - b.sequence).find((c) => cyKey(c) >= date) ?? null;
+  const yr = Number(date.slice(0, 4));
+  const live = cys.filter((c) => c.season === yr || (c.multi_year && c.season <= yr && (c.end_season == null || c.end_season >= yr)));
+  const planted = live.filter((c) => c.planting_date && c.planting_date <= date).sort((a, b) => b.planting_date.localeCompare(a.planting_date));
+  return planted[0] ?? live.sort((a, b) => b.season - a.season || a.sequence - b.sequence)[0] ?? null;
+}
+const cyName = (c) => (c ? `${cropName(c.crop_id)}${c.variety ? ' · ' + c.variety : ''} (${c.season})` : '');
 const equipName = (id) => refs.equipment.find((e) => e.equipment_id === id)?.name ?? '';
 const isTractor = (e) => /tractor/i.test(e.type ?? '');
 const isSprayer = (e) => /sprayer/i.test(e.type ?? '');
@@ -208,6 +236,7 @@ const CRUD = {
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
       { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
+      { key: 'cost_per_acre', label: 'Cost per acre when this machine is used ($/ac, optional; overrides the work type or application rate)', listLabel: '$/ac', type: 'number', step: '0.01', list: true },
       { key: 'planting_settings', label: 'Planting settings to record (planters only, one per line; for a choice write "Name: Option A | Option B")', type: 'textarea' },
       { key: 'work', label: 'Used for', list: true, form: false, compute: (r) => (r.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', ') },
       { key: 'verified_on', label: 'Last checked (seen on the farm)', listLabel: 'Checked', type: 'date', list: true },
@@ -1977,6 +2006,13 @@ async function renderWork(el) {
     .order('performed_on', { ascending: false }).order('event_id', { ascending: false });
   if (error) { el.innerHTML = `<div class="empty">Work records aren't set up yet. Run <b>work_records.sql</b> in Supabase first.</div>`; return; }
   const term = s.q.trim().toLowerCase();
+  // Crops for automatic charging (tillage can land on next year's crop).
+  const cys = (await sb.from('crop_years').select('crop_year_id, field_id, crop_id, variety, season, sequence, planting_date, multi_year, end_season')
+    .gte('season', s.season - 2).lte('season', s.season + 1)).data ?? [];
+  const chargedTo = (r) => {
+    if (r.crop_year_id) return { cy: cys.find((c) => c.crop_year_id === r.crop_year_id) ?? (r.crop_years ? { ...r.crop_years, season: '' } : null), auto: false };
+    return { cy: autoCropYear(r.operation, r.performed_on, cys.filter((c) => c.field_id === r.field_id)), auto: true };
+  };
   const rows = data.filter((r) => (!s.op || r.operation === s.op) &&
     (!term || fieldName(r.field_id).toLowerCase().includes(term) || equipName(r.equipment_id).toLowerCase().includes(term)));
   el.innerHTML = `
@@ -1991,17 +2027,18 @@ async function renderWork(el) {
       <input type="search" data-f="q" placeholder="Search field or equipment…" value="${esc(s.q)}">
       <select data-f="op"><option value="">All work</option>${refs.workTypes.map((w) => `<option value="${esc(w.operation)}" ${s.op === w.operation ? 'selected' : ''}>${esc(workLabel(w.operation))}</option>`).join('')}</select>
     </div>
-    <p class="muted small">${rows.length} of ${data.length} record(s) in ${s.season}.</p>
+    <p class="muted small">${rows.length} of ${data.length} record(s) in ${s.season}.${rows.some((r) => r.cost_total != null) ? ` Work cost shown: <b>${money(rows.reduce((n, r) => n + Number(r.cost_total || 0), 0), 0)}</b>.` : ''}</p>
     ${rows.length ? `<div class="card table-wrap"><table>
       <thead><tr><th>Date</th><th>Field</th><th>Work</th><th>Equipment</th><th class="r">Acres</th><th>By</th><th></th></tr></thead>
       <tbody>${rows.map((r) => {
         const d = r.planting_details?.[0] ?? r.planting_details;
-        const crop = r.crop_years ? `${cropName(r.crop_years.crop_id)}${r.crop_years.variety ? ' · ' + r.crop_years.variety : ''}` : '';
+        const ch = chargedTo(r);
+        const crop = ch.cy ? `${cropName(ch.cy.crop_id)}${ch.cy.variety ? ' · ' + ch.cy.variety : ''}${ch.auto && ch.cy.season ? ` ${ch.cy.season}` : ''}${ch.auto ? ' (auto)' : ''}` : r.operation === 'tillage' ? 'next crop not entered' : '';
         return `<tr><td class="nowrap">${esc(dateRange(r.performed_on, r.end_date))}</td>
           <td><b>${esc(fieldName(r.field_id))}</b></td>
           <td>${esc(workLabel(r.operation))}${d?.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}${crop ? `<div class="muted small">${esc(crop)}</div>` : ''}${patText(r, d) ? `<div class="muted small">${esc(patText(r, d))}</div>` : ''}</td>
           <td>${esc([equipName(r.tractor_id), equipName(r.equipment_id)].filter(Boolean).join(' + '))}</td>
-          <td class="r">${r.acres != null ? num(r.acres, 1) : ''}</td>
+          <td class="r">${r.acres != null ? num(r.acres, 1) : ''}${r.cost_total != null ? `<div class="muted small">${money(r.cost_total, 0)}</div>` : ''}</td>
           <td>${esc(operatorName(r.performed_by))}</td>
           <td class="r"><button class="small" data-edit="${r.event_id}">Edit</button></td></tr>`;
       }).join('')}</tbody></table></div>` : `<div class="empty">No work records${data.length ? ' match' : ` for ${s.season}`}.</div>`}`;
@@ -2044,8 +2081,8 @@ async function openWorkForm(opts, onDone) {
       <label>End date<input type="date" name="end_date" value="${esc(v.end_date ?? '')}"></label>
     </div>
     <p class="muted small form-hint">Leave the end date blank if it was done in one day.</p>
-    <label data-plant>Crop and variety *<select name="crop_year_id"></select></label>
-    <p class="muted small" data-plant id="cy-hint"></p>
+    <label><span id="cy-label">Crop and variety *</span><select name="crop_year_id"></select></label>
+    <p class="muted small" id="cy-hint"></p>
     <div class="row2">
       <label>Tractor<select name="tractor_id"></select></label>
       <label><span id="impl-label">Implement</span><select name="equipment_id"></select></label>
@@ -2054,6 +2091,7 @@ async function openWorkForm(opts, onDone) {
       <label>Operator<select name="performed_by"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === v.performed_by).map((o) => `<option value="${o.operator_id}" ${o.operator_id === v.performed_by ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
       <label>Acres<input type="number" step="any" min="0" name="acres" value="${esc(v.acres ?? '')}"></label>
     </div>
+    <p class="cost-line" id="cost-line"></p>
     <div class="row2 pattern-row">
       <label>Pattern<select name="pattern"><option value="">—</option>
         <option value="straight" ${pat === 'straight' ? 'selected' : ''}>Straight lines</option>
@@ -2102,14 +2140,39 @@ async function openWorkForm(opts, onDone) {
     pickList(el.equipment_id, tagged.filter((e) => !isTractor(e)), Number(el.equipment_id.value) || v.equipment_id, '—');
     $('#impl-label', dlg).textContent = op() === 'planting' ? 'Planter' : op() === 'harvest' ? 'Machine' : 'Implement';
   };
+  let cyCache = { fid: null, rows: [] };
+  let cyPicked = v.crop_year_id ?? null;   // planting: the crop planted; other work: a manual choice (blank = automatic)
   const fillCropYears = async () => {
     const fid = Number(el.field_id.value);
     const date = el.performed_on.value || localDate();
-    const list = fid ? await cropFor(fid, date) : [];
-    const cur = Number(el.crop_year_id.value) || v.crop_year_id;
-    el.crop_year_id.innerHTML = `<option value="">Choose…</option>` + list.map((c) => `<option value="${c.crop_year_id}" ${c.crop_year_id === cur ? 'selected' : ''}>${esc(cropName(c.crop_id))}${c.variety ? ' · ' + esc(c.variety) : ''} (${c.season})</option>`).join('');
-    if (!el.crop_year_id.value && list.length === 1) el.crop_year_id.value = list[0].crop_year_id;
-    $('#cy-hint', dlg).textContent = fid && !list.length ? `No crop entered for this field in ${date.slice(0, 4)}. Add it under Crops first.` : '';
+    const yr = Number(date.slice(0, 4));
+    if (el.crop_year_id.options.length) cyPicked = Number(el.crop_year_id.value) || null;
+    if (op() === 'planting') {
+      const list = fid ? await cropFor(fid, date) : [];
+      el.crop_year_id.innerHTML = `<option value="">Choose…</option>` + list.map((c) => `<option value="${c.crop_year_id}" ${c.crop_year_id === cyPicked ? 'selected' : ''}>${esc(cropName(c.crop_id))}${c.variety ? ' · ' + esc(c.variety) : ''} (${c.season})</option>`).join('');
+      if (!el.crop_year_id.value && list.length === 1) el.crop_year_id.value = list[0].crop_year_id;
+      $('#cy-label', dlg).textContent = 'Crop and variety *';
+      $('#cy-hint', dlg).textContent = fid && !list.length ? `No crop entered for this field in ${yr}. Add it under Crops first.` : '';
+      return;
+    }
+    if (fid && cyCache.fid !== fid) {
+      cyCache = { fid, rows: (await sb.from('crop_years').select('crop_year_id, crop_id, variety, season, sequence, planting_date, multi_year, end_season')
+        .eq('field_id', fid).gte('season', yr - 2).lte('season', yr + 2)).data ?? [] };
+    }
+    const rows = fid ? cyCache.rows : [];
+    const auto = autoCropYear(op(), date, rows);
+    $('#cy-label', dlg).textContent = 'Charged to crop';
+    el.crop_year_id.innerHTML = `<option value="">Automatic${auto ? `: ${esc(cyName(auto))}` : op() === 'tillage' ? ' (next crop, not entered yet)' : ' (no crop in the field)'}</option>`
+      + [...rows].sort((a, b) => cyKey(a).localeCompare(cyKey(b))).map((c) => `<option value="${c.crop_year_id}" ${c.crop_year_id === cyPicked ? 'selected' : ''}>${esc(cyName(c))}</option>`).join('');
+    $('#cy-hint', dlg).textContent = !fid ? '' : op() === 'tillage'
+      ? 'Tillage is charged to the next crop planted in this field. If it isn\'t entered yet, the record attaches once it is.'
+      : 'Charged to the crop in the field on this date.';
+  };
+  const showCost = () => {
+    const r = workRate(op(), el.equipment_id.value);
+    const ac = Number(el.acres.value);
+    $('#cost-line', dlg).innerHTML = r.rate == null ? '<span class="muted small">No cost rate for this work. Set one under Setup → Cost rates.</span>'
+      : `Cost <b>${money(r.rate)}/ac</b>${ac > 0 ? ` × ${num(ac, 1)} ac = <b>${money(r.rate * ac)}</b>` : ''} <span class="muted small">(${esc(r.basis)})</span>`;
   };
   const showRate = () => {
     const acres = Number(el.acres.value);
@@ -2156,19 +2219,19 @@ async function openWorkForm(opts, onDone) {
     $$('[data-plant]', dlg).forEach((x) => (x.hidden = !planting));
     el.crop_year_id.required = planting;
     $$('[data-stagger]', dlg).forEach((x) => (x.hidden = !el.staggered.checked));
-    fillEquip(); plateLabel();
+    fillEquip(); plateLabel(); showCost();
   };
   const fieldChanged = () => {
     const f = fieldById(el.field_id.value);
     if (!ev && f?.acres != null && !el.acres.dataset.touched) el.acres.value = Number(f.acres);
-    fillCropYears();
+    showCost(); fillCropYears();
   };
-  el.operation.onchange = sync;
+  el.operation.onchange = () => { sync(); fillCropYears(); };
   el.staggered.onchange = sync;
   el.field_id.onchange = fieldChanged;
   el.performed_on.onchange = fillCropYears;
-  el.equipment_id.onchange = plateLabel;
-  el.acres.oninput = () => { el.acres.dataset.touched = '1'; showRate(); };
+  el.equipment_id.onchange = () => { plateLabel(); showCost(); };
+  el.acres.oninput = () => { el.acres.dataset.touched = '1'; showRate(); showCost(); };
   ['seed_used', 'target_rate'].forEach((k) => (el[k].oninput = showRate));
   ['seed_used_unit', 'target_unit'].forEach((k) => (el[k].onchange = showRate));
   sync(); await fillCropYears(); if (!ev) fieldChanged(); showRate();
@@ -2190,9 +2253,12 @@ async function openWorkForm(opts, onDone) {
     const row = {
       operation: op(), field_id: Number(val('field_id')), performed_on: val('performed_on'), end_date: val('end_date') || null,
       tractor_id: numOrNull('tractor_id'), equipment_id: numOrNull('equipment_id'), performed_by: numOrNull('performed_by'),
-      acres: numOrNull('acres'), notes: val('notes') || null, crop_year_id: planting ? numOrNull('crop_year_id') : null,
+      acres: numOrNull('acres'), notes: val('notes') || null, crop_year_id: numOrNull('crop_year_id'),
       pattern: val('pattern') || null, heading_deg: val('pattern') === 'straight' ? numOrNull('heading_deg') : null,
     };
+    // Freeze the cost with today's rate.
+    const cr = workRate(row.operation, row.equipment_id);
+    Object.assign(row, { cost_per_acre: cr.rate, cost_basis: cr.basis, cost_total: cr.rate != null && row.acres != null ? Math.round(cr.rate * row.acres * 100) / 100 : null });
     const det = {
       planting_label: el.staggered.checked ? val('planting_label') : null, row_spacing_in: numOrNull('row_spacing_in'),
       seed_lot: val('seed_lot') || null, target_rate: numOrNull('target_rate'), target_unit: val('target_unit'),
@@ -2203,11 +2269,15 @@ async function openWorkForm(opts, onDone) {
     const btn = $('button[type=submit]', form); btn.disabled = true;
     try {
       let id = ev?.event_id;
-      // Until work_pattern.sql is run, save without pattern/heading rather than failing.
+      // Until the newer SQL files are run, save without those columns rather than failing.
       const write = (r) => (ev ? sb.from('work_events').update(r).eq('event_id', id) : sb.from('work_events').insert(r).select('event_id').single());
       let res = await write(row);
+      if (res.error && /cost_per_acre|cost_total|cost_basis/.test(res.error.message ?? '')) {
+        const { cost_per_acre, cost_total, cost_basis, ...rest } = row;
+        res = await write(rest);
+      }
       if (res.error && /pattern|heading_deg/.test(res.error.message ?? '')) {
-        const { pattern, heading_deg, ...rest } = row;
+        const { pattern, heading_deg, cost_per_acre, cost_total, cost_basis, ...rest } = row;
         res = await write(rest);
         if (!res.error && !planting && pattern) toast('Saved, but the heading needs work_pattern.sql run in Supabase', true);
       }
@@ -2600,6 +2670,7 @@ async function openChemForm(opts, onDone) {
       applied_on: val('applied_on'), status, method,
       performed_by: val('performed_by') ? Number(val('performed_by')) : null,
       carrier_gpa: ['spray', 'aerial'].includes(method) ? numOrNull('carrier_gpa') : null,
+      ...(refs.appRates.length ? (() => { const r = appRate(method, method === 'spray' ? val('sprayer_id') : null); return { app_cost_per_acre: r.rate, app_cost_basis: r.basis }; })() : {}),
       hours: ['spray', 'aerial'].includes(method) ? numOrNull('hours') : null,
       pivot_speed_pct: method === 'chemigation' ? numOrNull('pivot_speed_pct') : null,
       water_in: method === 'chemigation' ? numOrNull('water_in') : null,
@@ -2797,6 +2868,7 @@ function addFieldsToLoad(load, evs, mix, onDone) {
           method: load.method, performed_by: load.performed_by, carrier_gpa: load.carrier_gpa, notes: load.notes, sprayer_id: load.sprayer_id ?? null,
           hours: null, pivot_speed_pct: tmpl.pivot_speed_pct ?? null, water_in: tmpl.water_in ?? null,
           acres_treated: fieldById(fid)?.acres ?? null, crop_year_id: crops[0]?.crop_year_id ?? null,
+          ...(refs.appRates.length ? (() => { const r = appRate(load.method, load.sprayer_id); return { app_cost_per_acre: r.rate, app_cost_basis: r.basis }; })() : {}),
         }).select('event_id').single())).event_id;
         if (mix.length) await q(sb.from('chemical_event_products').insert(mix.map((l) => ({
           event_id: ev, chemical_id: l.chemical_id, position: l.position, rate: l.rate, rate_unit: l.rate_unit,
@@ -3175,12 +3247,63 @@ async function equipmentPhotos(form, row) {
 }
 
 async function renderSetup(el) {
-  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'leases'];
+  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'costs', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>
-    `<button data-tab="${t}" class="${t === setupTab ? 'active' : ''}">${esc(CRUD[t].title)}</button>`).join('')}</div>
+    `<button data-tab="${t}" class="${t === setupTab ? 'active' : ''}">${esc(t === 'costs' ? 'Cost rates' : CRUD[t].title)}</button>`).join('')}</div>
     <div id="setup-body"><p class="muted">Loading…</p></div>`;
   $$('[data-tab]', el).forEach((b) => (b.onclick = () => { setupTab = b.dataset.tab; renderSetup(el); }));
+  if (setupTab === 'costs') return renderCostRates($('#setup-body', el));
   await renderCrud(CRUD[setupTab], $('#setup-body', el));
+}
+
+// Setup -> Cost rates: one $/acre per work type and per application method; machine overrides live on Equipment.
+async function renderCostRates(el) {
+  await loadRefs();
+  const ready = refs.workTypes.length && 'cost_per_acre' in refs.workTypes[0];
+  if (!ready || !refs.appRates.length) { el.innerHTML = '<div class="empty">Cost rates aren’t set up yet. Run <b>work_costs.sql</b> in Supabase first.</div>'; return; }
+  const overrides = refs.equipment.filter((e) => e.cost_per_acre != null);
+  const yr = new Date().getFullYear();
+  el.innerHTML = `
+    <div class="card"><h3>Work passes ($/acre)</h3>
+      <p class="muted small">Used for every pass of that work type unless the implement or machine has its own rate (Setup → Equipment).</p>
+      <div class="rate-grid">${refs.workTypes.filter((w) => w.active || w.cost_per_acre != null).map((w) => `<label>${esc(workLabel(w.operation))}
+        <span class="money-in"><span>$</span><input type="number" inputmode="decimal" step="0.01" min="0" data-op="${esc(w.operation)}" value="${w.cost_per_acre ?? ''}"><span class="muted">/ac</span></span></label>`).join('')}</div></div>
+    <div class="card"><h3>Chemical applications ($/acre)</h3>
+      <p class="muted small">Application cost only (the pass, not the product). Ground spray uses the sprayer's own rate if it has one.</p>
+      <div class="rate-grid">${METHODS.map(([m, label]) => { const r = refs.appRates.find((x) => x.method === m); return `<label>${esc(label)}
+        <span class="money-in"><span>$</span><input type="number" inputmode="decimal" step="0.01" min="0" data-method="${m}" value="${r?.cost_per_acre ?? ''}"><span class="muted">/ac</span></span></label>`; }).join('')}</div></div>
+    <div class="card"><h3>Machine overrides</h3>
+      ${overrides.length ? `<ul class="list">${overrides.map((e) => `<li><span class="li-name">${esc(e.name)} <span class="muted small">${esc((e.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', '))}</span></span><span class="li-value">${money(e.cost_per_acre)}/ac</span></li>`).join('')}</ul>`
+        : '<p class="muted small">None. Set one on an implement or machine under Setup → Equipment when it costs more or less than its work type (a ripper vs. a disk, say).</p>'}</div>
+    <div class="card"><h3>Recalculate a season</h3>
+      <p class="muted small">Each record keeps the rate it was saved with, so changing a rate here doesn't change past records. To apply today's rates to a whole season, recalculate it.</p>
+      <div class="row"><select id="recalc-yr">${[yr + 1, yr, yr - 1, yr - 2, yr - 3].map((y) => `<option ${y === yr ? 'selected' : ''}>${y}</option>`).join('')}</select>
+        <button type="button" data-act="recalc">Recalculate costs</button></div>
+      <p class="muted small" id="recalc-msg"></p></div>`;
+  const saveRate = async (inp, table, key, id) => {
+    const v = inp.value === '' ? null : Number(inp.value);
+    try { await q(sb.from(table).update({ cost_per_acre: v }).eq(key, id)); toast('Rate saved'); await loadRefs(); } catch { /* shown */ }
+  };
+  $$('[data-op]', el).forEach((i) => (i.onchange = () => saveRate(i, 'operation_types', 'operation', i.dataset.op)));
+  $$('[data-method]', el).forEach((i) => (i.onchange = () => saveRate(i, 'application_rates', 'method', i.dataset.method)));
+  $('[data-act=recalc]', el).onclick = async () => {
+    const y = $('#recalc-yr', el).value;
+    if (!confirm(`Replace the saved costs on every ${y} work and chemical record with today's rates?`)) return;
+    const msg = $('#recalc-msg', el); msg.textContent = 'Working…';
+    try {
+      const works = await q(sb.from('work_events').select('event_id, operation, equipment_id, acres').gte('performed_on', `${y}-01-01`).lte('performed_on', `${y}-12-31`));
+      for (const w of works) {
+        const r = workRate(w.operation, w.equipment_id);
+        await q(sb.from('work_events').update({ cost_per_acre: r.rate, cost_basis: r.basis, cost_total: r.rate != null && w.acres != null ? Math.round(r.rate * w.acres * 100) / 100 : null }).eq('event_id', w.event_id));
+      }
+      const chems = await q(sb.from('chemical_events').select('event_id, method, sprayer_id').gte('applied_on', `${y}-01-01`).lte('applied_on', `${y}-12-31`));
+      for (const c of chems) {
+        const r = appRate(c.method, c.sprayer_id);
+        await q(sb.from('chemical_events').update({ app_cost_per_acre: r.rate, app_cost_basis: r.basis }).eq('event_id', c.event_id));
+      }
+      msg.textContent = `Updated ${works.length} work and ${chems.length} chemical record(s) for ${y}.`;
+    } catch { msg.textContent = 'Stopped on an error; some records may not be updated.'; }
+  };
 }
 
 // =====================================================================

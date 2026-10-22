@@ -561,3 +561,8 @@ a.button-like { text-decoration: none; }
 .cal-rows tr.off td { color: var(--danger); font-weight: 600; }
 .cal-stat { min-width: 0; overflow-x: auto; }
 .cal-speeds th, .cal-speeds td { padding: .2rem .15rem; font-size: .78rem; }
+.cost-line { margin: .1rem 0 .3rem; }
+.rate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .6rem; }
+.rate-grid label { display: flex; flex-direction: column; gap: .25rem; font-weight: 600; min-width: 0; }
+.money-in { display: flex; align-items: center; gap: .3rem; font-weight: 400; }
+.money-in input { width: 100%; min-width: 0; }
