@@ -35,7 +35,7 @@ async function q(request) {
 // =====================================================================
 // Reference data used across screens
 // =====================================================================
-const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [] };
+const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [], workTypes: [] };
 
 async function loadRefs() {
   const [riders, turnouts, fields, leases, crops, chemicals, operators] = await Promise.all([
@@ -48,7 +48,10 @@ async function loadRefs() {
     q(sb.from('operators').select('*').order('name')),
   ]);
   Object.assign(refs, { riders, turnouts, fields, leases, crops, chemicals, operators });
+  // Work types (tolerates the table/columns not being set up yet)
+  refs.workTypes = (await sb.from('operation_types').select('*').order('sort_order', { nullsFirst: false }).order('operation')).data ?? [];
 }
+const workLabel = (op) => (op === 'cultivating' ? 'Cultivation' : op ? op[0].toUpperCase() + op.slice(1) : '');
 
 // Deeded unless a lease or partnership is in effect today.
 // A split half with no agreement of its own follows its parent.
@@ -183,7 +186,9 @@ const CRUD = {
     table: 'equipment', pk: 'equipment_id', title: 'Equipment', singular: 'equipment', order: 'name',
     allowDelete: true,
     search: true,
-    filters: [{ key: 'type', all: 'All types', options: () => ['Tractor', 'Combine', 'Sprayer', 'Windrower', 'Implement', 'Truck', 'Other'].map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
+    filters: [{ key: 'work', all: 'All work', options: () => refs.workTypes.filter((w) => w.active).map((w) => [w.operation, workLabel(w.operation)]),
+      test: (r, v) => (r.equipment_work_types ?? []).some((x) => x.operation === v) },
+      { key: 'type', all: 'All types', options: () => ['Tractor', 'Combine', 'Sprayer', 'Windrower', 'Implement', 'Truck', 'Other'].map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'type', label: 'Type (tractor, combine, sprayer, implement...)', listLabel: 'Type', type: 'text', list: true },
@@ -198,18 +203,29 @@ const CRUD = {
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
       { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
+      { key: 'work', label: 'Used for', list: true, form: false, compute: (r) => (r.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', ') },
       { key: 'verified_on', label: 'Last checked (seen on the farm)', listLabel: 'Checked', type: 'date', list: true },
       { key: 'photos', label: 'Photos', list: true, form: false, compute: (r) => (r.equipment_photos?.[0]?.count ? `📷 ${r.equipment_photos[0].count}` : '') },
       { key: 'active', label: 'Active', type: 'checkbox', default: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
     tabs: [{ key: 'active', label: 'Active', test: (r) => r.active }, { key: 'inactive', label: 'Sold / inactive', test: (r) => !r.active }],
-    select: '*, equipment_photos(count)',
+    select: '*, equipment_photos(count), equipment_work_types(operation)',
     sorts: [['name', 'Name', (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true })],
       ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
-    afterRender: (form, row) => equipmentPhotos(form, row),
+    afterRender: (form, row) => { equipmentWorkTags(form, row); equipmentPhotos(form, row); },
+  },
+  worktypes: {
+    table: 'operation_types', pk: 'operation', title: 'Work types', singular: 'work type', order: ['sort_order', 'operation'],
+    refreshRefs: true, allowDelete: true,
+    columns: [
+      { key: 'operation', label: 'Work type (e.g. tillage, planting)', listLabel: 'Work type', type: 'text', required: true, list: true },
+      { key: 'sort_order', label: 'Order in lists', listLabel: 'Order', type: 'number', step: '1', list: true },
+      { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
+    ],
+    beforeSave(d) { d.operation = d.operation.trim().toLowerCase(); },
   },
   crops: {
     table: 'crops', pk: 'crop_id', title: 'Crops', singular: 'crop', order: 'name',
@@ -2747,6 +2763,25 @@ async function shareFields(fields) {
 // Setup: reference lists
 // =====================================================================
 let setupTab = 'riders';
+// ---- "Used for" tags: which work types a machine can do. Saved as you tap.
+async function equipmentWorkTags(form, row) {
+  const box = document.createElement('div');
+  box.className = 'eq-work';
+  form.querySelector('.actions').before(box);
+  const types = refs.workTypes.filter((w) => w.active);
+  if (!types.length) { box.innerHTML = ''; return; }
+  if (!row) { box.innerHTML = '<p class="muted small">Save first, then pick which work it\'s used for.</p>'; return; }
+  const have = new Set((await q(sb.from('equipment_work_types').select('operation').eq('equipment_id', row.equipment_id))).map((x) => x.operation));
+  box.innerHTML = `<div class="lines-head"><b>Used for</b><span class="muted small">Filters the equipment list when you log work</span></div>
+    <div class="chips">${types.map((w) => `<label class="chip-toggle"><input type="checkbox" value="${esc(w.operation)}" ${have.has(w.operation) ? 'checked' : ''}><span>${esc(workLabel(w.operation))}</span></label>`).join('')}</div>`;
+  $$('input', box).forEach((c) => (c.onchange = async () => {
+    try {
+      if (c.checked) await q(sb.from('equipment_work_types').insert({ equipment_id: row.equipment_id, operation: c.value }));
+      else await q(sb.from('equipment_work_types').delete().eq('equipment_id', row.equipment_id).eq('operation', c.value));
+    } catch { c.checked = !c.checked; }
+  }));
+}
+
 // ---- Equipment photos (private 'equipment' storage bucket)
 async function shrinkImage(file, max = 1600) {
   try {
@@ -2815,7 +2850,7 @@ async function equipmentPhotos(form, row) {
 }
 
 async function renderSetup(el) {
-  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'leases'];
+  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>
     `<button data-tab="${t}" class="${t === setupTab ? 'active' : ''}">${esc(CRUD[t].title)}</button>`).join('')}</div>
     <div id="setup-body"><p class="muted">Loading…</p></div>`;

@@ -489,3 +489,12 @@ a.button-like { text-decoration: none; }
 .eq-thumb [data-rm-photo] { position: absolute; top: 4px; right: 4px; background: rgba(255,255,255,.9); }
 .eq-add { display: flex; align-items: center; justify-content: center; aspect-ratio: 1; border: 2px dashed var(--border); border-radius: 8px; cursor: pointer; color: var(--accent); font-weight: 600; text-align: center; }
 .eq-add:hover { border-color: var(--accent); }
+
+/* Work-type tags */
+.eq-work { border-top: 1px solid var(--border); padding-top: .6rem; }
+.chip-toggle { display: inline-flex; cursor: pointer; }
+.form .chip-toggle { flex-direction: row; }
+.chip-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.chip-toggle span { padding: .4rem .8rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); font-weight: 500; }
+.chip-toggle input:checked + span { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.chip-toggle input:focus-visible + span { outline: 2px solid var(--accent); }
