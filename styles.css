@@ -536,3 +536,11 @@ a.button-like { text-decoration: none; }
 .cal-arrow { color: var(--muted); }
 .cal-log { font-size: .85rem; }
 .cal-log td, .cal-log th { padding: .3rem .45rem; white-space: nowrap; }
+.seg.seg4 { grid-template-columns: repeat(4, 1fr); }
+.seg.seg4 button { padding: .5rem .2rem; }
+.cal-speeds { width: 100%; margin-top: .5rem; font-size: .85rem; border-collapse: collapse; }
+.cal-speeds th, .cal-speeds td { padding: .25rem .3rem; text-align: center; border-top: 1px solid var(--border); }
+.cal-speeds th:first-child, .cal-speeds td:first-child { text-align: left; color: var(--muted); }
+.cal-speeds .on { font-weight: 700; color: var(--accent); }
+.cal-grid > *, .cal-inputs .row2 > *, .seg > * { min-width: 0; }
+.cal-inputs input, .cal-inputs select { width: 100%; min-width: 0; box-sizing: border-box; }

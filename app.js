@@ -3174,7 +3174,7 @@ const G_PER_LB = 453.592;
 let toolOpen = 'gp-cal';
 const TOOLS = [
   { id: 'gp-cal', title: 'Great Plains drill calibration', blurb: 'Grams from one seed tube over 0.1 acre → lb/acre', render: renderGpCal },
-  { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Coming soon', render: (box) => { box.innerHTML = '<p class="muted">Tell Claude how you calibrate the Seed Spider (what you catch, over what distance, and what you measure) and this calculator will be added here.</p>'; } },
+  { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Grams from one bin over a timed run → lb/acre at your speed', render: renderSsCal },
 ];
 
 function renderTools(el) {
@@ -3205,13 +3205,14 @@ async function renderGpCal(box) {
   let tests = [], noTable = false;
   const loadTests = async () => {
     const r = await sb.from('planter_cal_tests').select('*').order('created_at', { ascending: false }).limit(1000);
-    noTable = !!r.error; tests = r.data ?? [];
+    noTable = !!r.error; tests = (r.data ?? []).filter((t) => (t.calc_type ?? 'great_plains') === 'great_plains');
   };
   await loadTests();
   const drills = refs.equipment.filter((e) => e.active !== false && /great plains/i.test(`${e.make ?? ''} ${e.name ?? ''}`));
-  let st = { spacing: 12, target: '', tubes: [''], acre: 0.1, turns: 24.33, box: 'Large', full: { Large: '', Small: '' }, mm: { Large: '', Small: '' },
+  let st = { spacing: 12, target: '', tubes: [''], acre: 0.1, turns: 28.3, box: 'Large', full: { Large: '', Small: '' }, mm: { Large: '', Small: '' },
     drill: drills.length === 1 ? drills[0].equipment_id : '', crop: '', variety: '', lot: '' };
   try { const saved = JSON.parse(localStorage.getItem('gp-cal2') || '{}'); st = { ...st, ...saved }; } catch { /* storage unavailable */ }
+  if (Number(st.turns) === 24.33 && Number(st.acre) === 0.1) st.turns = 28.3; // corrected figure
   const units = () => (Number(st.spacing) === 6 ? 40 : 20);
   const save = () => { try { localStorage.setItem('gp-cal2', JSON.stringify(st)); } catch { /* ignore */ } };
   const sameSeed = (t, level) => t.crop_id === Number(st.crop) && (level === 'crop' || norm(t.variety) === norm(st.variety)) && (level !== 'lot' || norm(t.seed_lot) === norm(st.lot));
@@ -3391,6 +3392,190 @@ async function renderGpCal(box) {
     $$('[data-rm-tube]', box).forEach((b) => (b.onclick = () => { st.tubes.splice(Number(b.dataset.rmTube), 1); save(); draw(); }));
     $('[data-act=add-tube]', box).onclick = () => { st.tubes.push(''); save(); draw(); $$('[data-tube]', box).at(-1)?.focus(); };
     $('[data-act=clear]', box).onclick = () => { st.target = ''; st.tubes = ['']; save(); draw(); };
+  };
+  draw();
+}
+
+// Seed Spider: 4 bins, each feeding 2 rows; controller sets bin RPM. Catch seed for a timed run, standing still.
+async function renderSsCal(box) {
+  box.innerHTML = '<p class="muted">Loading…</p>';
+  let tests = [], noTable = false, noCols = false;
+  const loadTests = async () => {
+    const r = await sb.from('planter_cal_tests').select('*').eq('calc_type', 'seed_spider').order('created_at', { ascending: false }).limit(1000);
+    if (r.error) {
+      const t = await sb.from('planter_cal_tests').select('test_id').limit(1);
+      noTable = !!t.error; noCols = !t.error; tests = [];
+    } else { noTable = noCols = false; tests = r.data ?? []; }
+  };
+  await loadTests();
+  const rigs = refs.equipment.filter((e) => e.active !== false && /seed ?spider/i.test(`${e.make ?? ''} ${e.name ?? ''} ${e.model ?? ''}`));
+  let st = { rows: 8, spacing: 22, bin: 1, rowsCaught: 2, sec: 60, speed: '', rpm: '', target: '', catches: [''], sponge: '',
+    drill: rigs.length === 1 ? rigs[0].equipment_id : '', crop: '', variety: '', lot: '' };
+  try { st = { ...st, ...JSON.parse(localStorage.getItem('ss-cal') || '{}') }; } catch { /* storage unavailable */ }
+  const save = () => { try { localStorage.setItem('ss-cal', JSON.stringify(st)); } catch { /* ignore */ } };
+  const RPM_MIN = 0.3, RPM_MAX = 32;
+  const sameSeed = (t, level) => t.crop_id === Number(st.crop) && (level === 'crop' || norm(t.variety) === norm(st.variety)) && (level !== 'lot' || norm(t.seed_lot) === norm(st.lot));
+  const sameSponge = (t) => norm(t.sponge_set) === norm(st.sponge);
+  const daysAgo = (d) => (Date.now() - new Date(d + 'T12:00').getTime()) / 864e5;
+  // Acres one row covers per minute at a speed (mph × 88 = ft/min).
+  const acPerRowMin = (mph) => (mph * 88 * (Number(st.spacing) / 12)) / 43560;
+  const fmtRpm = (v) => (Math.round(v * 10) / 10).toFixed(1);
+
+  const draw = () => {
+    const varieties = [...new Set(tests.filter((t) => t.crop_id === Number(st.crop) && t.variety).map((t) => t.variety))];
+    const sponges = [...new Set(tests.map((t) => t.sponge_set).filter(Boolean))];
+    box.innerHTML = `
+      <h3>Seed Spider calibration</h3>
+      ${noTable ? '<p class="form-hint">Tests can’t be saved yet. Run <b>planter_cal_tests.sql</b> and then <b>seed_spider_cal.sql</b> in Supabase. The calculator still works.</p>'
+        : noCols ? '<p class="form-hint">Tests can’t be saved yet. Run <b>seed_spider_cal.sql</b> in Supabase. The calculator still works.</p>' : ''}
+      <div class="cal-grid">
+        <div class="cal-inputs">
+          <label>Planter<select data-f="drill"><option value="">—</option>${(rigs.length ? rigs : refs.equipment.filter((e) => doesWork(e, 'planting'))).map((e) => `<option value="${e.equipment_id}" ${Number(st.drill) === e.equipment_id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select></label>
+          <div class="row2">
+            <label>Crop<select data-f="crop"><option value="">—</option>${refs.crops.filter((c) => c.active !== false || c.crop_id === Number(st.crop)).map((c) => `<option value="${c.crop_id}" ${Number(st.crop) === c.crop_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+            <label>Variety<input data-f="variety" list="ss-varieties" value="${esc(st.variety)}"><datalist id="ss-varieties">${varieties.map((v) => `<option value="${esc(v)}">`).join('')}</datalist></label>
+          </div>
+          <div class="row2">
+            <label>Seed lot <span class="muted small">(optional)</span><input data-f="lot" value="${esc(st.lot)}"></label>
+            <label>Sponge set<input data-f="sponge" list="ss-sponges" value="${esc(st.sponge)}"><datalist id="ss-sponges">${sponges.map((v) => `<option value="${esc(v)}">`).join('')}</datalist></label>
+          </div>
+          <div class="seg seg4" role="group" aria-label="Bin">
+            ${[1, 2, 3, 4].map((b) => `<button type="button" data-bin="${b}" class="${Number(st.bin) === b ? 'on' : ''}">Bin ${b}<small>rows ${b * 2 - 1}–${b * 2}</small></button>`).join('')}
+          </div>
+          <div class="row2">
+            <label>Planting speed (mph)<input type="number" inputmode="decimal" step="any" min="0" data-k="speed" value="${esc(st.speed)}"></label>
+            <label>Target rate (lb/acre)<input type="number" inputmode="decimal" step="any" min="0" data-k="target" value="${esc(st.target)}"></label>
+          </div>
+          <div class="row2">
+            <label>Controller RPM now<input type="number" inputmode="decimal" step="any" min="0" data-k="rpm" value="${esc(st.rpm)}"></label>
+            <label>Catch time (seconds)<input type="number" inputmode="decimal" step="any" min="1" data-k="sec" value="${esc(st.sec)}"></label>
+          </div>
+          <div class="cal-turns" id="ss-run"></div>
+          <div class="lines-head"><b>Seed caught (grams)</b><span class="muted small">Both rows of the bin; add catches to average</span></div>
+          ${st.catches.map((g, i) => `<div class="tube-row"><label>Catch ${i + 1}<input type="number" inputmode="decimal" step="any" min="0" data-tube="${i}" value="${esc(g)}"></label>
+            ${st.catches.length > 1 ? `<button type="button" class="icon" data-rm-tube="${i}" aria-label="Remove catch">✕</button>` : ''}</div>`).join('')}
+          <button type="button" class="small" data-act="add-tube">+ Another catch</button>
+          <details class="cal-adv"><summary>Planter setup</summary>
+            <div class="row2"><label>Row spacing (in)<input type="number" step="any" min="0" data-k="spacing" value="${esc(st.spacing)}"></label>
+            <label>Rows caught per catch<input type="number" step="1" min="1" data-k="rowsCaught" value="${esc(st.rowsCaught)}"></label></div>
+          </details>
+          <button type="button" class="ghost small" data-act="clear">Clear grams and target</button>
+        </div>
+        <div class="cal-out" id="cal-out"></div>
+      </div>
+      <div class="cal-steps"><h4>How to run the test</h4><ol>
+        <li>Put catch bags on <b>both seed tubes of bin ${st.bin}</b> (rows ${st.bin * 2 - 1} and ${st.bin * 2}).</li>
+        <li>Set the controller to the RPM you want to check and enter it above.</li>
+        <li>Run the bin for <b>${st.sec} seconds</b> (planter standing still), timed with a phone stopwatch. Start and stop the timer when the meter starts and stops.</li>
+        <li>Weigh both bags together in <b>grams</b> and enter it.</li>
+        <li>Tap <b>Save test</b>, set the controller to the suggested RPM, and test again. Each saved test sharpens the suggestion.</li>
+        <li>Check the other bins at the final RPM. If one bin is more than a few percent off, it may need its own RPM or a sponge check.</li>
+        <li>In the field, hold the speed you entered. The RPM is fixed, so faster means less seed and slower means more.</li>
+      </ol></div>
+      <div id="cal-log"></div>`;
+    drawLog(); calc(); wire();
+  };
+
+  const drawLog = () => {
+    const el = $('#cal-log', box);
+    if (noTable || noCols) { el.innerHTML = ''; return; }
+    const rows = (st.crop ? tests.filter((t) => sameSeed(t, 'variety')) : tests).slice(0, 15);
+    el.innerHTML = `<div class="cal-steps"><h4>${st.crop ? `Saved tests: ${esc(cropName(Number(st.crop)))}${st.variety ? ' ' + esc(st.variety) : ''}` : 'Recent saved tests'}</h4>
+      ${rows.length ? `<div class="table-wrap"><table class="cal-log"><thead><tr><th>Date</th><th>Bin</th><th>Sponge</th><th>RPM</th><th>Caught</th><th>Rate</th><th>Target</th><th></th></tr></thead><tbody>
+      ${rows.map((t) => `<tr><td>${esc(t.tested_on)}</td><td>${t.bin ?? ''}</td><td>${esc(t.sponge_set ?? '')}</td><td>${t.rpm ?? ''}</td>
+        <td>${t.grams_avg ?? ''} g / ${t.catch_sec ?? ''} s</td><td><b>${t.actual_lb_ac ?? ''}</b> <span class="muted">@ ${t.speed_mph ?? ''} mph</span></td><td>${t.target_lb_ac ?? ''}</td>
+        <td><button type="button" class="icon" data-del-test="${t.test_id}" aria-label="Delete test">✕</button></td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted small">None yet.</p>'}</div>`;
+    $$('[data-del-test]', el).forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this test?')) return;
+      await q(sb.from('planter_cal_tests').delete().eq('test_id', Number(b.dataset.delTest)));
+      await loadTests(); drawLog(); calc();
+    }));
+  };
+
+  let pending = null;
+  const calc = () => {
+    const tgt = Number(st.target), mph = Number(st.speed), rpm = Number(st.rpm), sec = Number(st.sec), n = Number(st.rowsCaught) || 2;
+    const acr = mph > 0 ? acPerRowMin(mph) : 0;
+    const grams = st.catches.map(Number).filter((g) => g > 0);
+    const avg = grams.length ? grams.reduce((a, b) => a + b, 0) / grams.length : null;
+    const perRowMin = avg != null && sec > 0 ? avg / n / (sec / 60) : null;               // g per row per minute
+    const targetPerRowMin = tgt > 0 && acr ? tgt * acr * G_PER_LB : null;
+    const expected = targetPerRowMin != null && sec > 0 ? targetPerRowMin * n * (sec / 60) : null;
+    const actual = perRowMin != null && acr ? perRowMin / acr / G_PER_LB : null;
+    const diff = actual != null && tgt > 0 ? ((actual - tgt) / tgt) * 100 : null;
+    const tone = diff == null ? '' : Math.abs(diff) <= 3 ? 'ok' : Math.abs(diff) <= 10 ? 'warn' : 'bad';
+    $('#ss-run', box).innerHTML = `Run bin ${st.bin} for <b>${sec || '—'} seconds</b> at <b>${rpm > 0 ? rpm : '—'} RPM</b>${rpm && (rpm < RPM_MIN || rpm > RPM_MAX) ? ` <b>(outside ${RPM_MIN}–${RPM_MAX})</b>` : ''}`;
+
+    // Fit grams per row-minute against RPM. Speed doesn't matter here, so tests at any speed count.
+    const recent = st.crop ? tests.filter((t) => sameSeed(t, 'variety') && sameSponge(t) && Number(t.bin) === Number(st.bin) && (!st.drill || t.equipment_id === Number(st.drill))
+      && daysAgo(t.tested_on) <= 14 && t.rpm > 0 && t.grams_avg > 0 && t.catch_sec > 0) : [];
+    const pts = recent.map((t) => ({ x: Number(t.rpm), y: Number(t.grams_avg) / (Number(t.rows_caught) || 2) / (Number(t.catch_sec) / 60) }));
+    if (rpm > 0 && perRowMin) pts.push({ x: rpm, y: perRowMin });
+    let fit = calFit(pts), how = '';
+    if (fit) {
+      how = fit.line ? `Line through ${fit.n} tests of this seed on bin ${st.bin}${st.sponge ? ` with ${esc(st.sponge)} sponges` : ''} (last 14 days).`
+        : fit.n === 1 ? 'Assumes seed is proportional to RPM. Save this test and the next one will use both.' : 'Proportional to RPM, from tests at this RPM.';
+    } else if (st.crop) {
+      for (const [level, label] of [['lot', 'this seed lot'], ['variety', 'this variety'], ['crop', 'this crop (other varieties — rough only)']]) {
+        if (level === 'lot' && !st.lot) continue;
+        if (level !== 'crop' && !st.variety) continue;
+        const h = tests.filter((t) => sameSeed(t, level) && t.rpm > 0 && t.grams_avg > 0 && t.catch_sec > 0);
+        if (!h.length) continue;
+        const ks = h.map((t) => Number(t.grams_avg) / (Number(t.rows_caught) || 2) / (Number(t.catch_sec) / 60) / Number(t.rpm)).sort((a, b) => a - b);
+        fit = { a: 0, b: ks[Math.floor(ks.length / 2)], start: true };
+        const sp = [...new Set(h.map((t) => t.sponge_set).filter(Boolean))];
+        how = `Starting point from ${h.length} past test${h.length > 1 ? 's' : ''} of ${label}${sp.length ? ` (sponges: ${sp.map(esc).join(', ')})` : ''}, last on ${h[0].tested_on}. Run a test to confirm.`;
+        break;
+      }
+    }
+    const rpmFor = (m) => (fit && tgt > 0 && m > 0 ? (tgt * acPerRowMin(m) * G_PER_LB - fit.a) / fit.b : null);
+    const sugg = rpmFor(mph);
+    const close = diff != null && Math.abs(diff) <= 3;
+    const okRange = (r) => r != null && r >= RPM_MIN && r <= RPM_MAX;
+    pending = actual != null && rpm > 0 ? { avg, actual, grams, tgt, nextRpm: !close && okRange(sugg) ? Math.round(sugg * 10) / 10 : null } : null;
+    const speeds = mph > 0 && fit && tgt > 0 ? [-1, -0.5, 0, 0.5, 1].map((d) => mph + d).filter((m) => m > 0) : [];
+
+    const suggCard = sugg == null ? (tgt > 0 && !(mph > 0) ? '<p class="muted small">Enter the planting speed. Without a drive wheel, the rate depends on it.</p>'
+        : tgt > 0 && !st.crop ? '<p class="muted small">Pick the crop (and variety) to get a suggested RPM and use past tests.</p>' : '')
+      : `<div class="cal-stat ${close ? 'ok' : ''}"><span class="stat-label">${fit.start ? 'Suggested starting RPM' : 'Suggested RPM'} · bin ${st.bin} at ${mph} mph</span>
+          <span class="cal-settings">${rpm > 0 && !fit.start && !close ? `<span>Now <b>${fmtRpm(rpm)}</b></span><span class="cal-arrow">→</span>` : ''}
+          <span><b class="stat-value">${close ? fmtRpm(rpm) : fmtRpm(sugg)}</b> RPM</span></span>
+          <span class="muted small">${close ? 'Within 3% of target. Leave it here and check the other bins.' : how}${!okRange(sugg) ? ` <b>That's outside the controller's ${RPM_MIN}–${RPM_MAX} RPM range. Change the sponge set or the speed.</b>` : ''}</span>
+          ${speeds.length ? `<table class="cal-speeds"><thead><tr><th>Speed</th>${speeds.map((m) => `<th class="${m === mph ? 'on' : ''}">${m} mph</th>`).join('')}</tr></thead>
+            <tbody><tr><td>RPM</td>${speeds.map((m) => { const r = m === mph && close ? rpm : rpmFor(m); return `<td class="${m === mph ? 'on' : ''}">${r != null && r > 0 ? fmtRpm(r) : '—'}</td>`; }).join('')}</tr></tbody></table>` : ''}</div>`;
+
+    $('#cal-out', box).innerHTML = `
+      <div class="cal-stat"><span class="stat-label">Target catch</span><span class="stat-value">${expected != null ? expected.toFixed(1) : '—'}<small> g</small></span>
+        <span class="muted small">${n} rows for ${sec || '—'} s at ${tgt > 0 ? tgt : '—'} lb/ac and ${mph > 0 ? mph : '—'} mph</span></div>
+      <div class="cal-stat ${tone}"><span class="stat-label">Actual rate at ${mph > 0 ? mph : '—'} mph${grams.length > 1 ? ` (avg of ${grams.length} catches)` : ''}</span><span class="stat-value">${actual != null ? actual.toFixed(1) : '—'}<small> lb/ac</small></span>
+        ${diff != null ? `<span class="cal-diff">${diff >= 0 ? '+' : ''}${diff.toFixed(1)}% ${diff >= 0 ? 'over' : 'under'} target${close ? ' · close enough' : ''}</span>` : `<span class="muted small">${mph > 0 ? 'Enter grams caught' : 'Enter speed and grams caught'}</span>`}</div>
+      ${suggCard}
+      ${pending && !noTable && !noCols ? `<button type="button" class="primary" data-act="save-test" ${st.crop ? '' : 'disabled'}>Save test${pending.nextRpm != null ? ` and set to ${fmtRpm(pending.nextRpm)} RPM` : ''}</button>${st.crop ? '' : '<span class="muted small">Pick a crop to save.</span>'}` : ''}`;
+    const sv = $('[data-act=save-test]', box);
+    if (sv) sv.onclick = async () => {
+      const p = pending; sv.disabled = true;
+      const row = { calc_type: 'seed_spider', equipment_id: st.drill ? Number(st.drill) : null, bin: Number(st.bin), sponge_set: st.sponge.trim() || null,
+        spacing_in: Number(st.spacing), units: Number(st.rows), rows_caught: n, crop_id: Number(st.crop), variety: st.variety.trim() || null, seed_lot: st.lot.trim() || null,
+        target_lb_ac: p.tgt || null, rpm, catch_sec: sec, speed_mph: mph, grams: p.grams, grams_avg: Math.round(p.avg * 100) / 100,
+        actual_lb_ac: Math.round(p.actual * 100) / 100, tested_on: localDate() };
+      try { await q(sb.from('planter_cal_tests').insert(row)); } catch { sv.disabled = false; return; }
+      toast('Test saved');
+      if (p.nextRpm != null) st.rpm = String(p.nextRpm);
+      st.catches = ['']; save();
+      await loadTests(); draw();
+    };
+  };
+
+  const wire = () => {
+    $$('[data-f]', box).forEach((i) => (i.onchange = i.oninput = () => { st[i.dataset.f] = i.value; save(); if (i.tagName === 'SELECT') draw(); else { drawLog(); calc(); } }));
+    $$('[data-k]', box).forEach((i) => (i.oninput = () => { st[i.dataset.k] = i.value; save(); calc(); }));
+    $$('[data-k=sec], [data-k=spacing], [data-k=rowsCaught]', box).forEach((i) => (i.onchange = () => draw()));
+    $$('[data-tube]', box).forEach((i) => (i.oninput = () => { st.catches[Number(i.dataset.tube)] = i.value; save(); calc(); }));
+    $$('[data-bin]', box).forEach((b) => (b.onclick = () => { st.bin = Number(b.dataset.bin); save(); draw(); }));
+    $$('[data-rm-tube]', box).forEach((b) => (b.onclick = () => { st.catches.splice(Number(b.dataset.rmTube), 1); save(); draw(); }));
+    $('[data-act=add-tube]', box).onclick = () => { st.catches.push(''); save(); draw(); $$('[data-tube]', box).at(-1)?.focus(); };
+    $('[data-act=clear]', box).onclick = () => { st.target = ''; st.catches = ['']; save(); draw(); };
   };
   draw();
 }
