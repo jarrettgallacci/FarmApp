@@ -509,3 +509,26 @@ a.button-like { text-decoration: none; }
 .settings-grid { display: grid; gap: .6rem; grid-template-columns: repeat(2, 1fr); }
 @media (min-width: 640px) { .settings-grid { grid-template-columns: repeat(3, 1fr); } }
 #cy-hint:empty { display: none; }
+
+/* Tools */
+.tool-card h3 { margin-top: 0; }
+.cal-grid { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+@media (min-width: 760px) { .cal-grid { grid-template-columns: 1fr 1fr; align-items: start; } }
+.cal-inputs { display: flex; flex-direction: column; gap: .7rem; }
+.cal-inputs label { display: flex; flex-direction: column; gap: .25rem; }
+.seg { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+.seg button { display: flex; flex-direction: column; align-items: center; padding: .6rem; font-weight: 600; }
+.seg button small { font-weight: 400; color: var(--muted); }
+.seg button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.tube-row { display: flex; align-items: flex-end; gap: .4rem; }
+.tube-row label { flex: 1; }
+.cal-out { display: flex; flex-direction: column; gap: .7rem; }
+.cal-stat { display: flex; flex-direction: column; gap: .2rem; border: 1px solid var(--border); border-radius: var(--radius); padding: .8rem 1rem; background: var(--surface); }
+.cal-stat.ok { border-color: var(--green); background: var(--green-soft); }
+.cal-stat.warn { border-color: var(--amber); background: var(--amber-soft); }
+.cal-stat.bad { border-color: var(--danger); }
+.cal-diff { font-weight: 600; }
+.cal-adv summary { cursor: pointer; color: var(--muted); }
+.cal-steps { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: .6rem; }
+.cal-steps ol { margin: .3rem 0 0; padding-left: 1.2rem; display: flex; flex-direction: column; gap: .35rem; }
+.cal-turns { background: var(--accent-soft); border-radius: var(--radius); padding: .55rem .8rem; }

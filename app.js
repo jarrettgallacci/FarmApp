@@ -3168,6 +3168,89 @@ async function renderSetup(el) {
 }
 
 // =====================================================================
+// Tools: specialized calculators.
+// =====================================================================
+const G_PER_LB = 453.592;
+let toolOpen = 'gp-cal';
+const TOOLS = [
+  { id: 'gp-cal', title: 'Great Plains drill calibration', blurb: 'Grams from one seed tube over 0.1 acre → lb/acre', render: renderGpCal },
+  { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Coming soon', render: (box) => { box.innerHTML = '<p class="muted">Tell Claude how you calibrate the Seed Spider (what you catch, over what distance, and what you measure) and this calculator will be added here.</p>'; } },
+];
+
+function renderTools(el) {
+  el.innerHTML = `<div class="section-head"><h2>Tools</h2></div>
+    <div class="subtabs">${TOOLS.map((t) => `<button data-tool="${t.id}" class="${t.id === toolOpen ? 'active' : ''}">${esc(t.title)}</button>`).join('')}</div>
+    <div class="card tool-card" id="tool-box"></div>`;
+  $$('[data-tool]', el).forEach((b) => (b.onclick = () => { toolOpen = b.dataset.tool; renderTools(el); }));
+  (TOOLS.find((t) => t.id === toolOpen) ?? TOOLS[0]).render($('#tool-box', el));
+}
+
+function renderGpCal(box) {
+  let st = { spacing: 12, target: '', tubes: [''], acre: 0.1, turns: 24.33 };
+  try { st = { ...st, ...JSON.parse(localStorage.getItem('gp-cal') || '{}') }; } catch { /* storage unavailable */ }
+  const units = () => (Number(st.spacing) === 6 ? 40 : 20);
+  const save = () => { try { localStorage.setItem('gp-cal', JSON.stringify(st)); } catch { /* ignore */ } };
+  const draw = () => {
+    const turnsWhole = Math.floor(st.turns);
+    const frac = st.turns - turnsWhole;
+    box.innerHTML = `
+      <h3>Great Plains drill calibration</h3>
+      <div class="cal-grid">
+        <div class="cal-inputs">
+          <div class="seg" role="group" aria-label="Row spacing">
+            <button type="button" data-sp="12" class="${Number(st.spacing) === 12 ? 'on' : ''}">12" spacing<small>20 units</small></button>
+            <button type="button" data-sp="6" class="${Number(st.spacing) === 6 ? 'on' : ''}">6" spacing<small>40 units</small></button>
+          </div>
+          <div class="cal-turns">Turn the drive tire <b>${st.turns} revolutions</b> <span class="muted small">(${st.acre} acre)</span></div>
+          <label>Target rate (lb/acre)<input type="number" inputmode="decimal" step="any" min="0" data-k="target" value="${esc(st.target)}"></label>
+          <div class="lines-head"><b>Seed caught (grams)</b><span class="muted small">One tube; add more to average them</span></div>
+          ${st.tubes.map((g, i) => `<div class="tube-row"><label>Tube ${i + 1}<input type="number" inputmode="decimal" step="any" min="0" data-tube="${i}" value="${esc(g)}"></label>
+            ${st.tubes.length > 1 ? `<button type="button" class="icon" data-rm-tube="${i}" aria-label="Remove tube">✕</button>` : ''}</div>`).join('')}
+          <button type="button" class="small" data-act="add-tube">+ Another tube</button>
+          <details class="cal-adv"><summary>Test distance</summary>
+            <div class="row2"><label>Area per test (acres)<input type="number" step="any" min="0" data-k="acre" value="${esc(st.acre)}"></label>
+            <label>Drive tire turns for that area<input type="number" step="any" min="0" data-k="turns" value="${esc(st.turns)}"></label></div>
+          </details>
+          <button type="button" class="ghost small" data-act="clear">Clear</button>
+        </div>
+        <div class="cal-out" id="cal-out"></div>
+      </div>
+      <div class="cal-steps"><h4>How to run the test</h4><ol>
+        <li>Set the drill to <b>${Number(st.spacing)}" spacing</b> (${units()} units running) and the meter to the setting you want to check.</li>
+        <li>Put a catch bag or cup on <b>one seed tube</b>.</li>
+        <li>Mark the drive tire, then turn it <b>${st.turns} revolutions</b>: ${turnsWhole} full turns${frac > 0.01 ? ` plus <b>${Math.round(frac * 100) / 100} of a turn</b> (about ${Math.round(frac * 360)}° — roughly ${Math.abs(frac - 1/3) < 0.03 ? 'a third' : Math.abs(frac - 0.5) < 0.03 ? 'half' : Math.abs(frac - 0.25) < 0.03 ? 'a quarter' : Math.abs(frac - 0.75) < 0.03 ? 'three quarters' : Math.round(frac * 8) + '/8'} of a turn)` : ''}. That's ${st.acre} acre of travel.</li>
+        <li>Weigh the seed in <b>grams</b> and enter it. Catch more tubes and enter each for a better average.</li>
+        <li>Adjust the meter and repeat until the actual rate is close to target.</li>
+      </ol></div>`;
+    const calc = () => {
+      const tgt = Number(st.target);
+      const grams = st.tubes.map(Number).filter((g) => g > 0);
+      const avg = grams.length ? grams.reduce((a, b) => a + b, 0) / grams.length : null;
+      const expected = tgt > 0 ? (tgt * st.acre * G_PER_LB) / units() : null;
+      const actual = avg != null && st.acre > 0 ? (avg * units()) / G_PER_LB / st.acre : null;
+      const diff = actual != null && tgt > 0 ? ((actual - tgt) / tgt) * 100 : null;
+      const tone = diff == null ? '' : Math.abs(diff) <= 3 ? 'ok' : Math.abs(diff) <= 10 ? 'warn' : 'bad';
+      $('#cal-out', box).innerHTML = `
+        <div class="cal-stat"><span class="stat-label">Target per tube</span><span class="stat-value">${expected != null ? expected.toFixed(1) : '—'}<small> g</small></span>
+          <span class="muted small">What one tube should catch at ${tgt > 0 ? tgt : '—'} lb/ac</span></div>
+        <div class="cal-stat ${tone}"><span class="stat-label">Actual rate${grams.length > 1 ? ` (avg of ${grams.length} tubes)` : ''}</span><span class="stat-value">${actual != null ? actual.toFixed(1) : '—'}<small> lb/ac</small></span>
+          ${diff != null ? `<span class="cal-diff">${diff >= 0 ? '+' : ''}${diff.toFixed(1)}% ${diff >= 0 ? 'over' : 'under'} target${Math.abs(diff) <= 3 ? ' · close enough' : ''}</span>` : '<span class="muted small">Enter grams caught</span>'}</div>
+        ${diff != null && Math.abs(diff) > 0.5 ? `<p class="muted small">If the meter scale is roughly proportional, try moving the setting about <b>${Math.abs((tgt / actual - 1) * 100).toFixed(0)}% ${actual > tgt ? 'lower' : 'higher'}</b>, then test again.</p>` : ''}`;
+    };
+    const inputs = () => {
+      $$('[data-k]', box).forEach((i) => (i.oninput = () => { st[i.dataset.k] = i.dataset.k === 'target' ? i.value : Number(i.value) || 0; save(); if (i.dataset.k === 'target') calc(); else draw(); }));
+      $$('[data-tube]', box).forEach((i) => (i.oninput = () => { st.tubes[Number(i.dataset.tube)] = i.value; save(); calc(); }));
+    };
+    $$('[data-sp]', box).forEach((b) => (b.onclick = () => { st.spacing = Number(b.dataset.sp); save(); draw(); }));
+    $$('[data-rm-tube]', box).forEach((b) => (b.onclick = () => { st.tubes.splice(Number(b.dataset.rmTube), 1); save(); draw(); }));
+    $('[data-act=add-tube]', box).onclick = () => { st.tubes.push(''); save(); draw(); $$('[data-tube]', box).at(-1)?.focus(); };
+    $('[data-act=clear]', box).onclick = () => { st.target = ''; st.tubes = ['']; save(); draw(); };
+    inputs(); calc();
+  };
+  draw();
+}
+
+// =====================================================================
 // Navigation and sign-in
 // =====================================================================
 const VIEWS = {
@@ -3179,6 +3262,7 @@ const VIEWS = {
   chem: renderChem,
   work: renderWork,
   setup: renderSetup,
+  tools: renderTools,
 };
 let currentView = 'home';
 
