@@ -1999,7 +1999,7 @@ async function renderWork(el) {
         const crop = r.crop_years ? `${cropName(r.crop_years.crop_id)}${r.crop_years.variety ? ' · ' + r.crop_years.variety : ''}` : '';
         return `<tr><td class="nowrap">${esc(dateRange(r.performed_on, r.end_date))}</td>
           <td><b>${esc(fieldName(r.field_id))}</b></td>
-          <td>${esc(workLabel(r.operation))}${d?.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}${crop ? `<div class="muted small">${esc(crop)}</div>` : ''}</td>
+          <td>${esc(workLabel(r.operation))}${d?.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}${crop ? `<div class="muted small">${esc(crop)}</div>` : ''}${patText(r, d) ? `<div class="muted small">${esc(patText(r, d))}</div>` : ''}</td>
           <td>${esc([equipName(r.tractor_id), equipName(r.equipment_id)].filter(Boolean).join(' + '))}</td>
           <td class="r">${r.acres != null ? num(r.acres, 1) : ''}</td>
           <td>${esc(operatorName(r.performed_by))}</td>
@@ -2015,6 +2015,11 @@ async function renderWork(el) {
   });
 }
 
+const patText = (r, d) => {
+  const p = r.pattern ?? d?.pattern, h = r.heading_deg ?? d?.heading_deg;
+  return p === 'circle' ? 'circle' : h != null ? `heading ${Number(h)}°` : p === 'straight' ? 'straight lines' : '';
+};
+
 // opts: { eventId } to edit, or { operation, fieldId, cropYearId } for a new record
 async function openWorkForm(opts, onDone) {
   let ev = null;
@@ -2023,6 +2028,8 @@ async function openWorkForm(opts, onDone) {
   const v = ev ?? { operation: opts.operation ?? 'planting', performed_on: localDate(), field_id: opts.fieldId ?? null, crop_year_id: opts.cropYearId ?? null };
   const bands = ev ? await q(sb.from('chemical_events').select('*, chemical_event_products(*)').eq('work_event_id', ev.event_id)) : [];
   const types = refs.workTypes.filter((w) => w.active || w.operation === v.operation);
+  const pat = v.pattern ?? d.pattern ?? '';           // older planting records kept these on planting_details
+  const head = v.heading_deg ?? d.heading_deg;
   const fields = fieldsInOrder().filter((f) => f.active || f.field_id === v.field_id);
   const dlg = $('#dialog');
   dlg.classList.add('wide');
@@ -2047,6 +2054,12 @@ async function openWorkForm(opts, onDone) {
       <label>Operator<select name="performed_by"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === v.performed_by).map((o) => `<option value="${o.operator_id}" ${o.operator_id === v.performed_by ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
       <label>Acres<input type="number" step="any" min="0" name="acres" value="${esc(v.acres ?? '')}"></label>
     </div>
+    <div class="row2 pattern-row">
+      <label>Pattern<select name="pattern"><option value="">—</option>
+        <option value="straight" ${pat === 'straight' ? 'selected' : ''}>Straight lines</option>
+        <option value="circle" ${pat === 'circle' ? 'selected' : ''}>Circle</option></select></label>
+      <label data-heading>GPS heading (°)<input type="number" step="any" min="0" max="360" name="heading_deg" value="${esc(head ?? '')}" placeholder="0–359"></label>
+    </div>
     <fieldset data-plant class="plant-box"><legend>Planting</legend>
       <label class="check"><input type="checkbox" name="staggered" ${d.planting_label ? 'checked' : ''}> Staggered planting (male/female planted separately)</label>
       <label data-stagger>Which planting<select name="planting_label">${PLANT_LABELS.map((x) => `<option ${d.planting_label === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
@@ -2063,12 +2076,6 @@ async function openWorkForm(opts, onDone) {
       <p class="actual-rate" id="actual-rate"></p>
       <div class="lines-head"><b id="settings-title">Planter settings</b><span class="muted small" id="settings-hint"></span></div>
       <div class="settings-grid" id="settings-box"></div>
-      <div class="row2 pattern-row">
-        <label>Pattern<select name="pattern"><option value="">—</option>
-          <option value="straight" ${d.pattern === 'straight' ? 'selected' : ''}>Straight lines</option>
-          <option value="circle" ${d.pattern === 'circle' ? 'selected' : ''}>Circle</option></select></label>
-        <label data-heading>GPS heading (°)<input type="number" step="any" min="0" max="360" name="heading_deg" value="${esc(d.heading_deg ?? '')}" placeholder="0–359"></label>
-      </div>
       <div class="band-box">${ev ? `<div class="lines-head"><b>Planter band</b><button type="button" class="small" data-act="band">+ Add planter band</button></div>
         ${bands.length ? `<ul class="list">${bands.map((b) => `<li><span class="li-name">${b.chemical_event_products.map((l) => `${esc(chemById(l.chemical_id)?.name ?? '?')} <span class="muted">${esc(rateText(l))}</span>`).join(', ') || 'No products'}</span><span class="li-value"><button type="button" class="small" data-band="${b.event_id}">Edit</button></span></li>`).join('')}</ul>` : '<p class="muted small">None. Use this for anything applied in the furrow or band at planting; it becomes a chemical record linked here.</p>'}`
         : '<p class="muted small">Save first to add a planter band (in-furrow or banded product).</p>'}</div>
@@ -2184,6 +2191,7 @@ async function openWorkForm(opts, onDone) {
       operation: op(), field_id: Number(val('field_id')), performed_on: val('performed_on'), end_date: val('end_date') || null,
       tractor_id: numOrNull('tractor_id'), equipment_id: numOrNull('equipment_id'), performed_by: numOrNull('performed_by'),
       acres: numOrNull('acres'), notes: val('notes') || null, crop_year_id: planting ? numOrNull('crop_year_id') : null,
+      pattern: val('pattern') || null, heading_deg: val('pattern') === 'straight' ? numOrNull('heading_deg') : null,
     };
     const det = {
       planting_label: el.staggered.checked ? val('planting_label') : null, row_spacing_in: numOrNull('row_spacing_in'),
@@ -2195,8 +2203,16 @@ async function openWorkForm(opts, onDone) {
     const btn = $('button[type=submit]', form); btn.disabled = true;
     try {
       let id = ev?.event_id;
-      if (ev) await q(sb.from('work_events').update(row).eq('event_id', id));
-      else id = (await q(sb.from('work_events').insert(row).select('event_id').single())).event_id;
+      // Until work_pattern.sql is run, save without pattern/heading rather than failing.
+      const write = (r) => (ev ? sb.from('work_events').update(r).eq('event_id', id) : sb.from('work_events').insert(r).select('event_id').single());
+      let res = await write(row);
+      if (res.error && /pattern|heading_deg/.test(res.error.message ?? '')) {
+        const { pattern, heading_deg, ...rest } = row;
+        res = await write(rest);
+        if (!res.error && !planting && pattern) toast('Saved, but the heading needs work_pattern.sql run in Supabase', true);
+      }
+      if (res.error) { toast(res.error.message, true); throw res.error; }
+      if (!ev) id = res.data.event_id;
       if (planting) {
         await q(sb.from('planting_details').upsert({ event_id: id, ...det }));
         await syncPlantingDate(row.crop_year_id);
@@ -2239,7 +2255,7 @@ async function plantingSection(box, cropYear, reopenCrop) {
       const d = (Array.isArray(r.planting_details) ? r.planting_details[0] : r.planting_details) ?? {};
       const act = actualRate(d, r.acres);
       return `<li><span class="li-name"><b>${esc(dateRange(r.performed_on, r.end_date))}</b>${d.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}
-        <span class="muted small">${esc([equipName(r.equipment_id), d.seed_lot && 'lot ' + d.seed_lot, act != null && rateFmt(act, (d.seed_used_unit ?? 'lb') + '/ac'), d.pattern === 'circle' ? 'circle' : d.heading_deg != null ? `heading ${Number(d.heading_deg)}°` : ''].filter(Boolean).join(' · '))}</span></span>
+        <span class="muted small">${esc([equipName(r.equipment_id), d.seed_lot && 'lot ' + d.seed_lot, act != null && rateFmt(act, (d.seed_used_unit ?? 'lb') + '/ac'), patText(r, d)].filter(Boolean).join(' · '))}</span></span>
         <span class="li-value"><button type="button" class="small" data-plant="${r.event_id}">Open</button></span></li>`;
     }).join('')}</ul>` : '<p class="muted small">No planting records yet.</p>'}</div>`;
   $('[data-act=add-plant]', box).onclick = () => openWorkForm({ operation: 'planting', fieldId: cropYear.field_id, cropYearId: cropYear.crop_year_id }, reopenCrop);
