@@ -498,3 +498,10 @@ a.button-like { text-decoration: none; }
 .chip-toggle span { padding: .4rem .8rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); font-weight: 500; }
 .chip-toggle input:checked + span { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .chip-toggle input:focus-visible + span { outline: 2px solid var(--accent); }
+
+/* Work / planting */
+.plant-box { border: 1px solid var(--border); border-radius: 10px; padding: .6rem .8rem .8rem; display: flex; flex-direction: column; gap: .6rem; }
+.plant-box legend { font-weight: 600; padding: 0 .3rem; }
+.actual-rate { margin: 0; padding: .45rem .7rem; background: var(--bg); border-radius: 8px; }
+.band-box { border-top: 1px solid var(--border); padding-top: .5rem; }
+.plant-list { border: 1px solid var(--border); border-radius: 10px; padding: .5rem .8rem; }
