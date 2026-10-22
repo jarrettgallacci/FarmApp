@@ -3175,6 +3175,7 @@ let toolOpen = 'gp-cal';
 const TOOLS = [
   { id: 'gp-cal', title: 'Great Plains drill calibration', blurb: 'Grams from one seed tube over 0.1 acre → lb/acre', render: renderGpCal },
   { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Grams from one bin over a timed run → lb/acre at your speed', render: renderSsCal },
+  { id: 'mono', title: 'Monosem sprockets', blurb: 'Seed plate + spacing → transmission sprockets', render: renderMonoCal },
 ];
 
 function renderTools(el) {
@@ -3632,6 +3633,127 @@ async function renderSsCal(box) {
     $$('[data-row]', box).forEach((i) => (i.oninput = () => { st.rowG[Number(i.dataset.row)] = i.value; save(); calc(); }));
     $('[data-act=clear]', box).onclick = () => { st.target = ''; st.rowG = Array(8).fill(''); save(); draw(); };
     wireTimer();
+  };
+  draw();
+}
+
+// Monosem transmission (sowing distances table, manual p.35). Every value in the table fits
+// spacing = 109.25 × B ÷ A ÷ holes, so plates not in the table use the same formula.
+const MONO_A = [26, 24, 23, 26, 24, 23, 24, 23, 19, 19, 17, 18, 19, 17, 18, 17, 14, 14, 14];
+const MONO_B = [17, 17, 19, 23, 23, 24, 26, 26, 23, 24, 23, 26, 28, 26, 28, 28, 24, 26, 28];
+const MONO_K = 109.25;
+const MONO_TABLE = {
+  9: [7.9, 8.6, 10.0, 10.7, 11.6, 12.7, 13.1, 13.7, 14.7, 15.3, 16.4, 17.5, 17.9, 18.6, 18.9, 20.0, 20.8, 22.5, 24.3],
+  12: [6.0, 6.4, 7.5, 8.1, 8.7, 9.5, 9.9, 10.3, 11.0, 11.5, 12.3, 13.1, 13.4, 13.9, 14.2, 15.0, 15.6, 16.9, 18.2],
+  18: [4.0, 4.3, 5.0, 5.4, 5.8, 6.3, 6.6, 6.9, 7.3, 7.7, 8.2, 8.8, 8.9, 9.3, 9.4, 10.0, 10.4, 11.3, 12.1],
+  24: [3.0, 3.2, 3.8, 4.0, 4.4, 4.7, 4.9, 5.1, 5.5, 5.7, 6.2, 6.6, 6.7, 7.0, 7.1, 7.5, 7.8, 8.5, 9.1],
+  30: [2.4, 2.6, 3.0, 3.2, 3.5, 3.8, 3.9, 4.1, 4.4, 4.6, 4.9, 5.3, 5.4, 5.6, 5.7, 6.0, 6.2, 6.8, 7.3],
+  36: [2.0, 2.1, 2.5, 2.7, 2.9, 3.2, 3.3, 3.4, 3.7, 3.8, 4.1, 4.4, 4.5, 4.6, 4.7, 5.0, 5.2, 5.6, 6.1],
+  40: [1.8, 1.9, 2.3, 2.4, 2.6, 2.8, 3.0, 3.1, 3.3, 3.4, 3.7, 3.9, 4.0, 4.2, 4.2, 4.5, 4.7, 5.1, 5.5],
+  48: [1.5, 1.6, 1.9, 2.0, 2.2, 2.4, 2.5, 2.6, 2.8, 2.9, 3.1, 3.3, 3.4, 3.5, 3.5, 3.7, 3.9, 4.2, 4.6],
+  60: [1.2, 1.3, 1.5, 1.6, 1.7, 1.9, 2.0, 2.1, 2.2, 2.3, 2.5, 2.6, 2.7, 2.8, 2.8, 3.0, 3.1, 3.4, 3.6],
+  72: [1.0, 1.1, 1.3, 1.3, 1.5, 1.6, 1.6, 1.7, 1.8, 1.9, 2.1, 2.2, 2.2, 2.3, 2.4, 2.5, 2.6, 2.8, 3.0],
+  90: [0.79, 0.86, 1.00, 1.07, 1.16, 1.27, 1.31, 1.37, 1.47, 1.53, 1.64, 1.75, 1.79, 1.86, 1.89, 2.00, 2.08, 2.25, 2.43],
+  120: [0.60, 0.64, 0.75, 0.81, 0.87, 0.95, 0.99, 1.03, 1.10, 1.15, 1.23, 1.31, 1.34, 1.39, 1.42, 1.50, 1.56, 1.69, 1.82],
+};
+const SQIN_PER_AC = 43560 * 144;
+
+function renderMonoCal(box) {
+  let st = { holes: '24', other: '', mode: 'spacing', spacing: '', pop: '', row: 22, measured: '', measuredCombo: '' };
+  try { st = { ...st, ...JSON.parse(localStorage.getItem('mono-cal') || '{}') }; } catch { /* storage unavailable */ }
+  const save = () => { try { localStorage.setItem('mono-cal', JSON.stringify(st)); } catch { /* ignore */ } };
+  const holesOf = () => (st.holes === 'other' ? Number(st.other) : Number(st.holes));
+  const exact = (i, h) => (MONO_K * MONO_B[i]) / MONO_A[i] / h;
+  const combos = (h) => MONO_A.map((a, i) => ({ i, a, b: MONO_B[i], sp: MONO_TABLE[h]?.[i] ?? exact(i, h) }));
+  const popOf = (sp) => (sp > 0 && st.row > 0 ? SQIN_PER_AC / (Number(st.row) * sp) : null);
+  const fmtPop = (p) => (p == null ? '—' : Math.round(p / 10) * 10).toLocaleString();
+  const fmtSp = (v) => (v < 1 ? v.toFixed(2) : v.toFixed(1));
+
+  const draw = () => {
+    box.innerHTML = `
+      <h3>Monosem sprocket selection</h3>
+      <div class="cal-grid">
+        <div class="cal-inputs">
+          <label>Seed plate (holes)<select data-f="holes">
+            ${Object.keys(MONO_TABLE).map((h) => `<option value="${h}" ${st.holes === h ? 'selected' : ''}>${h} holes</option>`).join('')}
+            <option value="other" ${st.holes === 'other' ? 'selected' : ''}>Other…</option></select></label>
+          ${st.holes === 'other' ? '<label>Holes in the plate<input type="number" inputmode="numeric" min="1" data-k="other" value="' + esc(st.other) + '"></label>' : ''}
+          <div class="seg" role="group" aria-label="Enter by">
+            <button type="button" data-mode="spacing" class="${st.mode === 'spacing' ? 'on' : ''}">Seed spacing<small>inches</small></button>
+            <button type="button" data-mode="pop" class="${st.mode === 'pop' ? 'on' : ''}">Seeds per acre<small>population</small></button>
+          </div>
+          ${st.mode === 'spacing'
+            ? `<label>Target seed spacing (in)<input type="number" inputmode="decimal" step="any" min="0" data-k="spacing" value="${esc(st.spacing)}"></label>`
+            : `<label>Target seeds per acre<input type="number" inputmode="numeric" step="any" min="0" data-k="pop" value="${esc(st.pop)}"></label>`}
+          <label>Row spacing (in)<input type="number" inputmode="decimal" step="any" min="0" data-k="row" value="${esc(st.row)}"></label>
+          <details class="cal-adv" ${st.measured ? 'open' : ''}><summary>Field check</summary>
+            <p class="muted small">After planting a pass, measure the average seed spacing (e.g. the length of 20 seeds ÷ 20) and enter it with the sprockets you ran. Picks are then corrected for what the planter actually does.</p>
+            <div class="row2">
+              <label>Sprockets run (A/B)<select data-k="measuredCombo"><option value="">—</option>${MONO_A.map((a, i) => `<option value="${i}" ${String(st.measuredCombo) === String(i) ? 'selected' : ''}>${a} / ${MONO_B[i]}</option>`).join('')}</select></label>
+              <label>Measured spacing (in)<input type="number" inputmode="decimal" step="any" min="0" data-k="measured" value="${esc(st.measured)}"></label>
+            </div>
+            <div class="muted small" id="mono-factor"></div>
+          </details>
+        </div>
+        <div class="cal-out" id="cal-out"></div>
+      </div>
+      <div class="cal-steps"><h4>Notes</h4><ol>
+        <li>Driver A and Driver B are named as in the Monosem manual's sowing distance table.</li>
+        <li>Spacing assumes every hole drops one seed. Doubles and skips change the real spacing, so check it in the field.</li>
+      </ol></div>`;
+    calc(); wire();
+  };
+
+  const calc = () => {
+    const h = holesOf();
+    const target = st.mode === 'spacing' ? Number(st.spacing) : Number(st.pop) > 0 && st.row > 0 ? SQIN_PER_AC / (Number(st.row) * Number(st.pop)) : 0;
+    // Field factor: measured ÷ expected for the combo that was run on this plate.
+    let factor = 1;
+    const fEl = $('#mono-factor', box);
+    const mh = Number(st.measuredHoles) || h;
+    if (st.measured && st.measuredCombo !== '' && mh > 0) {
+      const exp = combos(mh)[Number(st.measuredCombo)].sp;
+      factor = Number(st.measured) / exp;
+      fEl.innerHTML = `Expected ${fmtSp(exp)}" with the ${mh}-hole plate; measured ${st.measured}". Seeds are landing <b>${((factor - 1) * 100).toFixed(1)}% ${factor >= 1 ? 'farther apart' : 'closer together'}</b> than the table. Picks below are corrected.`;
+    } else if (fEl) fEl.textContent = '';
+    const out = $('#cal-out', box);
+    if (!(h > 0)) { out.innerHTML = '<p class="muted">Pick a seed plate.</p>'; return; }
+    if (!(target > 0)) { out.innerHTML = `<p class="muted">Enter the target ${st.mode === 'spacing' ? 'seed spacing' : 'seeds per acre'}.</p>`; return; }
+    const ranked = combos(h).map((c) => ({ ...c, real: c.sp * factor, off: (c.sp * factor / target - 1) * 100 })).sort((x, y) => Math.abs(x.off) - Math.abs(y.off));
+    const best = ranked[0];
+    const tone = Math.abs(best.off) <= 3 ? 'ok' : Math.abs(best.off) <= 8 ? 'warn' : 'bad';
+    const inTable = !!MONO_TABLE[h];
+    // Best combo on every other plate, to show when a plate change gets closer.
+    const plates = Object.keys(MONO_TABLE).map(Number).map((ph) => {
+      const r = combos(ph).map((c) => ({ ...c, off: (c.sp * factor / target - 1) * 100 })).sort((x, y) => Math.abs(x.off) - Math.abs(y.off))[0];
+      return { ph, ...r };
+    });
+    const better = plates.filter((p) => p.ph !== h && Math.abs(p.off) < Math.abs(best.off) - 0.5).sort((x, y) => Math.abs(x.off) - Math.abs(y.off));
+    out.innerHTML = `
+      <div class="cal-stat ${tone}"><span class="stat-label">Use these sprockets · ${h}-hole plate</span>
+        <span class="cal-settings"><span>Driver A <b class="stat-value">${best.a}</b></span><span>Driver B <b class="stat-value">${best.b}</b></span></span>
+        <span class="cal-diff">${fmtSp(best.real)}" spacing · ${fmtPop(popOf(best.real))} seeds/ac · ${best.off >= 0 ? '+' : ''}${best.off.toFixed(1)}% ${best.off >= 0 ? 'farther' : 'closer'} than target</span>
+        <span class="muted small">Target ${fmtSp(target)}" (${fmtPop(popOf(target))} seeds/ac at ${st.row}" rows).${inTable ? '' : ' This plate isn’t in the table; spacing is figured from the table’s formula.'}${factor !== 1 ? ' Corrected with your field check.' : ''}</span></div>
+      <div class="cal-stat"><span class="stat-label">Next closest on this plate</span>
+        <table class="cal-rows"><thead><tr><th>A / B</th><th>Spacing</th><th>Seeds/ac</th><th>vs target</th></tr></thead><tbody>
+        ${ranked.slice(1, 4).map((c) => `<tr><td>${c.a} / ${c.b}</td><td>${fmtSp(c.real)}"</td><td>${fmtPop(popOf(c.real))}</td><td>${c.off >= 0 ? '+' : ''}${c.off.toFixed(1)}%</td></tr>`).join('')}
+        </tbody></table></div>
+      ${better.length && Math.abs(best.off) > 2 ? `<div class="cal-stat"><span class="stat-label">Closer with a different plate</span>
+        <table class="cal-rows"><thead><tr><th>Plate</th><th>A / B</th><th>Spacing</th><th>vs target</th></tr></thead><tbody>
+        ${better.slice(0, 3).map((p) => `<tr><td>${p.ph} holes</td><td>${p.a} / ${p.b}</td><td>${fmtSp(p.sp * factor)}"</td><td>${p.off >= 0 ? '+' : ''}${p.off.toFixed(1)}%</td></tr>`).join('')}
+        </tbody></table></div>` : ''}`;
+  };
+
+  const wire = () => {
+    $('[data-f=holes]', box).onchange = (e) => { st.holes = e.target.value; save(); draw(); };
+    $$('[data-mode]', box).forEach((b) => (b.onclick = () => { st.mode = b.dataset.mode; save(); draw(); }));
+    $$('[data-k]', box).forEach((i) => (i.oninput = i.onchange = () => {
+      if (!i.isConnected) return; // late change event from an input that was just redrawn
+      const changed = String(st[i.dataset.k] ?? '') !== i.value;
+      st[i.dataset.k] = i.value;
+      if (changed && (i.dataset.k === 'measured' || i.dataset.k === 'measuredCombo') && holesOf() > 0) st.measuredHoles = holesOf(); // the plate the check was run on
+      save(); calc();
+    }));
   };
   draw();
 }
