@@ -2117,7 +2117,7 @@ async function openWorkForm(opts, onDone) {
   // Settings: each planter has its own list (Setup -> Equipment). Values carry across planter switches by name.
   const settingVals = { ...(d.settings ?? {}) };
   if (!d.settings) {   // records saved before per-planter settings
-    const old = { 'Seed plate': d.seed_plate, 'Sprocket 1': d.sprocket_1, 'Sprocket 2': d.sprocket_2, 'Depth (in)': d.depth_in, 'Speed (mph)': d.speed_mph, 'Seeds per 3 ft': d.seeds_per_3ft };
+    const old = { 'Seed plate': d.seed_plate, 'Driver A (upper)': d.sprocket_1, 'Driver B (lower)': d.sprocket_2, 'Depth (in)': d.depth_in, 'Speed (mph)': d.speed_mph, 'Seeds per 3 ft': d.seeds_per_3ft };
     Object.entries(old).forEach(([k, x]) => { if (x != null && x !== '') settingVals[k] = String(x); });
   }
   const origKeys = Object.keys(settingVals);
@@ -3689,7 +3689,7 @@ function renderMonoCal(box) {
           <details class="cal-adv" ${st.measured ? 'open' : ''}><summary>Field check</summary>
             <p class="muted small">After planting a pass, measure the average seed spacing (e.g. the length of 20 seeds ÷ 20) and enter it with the sprockets you ran. Picks are then corrected for what the planter actually does.</p>
             <div class="row2">
-              <label>Sprockets run (A/B)<select data-k="measuredCombo"><option value="">—</option>${MONO_A.map((a, i) => `<option value="${i}" ${String(st.measuredCombo) === String(i) ? 'selected' : ''}>${a} / ${MONO_B[i]}</option>`).join('')}</select></label>
+              <label>Sprockets run (A upper / B lower)<select data-k="measuredCombo"><option value="">—</option>${MONO_A.map((a, i) => `<option value="${i}" ${String(st.measuredCombo) === String(i) ? 'selected' : ''}>${a} / ${MONO_B[i]}</option>`).join('')}</select></label>
               <label>Measured spacing (in)<input type="number" inputmode="decimal" step="any" min="0" data-k="measured" value="${esc(st.measured)}"></label>
             </div>
             <div class="muted small" id="mono-factor"></div>
@@ -3698,7 +3698,7 @@ function renderMonoCal(box) {
         <div class="cal-out" id="cal-out"></div>
       </div>
       <div class="cal-steps"><h4>Notes</h4><ol>
-        <li>Driver A and Driver B are named as in the Monosem manual's sowing distance table.</li>
+        <li>Driver A is the upper sprocket (driver); Driver B is the lower sprocket (driven), as in the Monosem manual's sowing distance table.</li>
         <li>Spacing assumes every hole drops one seed. Doubles and skips change the real spacing, so check it in the field.</li>
       </ol></div>`;
     calc(); wire();
@@ -3731,7 +3731,7 @@ function renderMonoCal(box) {
     const better = plates.filter((p) => p.ph !== h && Math.abs(p.off) < Math.abs(best.off) - 0.5).sort((x, y) => Math.abs(x.off) - Math.abs(y.off));
     out.innerHTML = `
       <div class="cal-stat ${tone}"><span class="stat-label">Use these sprockets · ${h}-hole plate</span>
-        <span class="cal-settings"><span>Driver A <b class="stat-value">${best.a}</b></span><span>Driver B <b class="stat-value">${best.b}</b></span></span>
+        <span class="cal-settings"><span>Driver A <span class="muted small">upper · driver</span> <b class="stat-value">${best.a}</b></span><span>Driver B <span class="muted small">lower · driven</span> <b class="stat-value">${best.b}</b></span></span>
         <span class="cal-diff">${fmtSp(best.real)}" spacing · ${fmtPop(popOf(best.real))} seeds/ac · ${best.off >= 0 ? '+' : ''}${best.off.toFixed(1)}% ${best.off >= 0 ? 'farther' : 'closer'} than target</span>
         <span class="muted small">Target ${fmtSp(target)}" (${fmtPop(popOf(target))} seeds/ac at ${st.row}" rows).${inTable ? '' : ' This plate isn’t in the table; spacing is figured from the table’s formula.'}${factor !== 1 ? ' Corrected with your field check.' : ''}</span></div>
       <div class="cal-stat"><span class="stat-label">Next closest on this plate</span>
