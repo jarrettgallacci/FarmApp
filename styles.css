@@ -506,3 +506,6 @@ a.button-like { text-decoration: none; }
 .band-box { border-top: 1px solid var(--border); padding-top: .5rem; }
 .plant-list { border: 1px solid var(--border); border-radius: 10px; padding: .5rem .8rem; }
 .form-hint { margin-top: -.3rem; }
+.settings-grid { display: grid; gap: .6rem; grid-template-columns: repeat(2, 1fr); }
+@media (min-width: 640px) { .settings-grid { grid-template-columns: repeat(3, 1fr); } }
+#cy-hint:empty { display: none; }

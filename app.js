@@ -208,6 +208,7 @@ const CRUD = {
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
       { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
+      { key: 'planting_settings', label: 'Planting settings to record (planters only, one per line)', type: 'textarea' },
       { key: 'work', label: 'Used for', list: true, form: false, compute: (r) => (r.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', ') },
       { key: 'verified_on', label: 'Last checked (seen on the farm)', listLabel: 'Checked', type: 'date', list: true },
       { key: 'photos', label: 'Photos', list: true, form: false, compute: (r) => (r.equipment_photos?.[0]?.count ? `📷 ${r.equipment_photos[0].count}` : '') },
@@ -2060,15 +2061,13 @@ async function openWorkForm(opts, onDone) {
         <label>Unit<select name="seed_used_unit">${['lb', 'seeds'].map((u) => `<option ${(d.seed_used_unit ?? 'lb') === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label>
       </div>
       <p class="actual-rate" id="actual-rate"></p>
-      <div class="row2">
-        <label><span id="plate-label">Seed plate / sponge set</span><input name="seed_plate" value="${esc(d.seed_plate ?? '')}"></label>
-        <label>Seeds per 3 ft<input type="number" step="any" min="0" name="seeds_per_3ft" value="${esc(d.seeds_per_3ft ?? '')}"></label>
-      </div>
-      <div class="row4">
-        <label>Sprocket 1<input name="sprocket_1" value="${esc(d.sprocket_1 ?? '')}"></label>
-        <label>Sprocket 2<input name="sprocket_2" value="${esc(d.sprocket_2 ?? '')}"></label>
-        <label>Depth (in)<input type="number" step="any" min="0" name="depth_in" value="${esc(d.depth_in ?? '')}"></label>
-        <label>Speed (mph)<input type="number" step="any" min="0" name="speed_mph" value="${esc(d.speed_mph ?? '')}"></label>
+      <div class="lines-head"><b id="settings-title">Planter settings</b><span class="muted small" id="settings-hint"></span></div>
+      <div class="settings-grid" id="settings-box"></div>
+      <div class="row2 pattern-row">
+        <label>Pattern<select name="pattern"><option value="">—</option>
+          <option value="straight" ${d.pattern === 'straight' ? 'selected' : ''}>Straight lines</option>
+          <option value="circle" ${d.pattern === 'circle' ? 'selected' : ''}>Circle</option></select></label>
+        <label data-heading>GPS heading (°)<input type="number" step="any" min="0" max="360" name="heading_deg" value="${esc(d.heading_deg ?? '')}" placeholder="0–359"></label>
       </div>
       <div class="band-box">${ev ? `<div class="lines-head"><b>Planter band</b><button type="button" class="small" data-act="band">+ Add planter band</button></div>
         ${bands.length ? `<ul class="list">${bands.map((b) => `<li><span class="li-name">${b.chemical_event_products.map((l) => `${esc(chemById(l.chemical_id)?.name ?? '?')} <span class="muted">${esc(rateText(l))}</span>`).join(', ') || 'No products'}</span><span class="li-value"><button type="button" class="small" data-band="${b.event_id}">Edit</button></span></li>`).join('')}</ul>` : '<p class="muted small">None. Use this for anything applied in the furrow or band at planting; it becomes a chemical record linked here.</p>'}`
@@ -2115,10 +2114,26 @@ async function openWorkForm(opts, onDone) {
     if (r != null && tgt && el.target_unit.value === unit + '/ac') txt += ` <span class="muted">(${r >= tgt ? '+' : ''}${(((r - tgt) / tgt) * 100).toFixed(0)}% vs target)</span>`;
     $('#actual-rate', dlg).innerHTML = txt;
   };
+  // Settings: each planter has its own list (Setup -> Equipment). Values carry across planter switches by name.
+  const settingVals = { ...(d.settings ?? {}) };
+  if (!d.settings) {   // records saved before per-planter settings
+    const old = { 'Seed plate': d.seed_plate, 'Sprocket 1': d.sprocket_1, 'Sprocket 2': d.sprocket_2, 'Depth (in)': d.depth_in, 'Speed (mph)': d.speed_mph, 'Seeds per 3 ft': d.seeds_per_3ft };
+    Object.entries(old).forEach(([k, x]) => { if (x != null && x !== '') settingVals[k] = String(x); });
+  }
+  const origKeys = Object.keys(settingVals);
+  const captureSettings = () => $$('[data-setting]', dlg).forEach((i) => { settingVals[i.dataset.setting] = i.value.trim(); });
   const plateLabel = () => {
+    captureSettings();
     const p = refs.equipment.find((e) => e.equipment_id === Number(el.equipment_id.value));
-    $('#plate-label', dlg).textContent = /seed spider/i.test(`${p?.make} ${p?.name}`) ? 'Sponge set' : /monosem/i.test(`${p?.make} ${p?.name}`) ? 'Seed plate' : 'Seed plate / sponge set';
+    let names = (p?.planting_settings ?? '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const extra = origKeys.filter((k) => settingVals[k] && !names.includes(k));   // only from the saved record
+    if (!names.length && !extra.length) names = ['Settings'];
+    $('#settings-title', dlg).textContent = p ? `${p.name} settings` : 'Planter settings';
+    $('#settings-hint', dlg).textContent = p?.planting_settings ? '' : (p ? 'No setting list for this planter yet; add one in Setup → Equipment' : 'Pick a planter');
+    $('#settings-box', dlg).innerHTML = [...names, ...extra].map((k) => `<label>${esc(k)}${extra.includes(k) ? ' <span class="muted small">(other planter)</span>' : ''}<input data-setting="${esc(k)}" value="${esc(settingVals[k] ?? '')}"></label>`).join('');
   };
+  const syncPattern = () => { $$('[data-heading]', dlg).forEach((x) => (x.hidden = el.pattern.value !== 'straight')); };
+  el.pattern.onchange = syncPattern; syncPattern();
   const sync = () => {
     const planting = op() === 'planting';
     $$('[data-plant]', dlg).forEach((x) => (x.hidden = !planting));
@@ -2163,10 +2178,10 @@ async function openWorkForm(opts, onDone) {
     const det = {
       planting_label: el.staggered.checked ? val('planting_label') : null, row_spacing_in: numOrNull('row_spacing_in'),
       seed_lot: val('seed_lot') || null, target_rate: numOrNull('target_rate'), target_unit: val('target_unit'),
-      seed_used: numOrNull('seed_used'), seed_used_unit: val('seed_used_unit'), seed_plate: val('seed_plate') || null,
-      seeds_per_3ft: numOrNull('seeds_per_3ft'), sprocket_1: val('sprocket_1') || null, sprocket_2: val('sprocket_2') || null,
-      depth_in: numOrNull('depth_in'), speed_mph: numOrNull('speed_mph'), crop_year_id: row.crop_year_id,
+      seed_used: numOrNull('seed_used'), seed_used_unit: val('seed_used_unit'), crop_year_id: row.crop_year_id,
+      pattern: val('pattern') || null, heading_deg: val('pattern') === 'straight' ? numOrNull('heading_deg') : null,
     };
+    det.settings = Object.fromEntries($$('[data-setting]', dlg).map((i) => [i.dataset.setting, i.value.trim()]).filter(([, x]) => x));
     const btn = $('button[type=submit]', form); btn.disabled = true;
     try {
       let id = ev?.event_id;
@@ -2214,7 +2229,7 @@ async function plantingSection(box, cropYear, reopenCrop) {
       const d = (Array.isArray(r.planting_details) ? r.planting_details[0] : r.planting_details) ?? {};
       const act = actualRate(d, r.acres);
       return `<li><span class="li-name"><b>${esc(dateRange(r.performed_on, r.end_date))}</b>${d.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}
-        <span class="muted small">${esc([equipName(r.equipment_id), d.seed_lot && 'lot ' + d.seed_lot, act != null && rateFmt(act, (d.seed_used_unit ?? 'lb') + '/ac')].filter(Boolean).join(' · '))}</span></span>
+        <span class="muted small">${esc([equipName(r.equipment_id), d.seed_lot && 'lot ' + d.seed_lot, act != null && rateFmt(act, (d.seed_used_unit ?? 'lb') + '/ac'), d.pattern === 'circle' ? 'circle' : d.heading_deg != null ? `heading ${Number(d.heading_deg)}°` : ''].filter(Boolean).join(' · '))}</span></span>
         <span class="li-value"><button type="button" class="small" data-plant="${r.event_id}">Open</button></span></li>`;
     }).join('')}</ul>` : '<p class="muted small">No planting records yet.</p>'}</div>`;
   $('[data-act=add-plant]', box).onclick = () => openWorkForm({ operation: 'planting', fieldId: cropYear.field_id, cropYearId: cropYear.crop_year_id }, reopenCrop);
