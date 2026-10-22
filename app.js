@@ -221,7 +221,7 @@ const CRUD = {
     search: true,
     filters: [{ key: 'work', all: 'All work', options: () => refs.workTypes.filter((w) => w.active).map((w) => [w.operation, workLabel(w.operation)]),
       test: (r, v) => (r.equipment_work_types ?? []).some((x) => x.operation === v) },
-      { key: 'type', all: 'All types', options: () => ['Tractor', 'Combine', 'Sprayer', 'Windrower', 'Implement', 'Truck', 'Other'].map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
+      { key: 'type', all: 'All types', options: () => ['Tractor', 'Combine', 'Sprayer', 'Windrower', 'Implement', 'Truck', 'Pivot', 'Pump', 'Well', 'Mainline', 'Building', 'Other'].map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'type', label: 'Type (tractor, combine, sprayer, implement...)', listLabel: 'Type', type: 'text', list: true },
@@ -236,6 +236,8 @@ const CRUD = {
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
       { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
+      { key: 'field_id', label: 'Field it serves (pivots, pumps, wells)', type: 'select', num: true,
+        options: () => fieldsInOrder().filter((f) => f.active).map((f) => [f.field_id, f.name]) },
       { key: 'cost_per_acre', label: 'Cost per acre when this machine is used ($/ac, optional; overrides the work type or application rate)', listLabel: '$/ac', type: 'number', step: '0.01', list: true },
       { key: 'planting_settings', label: 'Planting settings to record (planters only, one per line; for a choice write "Name: Option A | Option B")', type: 'textarea' },
       { key: 'work', label: 'Used for', list: true, form: false, compute: (r) => (r.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', ') },
@@ -250,7 +252,7 @@ const CRUD = {
       ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
-    afterRender: (form, row) => { equipmentWorkTags(form, row); equipmentPhotos(form, row); },
+    afterRender: (form, row) => { equipmentWorkTags(form, row); equipmentService(form, row); equipmentPhotos(form, row); },
   },
   worktypes: {
     table: 'operation_types', pk: 'operation', title: 'Work types', singular: 'work type', order: ['sort_order', 'operation'],
@@ -3446,6 +3448,337 @@ async function equipmentPhotos(form, row) {
   draw();
 }
 
+// =====================================================================
+// Maintenance & repair: open problems, service due, history.
+// Pivots, pumps, wells, mainlines and buildings are equipment rows too.
+// =====================================================================
+const maintState = { view: 'repairs', q: '', equip: '', season: new Date().getFullYear() };
+const JOB_STATUS = [['open', 'Open'], ['in_progress', 'In progress'], ['done', 'Done']];
+const jobStatusName = (k) => JOB_STATUS.find(([x]) => x === k)?.[1] ?? k;
+const addMonths = (iso, m) => { const d = new Date(iso + 'T12:00'); d.setMonth(d.getMonth() + Number(m)); return localDate(d); };
+const fmtDateY = (iso) => (iso ? new Date(iso + 'T12:00').toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '');
+
+// When an interval is next due, from the last time it was done (or where tracking started).
+function serviceDue(iv, eq, jobs) {
+  const last = jobs.filter((j) => j.interval_id === iv.interval_id && j.status === 'done')
+    .sort((a, b) => String(b.completed_on ?? '').localeCompare(String(a.completed_on ?? '')) || (b.hours_at ?? 0) - (a.hours_at ?? 0))[0];
+  const baseHrs = last?.hours_at ?? iv.start_hours;
+  const baseDate = last?.completed_on ?? iv.start_date;
+  const curHrs = eq?.hours != null ? Number(eq.hours) : null;
+  const dueHrs = iv.every_hours != null && baseHrs != null ? Number(baseHrs) + Number(iv.every_hours) : null;
+  const leftHrs = dueHrs != null && curHrs != null ? dueHrs - curHrs : null;
+  const dueDate = iv.every_months != null && baseDate ? addMonths(baseDate, iv.every_months) : null;
+  const daysLeft = dueDate ? Math.round((new Date(dueDate + 'T12:00') - new Date(localDate() + 'T12:00')) / 864e5) : null;
+  const over = (leftHrs != null && leftHrs <= 0) || (daysLeft != null && daysLeft <= 0);
+  const soon = !over && ((leftHrs != null && leftHrs <= Math.max(25, Number(iv.every_hours) * 0.1)) || (daysLeft != null && daysLeft <= 30));
+  const unknown = dueHrs == null && dueDate == null;
+  return { last, dueHrs, leftHrs, curHrs, dueDate, daysLeft, state: unknown ? 'unknown' : over ? 'over' : soon ? 'soon' : 'ok' };
+}
+function dueText(d, iv, eq) {
+  const parts = [];
+  if (d.dueHrs != null) parts.push(d.leftHrs == null ? `due at ${num(d.dueHrs, 0)} hrs (no current hours)` : d.leftHrs <= 0 ? `<b>${num(-d.leftHrs, 0)} hrs over</b> (due ${num(d.dueHrs, 0)})` : `${num(d.leftHrs, 0)} hrs left (due ${num(d.dueHrs, 0)})`);
+  else if (iv.every_hours != null) parts.push('enter the hours it was last done');
+  if (d.dueDate) parts.push(d.daysLeft <= 0 ? `<b>${-d.daysLeft} days over</b> (${fmtDateY(d.dueDate)})` : `due ${fmtDateY(d.dueDate)}`);
+  if (d.dueHrs != null && eq?.hours_date) parts.push(`<span class="muted">hours as of ${fmtDateY(eq.hours_date)}</span>`);
+  return parts.join(' · ');
+}
+const everyText = (iv) => [iv.every_hours != null && `every ${num(iv.every_hours, 0)} hrs`, iv.every_months != null && `every ${iv.every_months} mo`].filter(Boolean).join(' or ');
+
+async function renderMaint(el) {
+  const s = maintState;
+  const [jobsRes, ivRes] = await Promise.all([
+    sb.from('maint_jobs').select('*, maint_photos(photo_id, kind)').order('reported_on', { ascending: false }).order('job_id', { ascending: false }),
+    sb.from('service_intervals').select('*').eq('active', true),
+  ]);
+  if (jobsRes.error) { el.innerHTML = '<div class="empty">Maintenance isn’t set up yet. Run <b>maintenance.sql</b> in Supabase first.</div>'; return; }
+  await loadRefs();
+  const jobs = jobsRes.data, ivs = ivRes.data ?? [];
+  const eqById = (id) => refs.equipment.find((e) => e.equipment_id === id);
+  const term = s.q.trim().toLowerCase();
+  const match = (eqId, text = '') => (!s.equip || Number(s.equip) === eqId) && (!term || `${equipName(eqId)} ${text}`.toLowerCase().includes(term));
+  const open = jobs.filter((j) => j.status !== 'done' && match(j.equipment_id, j.title))
+    .sort((a, b) => Number(b.down) - Number(a.down) || (a.status === 'in_progress' ? -1 : 0) - (b.status === 'in_progress' ? -1 : 0) || a.reported_on.localeCompare(b.reported_on));
+  const dues = ivs.filter((iv) => match(iv.equipment_id, iv.name) && eqById(iv.equipment_id)?.active !== false)
+    .map((iv) => ({ iv, eq: eqById(iv.equipment_id), d: serviceDue(iv, eqById(iv.equipment_id), jobs) }));
+  const rank = { over: 0, soon: 1, unknown: 2, ok: 3 };
+  dues.sort((a, b) => rank[a.d.state] - rank[b.d.state] || (a.d.leftHrs ?? 1e9) - (b.d.leftHrs ?? 1e9) || String(a.d.dueDate ?? '9').localeCompare(String(b.d.dueDate ?? '9')));
+  const nOver = dues.filter((x) => x.d.state === 'over').length, nSoon = dues.filter((x) => x.d.state === 'soon').length;
+  const done = jobs.filter((j) => j.status === 'done' && (j.completed_on ?? j.reported_on).startsWith(String(s.season)) && match(j.equipment_id, j.title));
+  const eqOpts = refs.equipment.filter((e) => e.active || jobs.some((j) => j.equipment_id === e.equipment_id));
+  const photoN = (j, k) => (j.maint_photos ?? []).filter((p) => p.kind === k).length;
+
+  el.innerHTML = `
+    <div class="subtabs">${[['repairs', `Repairs${open.length ? ` (${open.length})` : ''}`], ['service', `Service due${nOver ? ` (${nOver} over)` : nSoon ? ` (${nSoon} soon)` : ''}`], ['history', 'History']]
+      .map(([k, l]) => `<button data-mview="${k}" class="${s.view === k ? 'active' : ''}">${l}</button>`).join('')}</div>
+    <div class="section-head"><h2>${{ repairs: 'Repairs', service: 'Service due', history: 'Maintenance history' }[s.view]}</h2>
+      <div class="row">
+        ${s.view === 'history' ? `<button data-season="-1" aria-label="Previous year">‹</button><strong class="season">${s.season}</strong><button data-season="1" aria-label="Next year">›</button>` : ''}
+        ${s.view === 'service' ? '<button data-act="add-iv">+ Interval</button>' : ''}
+        <button class="primary" data-act="report">${s.view === 'service' ? 'Log service' : s.view === 'history' ? 'Log work done' : 'Report a problem'}</button>
+      </div></div>
+    <div class="filters">
+      <input type="search" data-f="q" placeholder="Search equipment or job…" value="${esc(s.q)}">
+      <select data-f="equip"><option value="">All equipment</option>${eqOpts.map((e) => `<option value="${e.equipment_id}" ${Number(s.equip) === e.equipment_id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select>
+    </div>
+    ${s.view === 'repairs' ? (open.length ? `<ul class="list job-list card">${open.map((j) => `<li class="${j.down ? 'down' : ''}">
+        <span class="li-name"><b>${esc(j.title)}</b> ${j.down ? '<span class="badge bad">DOWN</span>' : ''} <span class="badge ${j.status === 'in_progress' ? 'up' : ''}">${jobStatusName(j.status)}</span>
+          <span class="muted small">${esc(equipName(j.equipment_id))} · reported ${fmtDateY(j.reported_on)}${j.reported_by ? ' by ' + esc(operatorName(j.reported_by)) : ''}${photoN(j, 'problem') ? ` · 📷 ${photoN(j, 'problem')}` : ''}</span></span>
+        <span class="li-value"><button class="small" data-job="${j.job_id}">Open</button></span></li>`).join('')}</ul>`
+      : '<div class="empty">No open repairs.</div>') : ''}
+    ${s.view === 'service' ? (dues.length ? `<ul class="list job-list card">${dues.map(({ iv, eq, d }) => `<li class="due-${d.state}">
+        <span class="li-name"><b>${esc(eq?.name ?? '?')}</b> · ${esc(iv.name)} <span class="muted small">${everyText(iv)}</span>
+          <span class="small">${d.state === 'over' ? '<span class="badge bad">Overdue</span> ' : d.state === 'soon' ? '<span class="badge warn">Due soon</span> ' : ''}${dueText(d, iv, eq)}</span></span>
+        <span class="li-value"><button class="small" data-iv="${iv.interval_id}">Edit</button> <button class="small primary" data-svc="${iv.interval_id}">Done</button></span></li>`).join('')}</ul>`
+      : '<div class="empty">No service intervals yet. Add one with <b>+ Interval</b>, or from a machine under Setup → Equipment.</div>') : ''}
+    ${s.view === 'history' ? (done.length ? `<p class="muted small">${done.length} job(s) in ${s.season}${done.some((j) => j.cost != null) ? ` · total <b>${money(done.reduce((n, j) => n + Number(j.cost || 0), 0))}</b>` : ''}</p>
+      <div class="card table-wrap"><table><thead><tr><th>Date</th><th>Equipment</th><th>Job</th><th class="r">Hours</th><th class="r">Cost</th><th></th></tr></thead><tbody>
+      ${done.map((j) => `<tr><td class="nowrap">${fmtDateY(j.completed_on ?? j.reported_on)}</td><td>${esc(equipName(j.equipment_id))}</td>
+        <td>${esc(j.title)} <span class="muted small">${j.kind === 'service' ? 'service' : 'repair'}${photoN(j, 'invoice') ? ' · 🧾' : ''}</span></td>
+        <td class="r">${j.hours_at != null ? num(j.hours_at, 0) : ''}</td><td class="r">${money(j.cost)}</td>
+        <td class="r"><button class="small" data-job="${j.job_id}">Open</button></td></tr>`).join('')}</tbody></table></div>` : `<div class="empty">Nothing finished in ${s.season}.</div>`) : ''}`;
+  const reload = () => renderMaint(el);
+  $$('[data-mview]', el).forEach((b) => (b.onclick = () => { s.view = b.dataset.mview; reload(); }));
+  $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
+  $$('[data-f]', el).forEach((inp) => {
+    if (inp.type === 'search') { let t; inp.oninput = () => { clearTimeout(t); t = setTimeout(() => { s.q = inp.value; reload(); }, 300); }; } else inp.onchange = () => { s.equip = inp.value; reload(); };
+  });
+  $('[data-act=report]', el).onclick = () => openJob(s.view === 'service' ? { kind: 'service', status: 'done', equipmentId: Number(s.equip) || null }
+    : s.view === 'history' ? { status: 'done', equipmentId: Number(s.equip) || null } : { equipmentId: Number(s.equip) || null }, reload);
+  $('[data-act=add-iv]', el)?.addEventListener('click', () => openInterval({ equipmentId: Number(s.equip) || null }, reload));
+  $$('[data-job]', el).forEach((b) => (b.onclick = () => openJob({ jobId: Number(b.dataset.job) }, reload)));
+  $$('[data-iv]', el).forEach((b) => (b.onclick = () => openInterval({ intervalId: Number(b.dataset.iv) }, reload)));
+  $$('[data-svc]', el).forEach((b) => (b.onclick = () => {
+    const iv = ivs.find((x) => x.interval_id === Number(b.dataset.svc));
+    openJob({ kind: 'service', status: 'done', equipmentId: iv.equipment_id, intervalId: iv.interval_id, title: iv.name }, reload);
+  }));
+}
+
+function equipSelect(cur) {
+  const list = refs.equipment.filter((e) => e.active || e.equipment_id === cur);
+  const groups = {};
+  list.forEach((e) => { const g = e.type || 'Other'; (groups[g] ??= []).push(e); });
+  return `<option value="">Choose…</option>` + Object.keys(groups).sort().map((g) => `<optgroup label="${esc(g)}">${groups[g].map((e) =>
+    `<option value="${e.equipment_id}" ${e.equipment_id === cur ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</optgroup>`).join('');
+}
+
+// opts: { jobId } to edit; or { equipmentId, kind, status, intervalId, title } for a new job
+async function openJob(opts, onDone) {
+  let j = null;
+  if (opts.jobId) [j] = await q(sb.from('maint_jobs').select('*').eq('job_id', opts.jobId));
+  const v = j ?? { kind: opts.kind ?? 'repair', status: opts.status ?? 'open', equipment_id: opts.equipmentId ?? null, interval_id: opts.intervalId ?? null,
+    title: opts.title ?? '', reported_on: localDate(), completed_on: opts.status === 'done' ? localDate() : null, down: false };
+  const ivs = (await sb.from('service_intervals').select('*').eq('active', true)).data ?? [];
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.innerHTML = `<form class="form job-form">
+    <div class="dialog-head"><h3>${j ? (v.kind === 'service' ? 'Service' : 'Repair') : v.kind === 'service' ? 'Log service' : v.status === 'done' ? 'Log work done' : 'Report a problem'}</h3></div>
+    <div class="row2">
+      <label>Equipment *<select name="equipment_id" required>${equipSelect(v.equipment_id)}</select></label>
+      <label>Type<select name="kind"><option value="repair" ${v.kind === 'repair' ? 'selected' : ''}>Repair</option><option value="service" ${v.kind === 'service' ? 'selected' : ''}>Scheduled service</option></select></label>
+    </div>
+    <label data-svc-only>Service interval<select name="interval_id"></select></label>
+    <label>What's wrong / what was done *<input name="title" required value="${esc(v.title ?? '')}" placeholder="e.g. Hydraulic leak at rear remote"></label>
+    <label>Details<textarea name="description" rows="2">${esc(v.description ?? '')}</textarea></label>
+    <label class="check"><input type="checkbox" name="down" ${v.down ? 'checked' : ''}> Down — can't be used until fixed</label>
+    <div class="row2">
+      <label>Status<select name="status">${JOB_STATUS.map(([k, l]) => `<option value="${k}" ${v.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Reported by<select name="reported_by"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === v.reported_by).map((o) => `<option value="${o.operator_id}" ${o.operator_id === v.reported_by ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
+    </div>
+    <div class="row2">
+      <label>Reported on<input type="date" name="reported_on" value="${esc(v.reported_on ?? '')}"></label>
+      <label data-done-only>Completed on<input type="date" name="completed_on" value="${esc(v.completed_on ?? '')}"></label>
+    </div>
+    <fieldset class="plant-box" data-done-only><legend>Completed</legend>
+      <div class="row2">
+        <label>Fixed / serviced by<input name="done_by" value="${esc(v.done_by ?? '')}" placeholder="Shop, dealer, person"></label>
+        <label>Machine hours<input type="number" inputmode="decimal" step="0.1" min="0" name="hours_at" value="${esc(v.hours_at ?? '')}"></label>
+      </div>
+      <div class="row2">
+        <label>Total cost ($)<input type="number" inputmode="decimal" step="0.01" min="0" name="cost" value="${esc(v.cost ?? '')}"></label>
+        <label>Vendor<input name="vendor" value="${esc(v.vendor ?? '')}"></label>
+      </div>
+      <label>Invoice #<input name="invoice_no" value="${esc(v.invoice_no ?? '')}"></label>
+    </fieldset>
+    <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
+    <div id="job-photos"></div>
+    <div class="actions">
+      ${j ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}
+      <span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div></form>`;
+  const form = $('form', dlg), el = form.elements;
+  const sync = () => {
+    const svc = el.kind.value === 'service', isDone = el.status.value === 'done';
+    $$('[data-svc-only]', dlg).forEach((x) => (x.hidden = !svc));
+    $$('[data-done-only]', dlg).forEach((x) => (x.hidden = !isDone));
+    if (isDone && !el.completed_on.value) el.completed_on.value = localDate();
+    const eqId = Number(el.equipment_id.value), cur = Number(el.interval_id.value) || v.interval_id;
+    const mine = ivs.filter((iv) => iv.equipment_id === eqId);
+    el.interval_id.innerHTML = `<option value="">${mine.length ? '— not a listed interval —' : 'No intervals for this machine'}</option>` + mine.map((iv) => `<option value="${iv.interval_id}" ${iv.interval_id === cur ? 'selected' : ''}>${esc(iv.name)} (${everyText(iv)})</option>`).join('');
+    const eq = refs.equipment.find((e) => e.equipment_id === eqId);
+    el.hours_at.placeholder = eq?.hours != null ? `last ${num(eq.hours, 0)}` : '';
+  };
+  el.kind.onchange = sync; el.status.onchange = sync; el.equipment_id.onchange = sync;
+  el.interval_id.onchange = () => { const iv = ivs.find((x) => x.interval_id === Number(el.interval_id.value)); if (iv && !el.title.value.trim()) el.title.value = iv.name; };
+  sync();
+  if (j) jobPhotos($('#job-photos', dlg), j);
+  else $('#job-photos', dlg).innerHTML = '<p class="muted small">Save first, then add photos of the problem or the invoice.</p>';
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const val = (k) => String(el[k].value).trim();
+    const n = (k) => (val(k) === '' ? null : Number(val(k)));
+    const isDone = val('status') === 'done';
+    const row = {
+      equipment_id: Number(val('equipment_id')), kind: val('kind'), interval_id: val('kind') === 'service' ? n('interval_id') : null,
+      title: val('title'), description: val('description') || null, down: isDone ? false : el.down.checked, status: val('status'),
+      reported_by: n('reported_by'), reported_on: val('reported_on') || localDate(), completed_on: isDone ? val('completed_on') || localDate() : null,
+      done_by: isDone ? val('done_by') || null : null, hours_at: isDone ? n('hours_at') : null, cost: isDone ? n('cost') : null,
+      vendor: isDone ? val('vendor') || null : null, invoice_no: isDone ? val('invoice_no') || null : null, notes: val('notes') || null,
+      updated_at: new Date().toISOString(),
+    };
+    const btn = $('button[type=submit]', form); btn.disabled = true;
+    try {
+      let id = j?.job_id;
+      if (j) await q(sb.from('maint_jobs').update(row).eq('job_id', id));
+      else id = (await q(sb.from('maint_jobs').insert(row).select('job_id').single())).job_id;
+      // Newer hours reading → update the machine's hours.
+      const eq = refs.equipment.find((x) => x.equipment_id === row.equipment_id);
+      if (row.hours_at != null && (eq?.hours == null || row.hours_at > Number(eq.hours))) {
+        await q(sb.from('equipment').update({ hours: row.hours_at, hours_date: row.completed_on }).eq('equipment_id', row.equipment_id));
+        await loadRefs();
+      }
+      toast('Saved'); onDone?.();
+      if (!j) openJob({ jobId: id }, onDone); else dlg.close();
+    } catch { btn.disabled = false; }
+  };
+  const del = $('[data-act=del]', dlg);
+  if (del) del.onclick = async () => {
+    if (!confirm('Delete this job and its photos?')) return;
+    try {
+      const ph = await q(sb.from('maint_photos').select('path').eq('job_id', j.job_id));
+      if (ph.length) await sb.storage.from('maintenance').remove(ph.map((p) => p.path));
+      await q(sb.from('maint_jobs').delete().eq('job_id', j.job_id));
+      dlg.close(); toast('Deleted'); onDone?.();
+    } catch { /* shown */ }
+  };
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+async function jobPhotos(box, job) {
+  const draw = async () => {
+    const photos = await q(sb.from('maint_photos').select('*').eq('job_id', job.job_id).order('taken_at'));
+    const urls = photos.length ? (await sb.storage.from('maintenance').createSignedUrls(photos.map((p) => p.path), 3600)).data ?? [] : [];
+    const group = (kind, title, accept) => {
+      const list = photos.map((p, i) => ({ p, url: urls[i]?.signedUrl })).filter((x) => x.p.kind === kind);
+      return `<div class="lines-head"><b>${title}</b></div><div class="eq-grid">${list.map(({ p, url }) => `<div class="eq-thumb">
+        <a href="${esc(url ?? '#')}" target="_blank" rel="noopener">${/\.pdf$/i.test(p.path) ? '<span class="pdf-thumb">PDF</span>' : `<img src="${esc(url ?? '')}" alt="">`}</a>
+        <span class="muted small">${esc(new Date(p.taken_at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}</span>
+        <button type="button" class="icon" data-rm="${p.photo_id}" aria-label="Delete">✕</button></div>`).join('')}
+        <label class="eq-add"><input type="file" accept="${accept}" multiple hidden data-kind="${kind}"><span>＋ Add</span></label></div>`;
+    };
+    box.innerHTML = group('problem', 'Problem photos', 'image/*') + group('invoice', 'Invoice', 'image/*,application/pdf');
+    $$('input[type=file]', box).forEach((inp) => (inp.onchange = async (e) => {
+      const files = [...e.target.files];
+      if (!files.length) return;
+      inp.nextElementSibling.textContent = 'Uploading…';
+      try {
+        for (const f of files) {
+          const isPdf = f.type === 'application/pdf';
+          const blob = isPdf ? f : await shrinkImage(f, 2000);
+          const ext = isPdf ? 'pdf' : blob.type === 'image/jpeg' ? 'jpg' : (f.name.split('.').pop() || 'img').toLowerCase();
+          const path = `${job.equipment_id}/${job.job_id}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+          const { error } = await sb.storage.from('maintenance').upload(path, blob, { contentType: blob.type || f.type || 'application/octet-stream' });
+          if (error) throw error;
+          await q(sb.from('maint_photos').insert({ job_id: job.job_id, path, kind: inp.dataset.kind }));
+        }
+        toast(files.length > 1 ? `${files.length} files added` : 'Added');
+      } catch (err) { toast(`Upload failed: ${err.message ?? err}`, true); }
+      draw();
+    }));
+    $$('[data-rm]', box).forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this file?')) return;
+      const p = photos.find((x) => x.photo_id === Number(b.dataset.rm));
+      try { await sb.storage.from('maintenance').remove([p.path]); await q(sb.from('maint_photos').delete().eq('photo_id', p.photo_id)); } catch { /* shown */ }
+      draw();
+    }));
+  };
+  draw();
+}
+
+// opts: { intervalId } to edit, or { equipmentId } for a new one
+async function openInterval(opts, onDone) {
+  let iv = null;
+  if (opts.intervalId) [iv] = await q(sb.from('service_intervals').select('*').eq('interval_id', opts.intervalId));
+  const eq0 = refs.equipment.find((e) => e.equipment_id === (iv?.equipment_id ?? opts.equipmentId));
+  const v = iv ?? { equipment_id: opts.equipmentId ?? null, start_date: localDate(), start_hours: eq0?.hours ?? null };
+  const dlg = $('#dialog');
+  dlg.innerHTML = `<form class="form">
+    <div class="dialog-head"><h3>${iv ? 'Edit' : 'New'} service interval</h3></div>
+    <label>Equipment *<select name="equipment_id" required>${equipSelect(v.equipment_id)}</select></label>
+    <label>Service *<input name="name" required value="${esc(v.name ?? '')}" placeholder="e.g. Engine oil & filter, Gearbox oil, Grease"></label>
+    <div class="row2">
+      <label>Every (hours)<input type="number" inputmode="decimal" step="any" min="0" name="every_hours" value="${esc(v.every_hours ?? '')}"></label>
+      <label>Every (months)<input type="number" inputmode="numeric" step="1" min="1" name="every_months" value="${esc(v.every_months ?? '')}"></label>
+    </div>
+    <p class="muted small form-hint">Fill one or both. With both, it's due at whichever comes first.</p>
+    <div class="row2">
+      <label>Last done at (hours)<input type="number" inputmode="decimal" step="any" min="0" name="start_hours" value="${esc(v.start_hours ?? '')}"></label>
+      <label>Last done on<input type="date" name="start_date" value="${esc(v.start_date ?? '')}"></label>
+    </div>
+    <p class="muted small form-hint">Where tracking starts. After the first logged service, the latest one is used instead.</p>
+    <label>Notes (filter part #, oil spec…)<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
+    <div class="actions">
+      ${iv ? '<button type="button" class="danger" data-act="del">Remove</button>' : ''}
+      <span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div></form>`;
+  const form = $('form', dlg), el = form.elements;
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  el.equipment_id.onchange = () => { const e = refs.equipment.find((x) => x.equipment_id === Number(el.equipment_id.value)); if (!iv && e?.hours != null && !el.start_hours.value) el.start_hours.value = e.hours; };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const n = (k) => (el[k].value === '' ? null : Number(el[k].value));
+    const row = { equipment_id: Number(el.equipment_id.value), name: el.name.value.trim(), every_hours: n('every_hours'), every_months: n('every_months'),
+      start_hours: n('start_hours'), start_date: el.start_date.value || null, notes: el.notes.value.trim() || null };
+    if (row.every_hours == null && row.every_months == null) return toast('Enter hours, months, or both', true);
+    try {
+      if (iv) await q(sb.from('service_intervals').update(row).eq('interval_id', iv.interval_id));
+      else await q(sb.from('service_intervals').insert(row));
+      dlg.close(); toast('Saved'); onDone?.();
+    } catch { /* shown */ }
+  };
+  const del = $('[data-act=del]', dlg);
+  if (del) del.onclick = async () => {
+    if (!confirm('Remove this interval? Past service records are kept.')) return;
+    try { await q(sb.from('service_intervals').update({ active: false }).eq('interval_id', iv.interval_id)); dlg.close(); toast('Removed'); onDone?.(); } catch { /* shown */ }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+// Equipment form: its service intervals and open repairs
+async function equipmentService(form, row) {
+  const box = document.createElement('div');
+  box.className = 'eq-service';
+  form.querySelector('.actions').before(box);
+  if (!row) return;
+  const [ivRes, jobRes] = await Promise.all([
+    sb.from('service_intervals').select('*').eq('equipment_id', row.equipment_id).eq('active', true),
+    sb.from('maint_jobs').select('*').eq('equipment_id', row.equipment_id),
+  ]);
+  if (ivRes.error) return;
+  const jobs = jobRes.data ?? [], open = jobs.filter((j) => j.status !== 'done');
+  box.innerHTML = `<div class="lines-head"><b>Maintenance</b><span class="muted small">${open.length ? `${open.length} open repair${open.length > 1 ? 's' : ''}` : 'No open repairs'} · ${jobs.length - open.length} done</span></div>
+    ${ivRes.data.length ? `<ul class="list">${ivRes.data.map((iv) => { const d = serviceDue(iv, row, jobs); return `<li class="due-${d.state}"><span class="li-name">${esc(iv.name)} <span class="muted small">${everyText(iv)}</span>
+      <span class="small">${dueText(d, iv, row)}</span></span></li>`; }).join('')}</ul>` : '<p class="muted small">No service intervals.</p>'}
+    <div class="row"><button type="button" class="small" data-act="eq-iv">+ Service interval</button><button type="button" class="small" data-act="eq-job">Report a problem</button></div>`;
+  $('[data-act=eq-iv]', box).onclick = () => openInterval({ equipmentId: row.equipment_id }, null);
+  $('[data-act=eq-job]', box).onclick = () => openJob({ equipmentId: row.equipment_id }, null);
+}
+
 async function renderSetup(el) {
   const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'costs', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>
@@ -4108,6 +4441,7 @@ const VIEWS = {
   map: renderMap,
   chem: renderChem,
   work: renderWork,
+  maint: renderMaint,
   setup: renderSetup,
   tools: renderTools,
 };

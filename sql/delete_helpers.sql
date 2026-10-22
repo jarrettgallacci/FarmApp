@@ -19,7 +19,7 @@ begin
   delete from public.crop_years            where field_id = p_field;          -- harvest records go with it
   delete from public.planting_details      where event_id in (select event_id from public.work_events where field_id = p_field);
   delete from public.work_events           where field_id = p_field;
-  update public.maintenance_records set field_id = null where field_id = p_field;
+  delete from public.maintenance_records   where field_id = p_field;
   delete from public.leases                where field_id = p_field;
   delete from public.field_lineage         where field_id = p_field or predecessor_id = p_field;
   delete from public.fields                where field_id = p_field;

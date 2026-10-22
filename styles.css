@@ -573,3 +573,12 @@ a.button-like { text-decoration: none; }
 .ticket-new td { border-top: 1px dashed var(--border); }
 .hv-est { align-self: end; padding-bottom: .5rem; }
 .hv-actual:empty { display: none; }
+.job-list li.down { border-left: 4px solid var(--danger); padding-left: .6rem; }
+.job-list li.due-over { border-left: 4px solid var(--danger); padding-left: .6rem; }
+.job-list li.due-soon { border-left: 4px solid var(--amber); padding-left: .6rem; }
+.badge.bad { background: var(--danger); color: #fff; }
+.badge.warn { background: var(--amber-soft); color: var(--text); border: 1px solid var(--amber); }
+.eq-service { margin-top: .6rem; }
+.eq-service li.due-over .li-name { color: var(--danger); }
+.pdf-thumb { display: flex; align-items: center; justify-content: center; width: 100%; aspect-ratio: 1; background: var(--gray-soft); font-weight: 700; color: var(--muted); border-radius: var(--radius); }
+.job-list .li-name { display: flex; flex-direction: column; gap: .15rem; }
