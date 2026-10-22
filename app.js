@@ -202,7 +202,6 @@ const CRUD = {
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
     tabs: [{ key: 'active', label: 'Active', test: (r) => r.active }, { key: 'inactive', label: 'Sold / inactive', test: (r) => !r.active }],
-    banner: equipmentImportBanner,
   },
   crops: {
     table: 'crops', pk: 'crop_id', title: 'Crops', singular: 'crop', order: 'name',
@@ -254,7 +253,6 @@ async function renderCrud(cfg, el) {
   el.innerHTML = `
     <div class="section-head"><h2>${esc(cfg.title)}</h2>
       <button class="primary" data-act="add">Add ${esc(cfg.singular)}</button></div>
-    ${cfg.banner ? '<div data-banner></div>' : ''}
     ${cfg.tabs ? `<div class="subtabs">${cfg.tabs.map((t) => `<button class="${t.key === st.tab ? 'active' : ''}" data-tab="${t.key}">
       ${esc(t.label)} <span class="muted">${rows.filter(t.test).length}</span></button>`).join('')}</div>` : ''}
     ${cfg.search || filters.length || cfg.sorts ? `<div class="filters">
@@ -289,7 +287,6 @@ async function renderCrud(cfg, el) {
       cfg.rowAction.fn(rows.find((r) => String(r[cfg.pk]) === b.dataset.rowAct), reload)));
   };
   $('[data-act=add]', el).onclick = () => openForm(cfg, null, reload);
-  if (cfg.banner) cfg.banner($('[data-banner]', el), reload);
   $$('[data-tab]', el).forEach((b) => (b.onclick = () => { st.tab = b.dataset.tab; reload(); }));
   const search = $('.search', el);
   if (search) search.oninput = () => { st.q = search.value; draw(); };
@@ -2736,82 +2733,6 @@ async function shareFields(fields) {
 // Setup: reference lists
 // =====================================================================
 let setupTab = 'riders';
-// ---- Equipment import from the old Access database.
-// The candidates live in the private table equipment_candidates (loaded by SQL), not in this public code.
-async function equipmentImportBanner(box, reload) {
-  const { data, error } = await sb.from('equipment_candidates').select('cand_id').is('status', null);
-  if (error || !data?.length) { box.innerHTML = ''; return; }
-  box.innerHTML = `<div class="alert"><span><b>${data.length} machines from the old database</b> are waiting for you to pick which ones to bring in.</span>
-    <button class="primary small" data-act="import">Review and import</button></div>`;
-  $('[data-act=import]', box).onclick = () => openEquipmentImport(reload);
-}
-
-const CAND_GROUPS = [['self', 'Tractors, combines and other machines'], ['implement', 'Implements'], ['pivot', 'Pivots']];
-async function openEquipmentImport(onDone) {
-  const rows = await q(sb.from('equipment_candidates').select('*').is('status', null).order('grp').order('sort_order'));
-  const pick = new Set();
-  const dlg = $('#dialog');
-  dlg.classList.add('wide');
-  const draw = () => {
-    dlg.innerHTML = `<div class="form">
-      <div class="dialog-head"><div><h3>Import from the old database</h3>
-        <p class="muted small">Turn on what you still own and tap Import. Tap Not ours / sold for the rest so they stop showing up. Anything can be edited after import.</p></div>
-        <button data-act="close">Close</button></div>
-      ${CAND_GROUPS.map(([g, title]) => {
-        const list = rows.filter((r) => r.grp === g);
-        if (!list.length) return '';
-        const on = list.filter((r) => pick.has(r.cand_id)).length;
-        return `<div class="imp-group"><div class="imp-head"><h4>${esc(title)} <span class="muted">${on} of ${list.length} on</span></h4>
-          <button class="small ghost" data-all="${g}">${on === list.length ? 'None' : 'All'}</button></div>
-          ${list.map((r) => `<label class="imp-row">
-            <input type="checkbox" data-c="${r.cand_id}" ${pick.has(r.cand_id) ? 'checked' : ''}>
-            <span class="imp-main"><b>${esc(r.name)}</b> <span class="muted small">${esc([r.make, r.model].filter((x) => x && x !== r.name).join(' '))}</span>
-              ${r.serial_no || r.notes ? `<span class="muted small imp-sub">${esc([r.serial_no && 'S/N ' + r.serial_no, r.notes].filter(Boolean).join(' · '))}</span>` : ''}</span>
-          </label>`).join('')}</div>`;
-      }).join('')}
-      <div class="actions">
-        <button class="danger" data-act="dismiss" ${rows.length - pick.size ? '' : 'disabled'}>Mark the ${rows.length - pick.size} not picked as not ours / sold</button>
-        <span class="spacer"></span>
-        <button class="primary" data-act="go" ${pick.size ? '' : 'disabled'}>Import ${pick.size}</button>
-      </div></div>`;
-    $('[data-act=close]', dlg).onclick = () => dlg.close();
-    $$('[data-c]', dlg).forEach((c) => (c.onchange = () => { c.checked ? pick.add(Number(c.dataset.c)) : pick.delete(Number(c.dataset.c)); draw(); }));
-    $$('[data-all]', dlg).forEach((b) => (b.onclick = () => {
-      const list = rows.filter((r) => r.grp === b.dataset.all);
-      const allOn = list.every((r) => pick.has(r.cand_id));
-      list.forEach((r) => (allOn ? pick.delete(r.cand_id) : pick.add(r.cand_id)));
-      draw();
-    }));
-    $('[data-act=go]', dlg).onclick = async (e) => {
-      e.target.disabled = true;
-      const chosen = rows.filter((r) => pick.has(r.cand_id));
-      try {
-        await q(sb.from('equipment').insert(chosen.map((r) => ({
-          name: r.name, type: r.type, make: r.make, model: r.model, serial_no: r.serial_no, notes: r.notes, active: true }))));
-        await q(sb.from('equipment_candidates').update({ status: 'imported' }).in('cand_id', chosen.map((r) => r.cand_id)));
-        toast(`Imported ${chosen.length}`);
-        const left = rows.filter((r) => !pick.has(r.cand_id));
-        rows.splice(0, rows.length, ...left); pick.clear();
-        if (!rows.length) { dlg.close(); } else draw();
-        onDone?.();
-      } catch { e.target.disabled = false; }
-    };
-    $('[data-act=dismiss]', dlg).onclick = async () => {
-      const skip = rows.filter((r) => !pick.has(r.cand_id));
-      if (!confirm(`Hide ${skip.length} machine(s) from this list? (They are not deleted from anything; this only stops them showing up here.)`)) return;
-      try {
-        await q(sb.from('equipment_candidates').update({ status: 'dismissed' }).in('cand_id', skip.map((r) => r.cand_id)));
-        rows.splice(0, rows.length, ...rows.filter((r) => pick.has(r.cand_id)));
-        if (!rows.length) dlg.close(); else draw();
-        onDone?.();
-      } catch { /* shown */ }
-    };
-  };
-  draw();
-  dlg.onclose = () => dlg.classList.remove('wide');
-  if (!dlg.open) dlg.showModal();
-}
-
 async function renderSetup(el) {
   const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>

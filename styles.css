@@ -480,12 +480,3 @@ a.button-like { text-decoration: none; }
 .wx-fields { border: 1px solid var(--border); border-radius: 8px; padding: .5rem .7rem; }
 .wx-fields summary { cursor: pointer; font-weight: 600; }
 .wx-fields[open] summary { margin-bottom: .5rem; }
-
-/* Equipment import */
-.imp-group { border-top: 1px solid var(--border); padding-top: .6rem; margin-top: .4rem; }
-.imp-head { display: flex; align-items: center; justify-content: space-between; }
-.imp-head h4 { margin: 0; }
-.imp-row, .form .imp-row { display: flex; flex-direction: row; align-items: center; gap: .8rem; padding: .45rem .2rem; cursor: pointer; }
-.imp-row input { flex-shrink: 0; margin: 0; }
-.imp-main { display: flex; flex-direction: column; }
-.imp-sub { margin-top: .1rem; }
