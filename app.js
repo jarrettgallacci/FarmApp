@@ -198,10 +198,18 @@ const CRUD = {
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
       { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
+      { key: 'verified_on', label: 'Last checked (seen on the farm)', listLabel: 'Checked', type: 'date', list: true },
+      { key: 'photos', label: 'Photos', list: true, form: false, compute: (r) => (r.equipment_photos?.[0]?.count ? `📷 ${r.equipment_photos[0].count}` : '') },
       { key: 'active', label: 'Active', type: 'checkbox', default: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
     tabs: [{ key: 'active', label: 'Active', test: (r) => r.active }, { key: 'inactive', label: 'Sold / inactive', test: (r) => !r.active }],
+    select: '*, equipment_photos(count)',
+    sorts: [['name', 'Name', (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true })],
+      ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
+      ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
+    reopenAfterCreate: 'Saved. You can add photos now.',
+    afterRender: (form, row) => equipmentPhotos(form, row),
   },
   crops: {
     table: 'crops', pk: 'crop_id', title: 'Crops', singular: 'crop', order: 'name',
@@ -243,7 +251,7 @@ function display(c, r) {
 }
 
 async function renderCrud(cfg, el) {
-  let req = sb.from(cfg.table).select('*');
+  let req = sb.from(cfg.table).select(cfg.select ?? '*');
   for (const col of [].concat(cfg.order)) req = req.order(col, { nullsFirst: false });
   const rows = await q(req);
   const cols = cfg.columns.filter((c) => c.list);
@@ -340,7 +348,7 @@ function openForm(cfg, row, onDone) {
         <button type="submit" class="primary">Save</button>
       </div></form>`;
   const form = $('form', dlg);
-  cfg.afterRender?.(form);
+  cfg.afterRender?.(form, row);
 
   const finish = async (msg) => {
     dlg.close();
@@ -355,7 +363,13 @@ function openForm(cfg, row, onDone) {
     cfg.beforeSave?.(data);
     try {
       if (row) await q(sb.from(cfg.table).update(data).eq(cfg.pk, row[cfg.pk]));
-      else await q(sb.from(cfg.table).insert(data));
+      else if (cfg.reopenAfterCreate) {
+        const created = await q(sb.from(cfg.table).insert(data).select().single());
+        if (cfg.refreshRefs) await loadRefs();
+        toast(cfg.reopenAfterCreate);
+        onDone();
+        return openForm(cfg, created, onDone);
+      } else await q(sb.from(cfg.table).insert(data));
       await finish('Saved');
     } catch { /* error already shown */ }
   };
@@ -2733,6 +2747,73 @@ async function shareFields(fields) {
 // Setup: reference lists
 // =====================================================================
 let setupTab = 'riders';
+// ---- Equipment photos (private 'equipment' storage bucket)
+async function shrinkImage(file, max = 1600) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    return await new Promise((res) => c.toBlob((b) => res(b ?? file), 'image/jpeg', 0.85));
+  } catch { return file; }   // browser can't read it (e.g. HEIC on a PC): upload as-is
+}
+
+async function equipmentPhotos(form, row) {
+  const box = document.createElement('div');
+  box.className = 'eq-photos';
+  form.querySelector('.actions').before(box);
+  if (!row) { box.innerHTML = '<p class="muted small">Save first, then you can add photos.</p>'; return; }
+  const draw = async () => {
+    const photos = await q(sb.from('equipment_photos').select('*').eq('equipment_id', row.equipment_id).order('taken_at'));
+    const urls = photos.length ? (await sb.storage.from('equipment').createSignedUrls(photos.map((p) => p.path), 3600)).data ?? [] : [];
+    box.innerHTML = `<div class="lines-head"><b>Photos</b><span class="muted small">${photos.length ? 'Tap a photo to open it full size' : 'None yet'}</span></div>
+      <div class="eq-grid">${photos.map((p, i) => `<div class="eq-thumb">
+          <a href="${esc(urls[i]?.signedUrl ?? '#')}" target="_blank" rel="noopener"><img src="${esc(urls[i]?.signedUrl ?? '')}" alt="${esc(row.name)} photo"></a>
+          <span class="muted small">${esc(new Date(p.taken_at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }))}</span>
+          <button type="button" class="icon" data-rm-photo="${p.photo_id}" aria-label="Delete photo">✕</button></div>`).join('')}
+        <label class="eq-add"><input type="file" accept="image/*" multiple hidden><span>＋ Add photo</span></label>
+      </div>
+      <div class="row"><button type="button" class="small" data-act="checked">Mark checked today</button></div>`;
+    $('.eq-add input', box).onchange = async (e) => {
+      const files = [...e.target.files];
+      if (!files.length) return;
+      $('.eq-add span', box).textContent = 'Uploading…';
+      try {
+        for (const f of files) {
+          const blob = await shrinkImage(f);
+          const ext = blob.type === 'image/jpeg' ? 'jpg' : (f.name.split('.').pop() || 'img').toLowerCase();
+          const path = `${row.equipment_id}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
+          const { error } = await sb.storage.from('equipment').upload(path, blob, { contentType: blob.type || f.type || 'application/octet-stream' });
+          if (error) throw error;
+          await q(sb.from('equipment_photos').insert({ equipment_id: row.equipment_id, path }));
+        }
+        await q(sb.from('equipment').update({ verified_on: localDate() }).eq('equipment_id', row.equipment_id));
+        if (form.elements.verified_on) form.elements.verified_on.value = localDate();
+        toast(files.length > 1 ? `${files.length} photos added` : 'Photo added');
+      } catch (err) { toast(`Upload failed: ${err.message ?? err}`, true); }
+      draw();
+    };
+    $('[data-act=checked]', box).onclick = async () => {
+      try {
+        await q(sb.from('equipment').update({ verified_on: localDate() }).eq('equipment_id', row.equipment_id));
+        if (form.elements.verified_on) form.elements.verified_on.value = localDate();
+        toast('Marked checked today');
+      } catch { /* shown */ }
+    };
+    $$('[data-rm-photo]', box).forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this photo?')) return;
+      const p = photos.find((x) => x.photo_id === Number(b.dataset.rmPhoto));
+      try {
+        await sb.storage.from('equipment').remove([p.path]);
+        await q(sb.from('equipment_photos').delete().eq('photo_id', p.photo_id));
+      } catch { /* shown */ }
+      draw();
+    }));
+  };
+  draw();
+}
+
 async function renderSetup(el) {
   const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>

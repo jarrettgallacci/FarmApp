@@ -480,3 +480,12 @@ a.button-like { text-decoration: none; }
 .wx-fields { border: 1px solid var(--border); border-radius: 8px; padding: .5rem .7rem; }
 .wx-fields summary { cursor: pointer; font-weight: 600; }
 .wx-fields[open] summary { margin-bottom: .5rem; }
+
+/* Equipment photos */
+.eq-photos { border-top: 1px solid var(--border); padding-top: .6rem; }
+.eq-grid { display: grid; gap: .6rem; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); margin: .4rem 0 .6rem; }
+.eq-thumb { position: relative; display: flex; flex-direction: column; gap: .2rem; }
+.eq-thumb img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); }
+.eq-thumb [data-rm-photo] { position: absolute; top: 4px; right: 4px; background: rgba(255,255,255,.9); }
+.eq-add { display: flex; align-items: center; justify-content: center; aspect-ratio: 1; border: 2px dashed var(--border); border-radius: 8px; cursor: pointer; color: var(--accent); font-weight: 600; text-align: center; }
+.eq-add:hover { border-color: var(--accent); }
