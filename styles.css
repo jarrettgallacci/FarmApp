@@ -623,3 +623,4 @@ label.link { color: var(--accent); text-decoration: underline; }
 .note-edit input { flex: 1; min-width: 0; }
 .add-step { display: flex; flex-direction: column; gap: .5rem; margin: .8rem 0; }
 .skipped summary { cursor: pointer; color: var(--muted); margin: .4rem 0; }
+.cl-sec { margin: .9rem 0 .2rem; padding-bottom: .2rem; border-bottom: 1px solid var(--border); }
