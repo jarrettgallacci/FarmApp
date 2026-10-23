@@ -277,7 +277,7 @@ const CRUD = {
     columns: [
       { key: 'num_list', label: 'No.', list: true, form: false, compute: (r) => (eqNum(r) != null ? `#${eqNum(r)}` : '') },
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
-      { key: 'type', label: 'Type (tractor, pickup, disk, planter, pivot, pump...)', listLabel: 'Type', type: 'text', list: true },
+      { key: 'type', label: 'Type', listLabel: 'Type', type: 'select', list: true, required: true, options: () => equipTypeOptions() },
       { key: 'fields_list', label: 'Fields', list: true, form: false, compute: (r) => eqFields(r).join(', ') },
       { key: 'make', label: 'Make', type: 'text', list: true },
       { key: 'model', label: 'Model', type: 'text', list: true },
@@ -3474,11 +3474,20 @@ async function shareFields(fields) {
 // =====================================================================
 let setupTab = 'riders';
 // ---- "Used for" tags: which work types a machine can do. Saved as you tap.
+// Equipment types for the dropdown, in number-band order; any other type already in use is kept.
+const EQ_TYPES = ['Tractor', 'Combine', 'Swather / windrower', 'Sprayer', 'Pickup', 'Truck', 'Trailer', 'Loader', 'Forklift', 'Scraper', 'Blade',
+  'Disk', 'Disk ripper', 'Ripper', 'Plough', 'Rototiller', 'Packer', 'Skewtreader', 'Shredder', 'Planter', 'Drill',
+  'Cultivator', 'Corrugator', 'Dammer-diker', 'Toolbar', 'Bean cutter', 'Other', 'Pivot', 'Solid set', 'Handline', 'Pump', 'Mainline', 'Well', 'Building'];
+function equipTypeOptions() {
+  const used = refs.equipment.map((e) => (e.type ?? '').trim()).filter(Boolean);
+  const extra = [...new Set(used.filter((t) => !EQ_TYPES.some((x) => x.toLowerCase() === t.toLowerCase())))].sort();
+  return [...EQ_TYPES, ...extra].map((t) => [t, t]);
+}
 // Pump details only show for pumps.
 function pumpOnlyFields(form) {
   const keys = ['hp', 'frame_size', 'meter_no', 'vfd'].filter((k) => form.elements[k]);
   const sync = () => { const pump = /pump/i.test(form.elements.type?.value ?? ''); keys.forEach((k) => { form.elements[k].closest('label').hidden = !pump; }); };
-  form.elements.type?.addEventListener('input', sync); sync();
+  form.elements.type?.addEventListener('input', sync); form.elements.type?.addEventListener('change', sync); sync();
 }
 // Suggest the next free number for the type typed in.
 function equipmentNumberHint(form, row) {
@@ -3494,7 +3503,7 @@ function equipmentNumberHint(form, row) {
     hint.innerHTML = n ? `Next free ${esc(sub)} number: <button type="button" class="link">${n}</button>` : `The ${esc(sub)} range is full.`;
     $('button', hint)?.addEventListener('click', () => { inp.value = n; draw(); });
   };
-  typeIn?.addEventListener('input', draw); inp.addEventListener('input', draw); draw();
+  typeIn?.addEventListener('input', draw); typeIn?.addEventListener('change', draw); inp.addEventListener('input', draw); draw();
 }
 
 // Fields a pivot / pump / well serves.
