@@ -3959,6 +3959,12 @@ async function myOperator() {
   if (myEmail == null) myEmail = ((await sb.auth.getUser()).data?.user?.email ?? '').toLowerCase();
   return refs.operators.find((o) => (o.login_email ?? '').trim().toLowerCase() === myEmail) ?? null;
 }
+// Seasonal tasks are labelled by field; the machine is the small print.
+const sysKind = (e) => SYS_TYPES.find(([k]) => k === sysType(e))?.[1]?.replace(/s$/, '') ?? e?.type ?? '';
+const taskTitle = (e) => (e ? (eqFields(e).length ? eqFields(e).join(', ') : e.name) : '?');
+const taskSub = (e) => (e ? [sysKind(e), eqNum(e) != null ? `#${eqNum(e)}` : '', eqFields(e).length ? e.name : ''].filter(Boolean).join(' · ') : '');
+const fieldRank = (e) => { const fs = (e?.equipment_fields ?? []).map((x) => fieldsInOrder().findIndex((f) => f.field_id === x.field_id)).filter((i) => i >= 0); return fs.length ? Math.min(...fs) : 1e6; };
+const taskSort = (a, b) => fieldRank(a) - fieldRank(b) || (SYS_TYPES.findIndex(([k]) => k === sysType(a)) - SYS_TYPES.findIndex(([k]) => k === sysType(b))) || eqSort(a, b);
 const stepsFor = (steps, eqId) => {
   const t = sysType(refs.equipment.find((e) => e.equipment_id === eqId));
   return steps.filter((st) => st.active && (st.equipment_id === eqId || (st.equipment_id == null && (!st.system_type || st.system_type === t))))
@@ -3986,7 +3992,7 @@ async function renderSeasonal(el) {
   if (run) {
     const p = procOf(run.procedure_id);
     const tasks = [...run.procedure_tasks].filter((t) => !s.mine || (me && t.assigned_to === me.operator_id))
-      .sort((a, b) => eqSort(refs.equipment.find((e) => e.equipment_id === a.equipment_id) ?? {}, refs.equipment.find((e) => e.equipment_id === b.equipment_id) ?? {}));
+      .sort((a, b) => taskSort(refs.equipment.find((e) => e.equipment_id === a.equipment_id) ?? {}, refs.equipment.find((e) => e.equipment_id === b.equipment_id) ?? {}));
     const nDone = run.procedure_tasks.filter((t) => t.status === 'done').length;
     el.innerHTML = `${maintTabs()}
       <div class="section-head"><h2>${esc(p?.name ?? 'Procedure')} · ${run.season}</h2>
@@ -3994,9 +4000,9 @@ async function renderSeasonal(el) {
       <p class="muted small">${nDone} of ${run.procedure_tasks.length} done · started ${fmtDateY(run.started_on)}${run.due_on ? ` · due ${fmtDateY(run.due_on)}` : ''}</p>
       <div class="progress"><span style="width:${run.procedure_tasks.length ? (nDone / run.procedure_tasks.length) * 100 : 0}%"></span></div>
       <div class="filters"><label class="check"><input type="checkbox" data-mine ${s.mine ? 'checked' : ''} ${me ? '' : 'disabled'}> Only my tasks${me ? '' : ' <span class="muted small">(set your sign-in email under Setup → Operators)</span>'}</label></div>
-      <div class="card table-wrap"><table><thead><tr><th>System</th><th>Assigned</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
+      <div class="card table-wrap"><table><thead><tr><th>Field</th><th>Assigned</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
       ${tasks.map((t) => { const e = refs.equipment.find((x) => x.equipment_id === t.equipment_id); const pr = progress(t, p); return `<tr>
-        <td><b>${esc(e ? eqLabel(e) : '?')}</b></td>
+        <td><b>${esc(taskTitle(e))}</b><div class="muted small">${esc(taskSub(e))}</div></td>
         <td><select data-assign="${t.task_id}"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === t.assigned_to).map((o) => `<option value="${o.operator_id}" ${o.operator_id === t.assigned_to ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></td>
         <td>${pr.done}/${pr.n}</td><td><span class="badge ${t.status === 'done' ? 'new' : t.status === 'in_progress' ? 'down' : 'off'}">${TASK_STATUS[t.status]}</span>${t.completed_on ? ` <span class="muted small">${fmtDateY(t.completed_on)}</span>` : ''}</td>
         <td class="r"><button class="small" data-task="${t.task_id}">Open</button></td></tr>`; }).join('')}
@@ -4026,7 +4032,7 @@ async function renderSeasonal(el) {
         <button class="primary" data-act="start" ${procs.some((p) => p.active) ? '' : 'disabled'}>Start a round</button>
       </div></div>
     ${myOpen.length ? `<div class="card"><h3>My tasks</h3><ul class="list">${myOpen.map(({ t, r }) => { const e = refs.equipment.find((x) => x.equipment_id === t.equipment_id); const pr = progress(t, procOf(r.procedure_id));
-      return `<li><span class="li-name"><b>${esc(e ? eqLabel(e) : '?')}</b> <span class="muted small">${esc(procOf(r.procedure_id)?.name ?? '')} · ${pr.done}/${pr.n}</span></span>
+      return `<li><span class="li-name"><b>${esc(taskTitle(e))}</b> <span class="muted small">${esc(taskSub(e))} · ${esc(procOf(r.procedure_id)?.name ?? '')} · ${pr.done}/${pr.n}</span></span>
       <span class="li-value"><button class="small primary" data-mytask="${t.task_id}" data-proc="${r.procedure_id}">Open</button></span></li>`; }).join('')}</ul></div>` : ''}
     ${!procs.length ? '<div class="empty">No procedures yet. Tap <b>Procedures</b> to write your first checklist (for example, Pivot fall shutdown).</div>'
       : runs.length ? `<ul class="list card">${runs.map((r) => { const p = procOf(r.procedure_id); const n = r.procedure_tasks.length, d = r.procedure_tasks.filter((t) => t.status === 'done').length;
@@ -4066,7 +4072,7 @@ function startRound(procs, onDone, run = null) {
     const list = refs.equipment.filter((e) => e.active && procScopeTest(p?.applies_to ?? 'all')(e) && !have.has(e.equipment_id)).sort(eqSort);
     const groups = [...SYS_TYPES.map(([k, l]) => [l, list.filter((e) => sysType(e) === k)]), ['Other', list.filter((e) => !sysType(e))]].filter(([, es]) => es.length);
     $('#sys-list', dlg).innerHTML = list.length ? groups.map(([l, es]) => `<div class="sys-group"><b>${esc(l)}</b> <span class="muted small">${es.length}</span>
-      ${es.map((e) => `<label class="check"><input type="checkbox" value="${e.equipment_id}" checked> ${esc(eqLabel(e))}</label>`).join('')}</div>`).join('')
+      ${[...es].sort(taskSort).map((e) => `<label class="check"><input type="checkbox" value="${e.equipment_id}" checked> <b>${esc(taskTitle(e))}</b> <span class="muted small">${esc(taskSub(e))}</span></label>`).join('')}</div>`).join('')
       : `<p class="muted small">No ${run ? 'more ' : ''}active ${esc(PROC_SCOPE.find(([k]) => k === p?.applies_to)?.[1]?.toLowerCase() ?? 'systems')} to add.</p>`;
   };
   el.procedure_id.onchange = draw; draw();
@@ -4164,7 +4170,7 @@ async function openTask(taskId, proc, onDone) {
   const draw = () => {
     const lv = live(), skipped = steps.filter((st) => notes.get(st.step_id)?.skip);
     dlg.innerHTML = `<div class="form task-form">
-      <div class="dialog-head"><h3>${esc(eq ? eqLabel(eq) : '?')}</h3><p class="muted small">${esc(proc?.name ?? '')}${proc?.notes ? ` · ${esc(proc.notes)}` : ''}</p></div>
+      <div class="dialog-head"><h3>${esc(taskTitle(eq))}</h3><p class="muted small">${esc(taskSub(eq))} · ${esc(proc?.name ?? '')}${proc?.notes ? ` · ${esc(proc.notes)}` : ''}</p></div>
       <p><b>${lv.filter((st) => checks.has(st.step_id)).length}</b> of ${lv.length} steps done</p>
       <ol class="checklist">${lv.map((st) => { const c = checks.get(st.step_id), n = notes.get(st.step_id); return `<li class="${c ? 'done' : ''}">
         <label class="check"><input type="checkbox" data-step="${st.step_id}" ${c ? 'checked' : ''}><span>${esc(st.text)}${st.equipment_id ? ' <span class="badge up">This system</span>' : ''}</span></label>
