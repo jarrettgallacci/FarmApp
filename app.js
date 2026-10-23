@@ -407,7 +407,7 @@ async function renderCrud(cfg, el) {
         `<option value="${esc(v)}" ${st.f[f.key] === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`).join('')}
       ${cfg.sorts ? `<select data-sort>${cfg.sorts.map(([k, t]) => `<option value="${k}" ${st.sort === k ? 'selected' : ''}>Sort: ${esc(t)}</option>`).join('')}</select>` : ''}
     </div><p class="muted small" data-count></p>` : ''}
-    <div class="card table-wrap crud-wrap"><table class="crud">
+    <div class="card table-wrap crud-wrap"><table class="crud m-cards">
       <thead><tr>${cols.map((c) => `<th>${esc(c.listLabel ?? c.label)}</th>`).join('')}<th></th></tr></thead>
       <tbody></tbody></table></div>`;
 
@@ -1345,7 +1345,7 @@ async function openFieldHistory(fieldId, onChange) {
         f.acres != null && num(f.acres, 0) + ' acres', esc(tenureOf(f))].filter(Boolean).join(' · ')}</p></div>
       <span class="row"><button class="small" data-act="share">Share location</button>
       <button class="primary small" data-act="add">Add crop year</button></span></div>
-    ${rows.length ? `<div class="table-wrap"><table>
+    ${rows.length ? `<div class="table-wrap"><table class="m-cards">
       <thead><tr><th>Season</th><th>Crop</th><th>Variety</th><th>Planted</th><th class="r">Yield</th><th></th></tr></thead>
       <tbody>${rows.map((r) => `<tr>
         <td><b>${seasonSpan(r)}</b>${r.multi_year && r.end_season == null ? ' <span class="muted small">still in</span>' : ''}${r.sequence > 1 ? ` <span class="muted small">${SEQ[r.sequence] ?? ''}</span>` : ''}</td>
@@ -2217,7 +2217,7 @@ async function renderWork(el) {
       <select data-f="op"><option value="">All work</option>${refs.workTypes.map((w) => `<option value="${esc(w.operation)}" ${s.op === w.operation ? 'selected' : ''}>${esc(workLabel(w.operation))}</option>`).join('')}</select>
     </div>
     <p class="muted small">${rows.length} of ${data.length} record(s) in ${s.season}.${rows.some((r) => r.cost_total != null) ? ` Work cost shown: <b>${money(rows.reduce((n, r) => n + Number(r.cost_total || 0), 0), 0)}</b>.` : ''}${rows.some((r) => r.custom_total != null) ? ` Custom work charged: <b>${money(rows.reduce((n, r) => n + Number(r.custom_total || 0), 0), 0)}</b>.` : ''}</p>
-    ${rows.length ? `<div class="card table-wrap"><table>
+    ${rows.length ? `<div class="card table-wrap"><table class="m-cards">
       <thead><tr><th>Date</th><th>Field</th><th>Work</th><th>Equipment</th><th class="r">Acres</th><th>By</th><th></th></tr></thead>
       <tbody>${rows.map((r) => {
         const d = r.planting_details?.[0] ?? r.planting_details;
@@ -2659,7 +2659,7 @@ async function renderHarvest(el) {
       </div></div>
     <div class="filters"><input type="search" data-f="q" placeholder="Search field or crop…" value="${esc(s.q)}"></div>
     <p class="muted small">Dirt = scale tickets. Clean = settlement, or an estimate (<i>est.</i>) from the clean-out % until the settlement comes in.</p>
-    ${crops.length ? `<div class="card table-wrap"><table class="harvest-table">
+    ${crops.length ? `<div class="card table-wrap"><table class="harvest-table m-cards">
       <thead><tr><th>Field</th><th>Crop</th><th>Passes</th><th class="r">Dirt lb</th><th class="r">Clean-out</th><th class="r">Clean lb</th><th class="r">Clean lb/ac</th><th></th></tr></thead>
       <tbody>${crops.map((cy) => {
         const y = yieldOf(cy, hist), ac = cyAcres(cy), ps = passesFor(cy);
@@ -3916,7 +3916,7 @@ async function renderMaint(el) {
         <span class="li-value"><button class="small" data-iv="${iv.interval_id}">Edit</button> <button class="small primary" data-svc="${iv.interval_id}">Done</button></span></li>`).join('')}</ul>`
       : '<div class="empty">No service intervals yet. Add one with <b>+ Interval</b>, or from a machine under Setup → Equipment.</div>') : ''}
     ${s.view === 'history' ? (done.length ? `<p class="muted small">${done.length} job(s) in ${s.season}${done.some((j) => j.cost != null) ? ` · total <b>${money(done.reduce((n, j) => n + Number(j.cost || 0), 0))}</b>` : ''}</p>
-      <div class="card table-wrap"><table><thead><tr><th>Date</th><th>Equipment</th><th>Job</th><th class="r">Hours</th><th class="r">Cost</th><th></th></tr></thead><tbody>
+      <div class="card table-wrap"><table class="m-cards"><thead><tr><th>Date</th><th>Equipment</th><th>Job</th><th class="r">Hours</th><th class="r">Cost</th><th></th></tr></thead><tbody>
       ${done.map((j) => `<tr><td class="nowrap">${fmtDateY(j.completed_on ?? j.reported_on)}</td><td>${esc(eqOf(j.equipment_id) ? eqLabel(eqOf(j.equipment_id)) : '')}</td>
         <td>${esc(j.title)} <span class="muted small">${j.kind === 'service' ? 'service' : 'repair'}${photoN(j, 'invoice') ? ' · 🧾' : ''}</span></td>
         <td class="r">${j.hours_at != null ? num(j.hours_at, 0) : ''}</td><td class="r">${money(j.cost)}</td>
@@ -4258,7 +4258,7 @@ async function renderSeasonal(el) {
       <p class="muted small">${nDone} of ${run.procedure_tasks.length} done · started ${fmtDateY(run.started_on)}${run.due_on ? ` · due ${fmtDateY(run.due_on)}` : ''}</p>
       <div class="progress"><span style="width:${run.procedure_tasks.length ? (nDone / run.procedure_tasks.length) * 100 : 0}%"></span></div>
       <div class="filters"><label class="check"><input type="checkbox" data-mine ${s.mine ? 'checked' : ''} ${me ? '' : 'disabled'}> Only my tasks${me ? '' : ' <span class="muted small">(set your sign-in email under Setup → Operators)</span>'}</label></div>
-      <div class="card table-wrap"><table><thead><tr><th>Field</th><th>Assigned</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
+      <div class="card table-wrap"><table class="m-cards run-table"><thead><tr><th>Field</th><th>Assigned</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
       ${tasks.map((t) => { const e = refs.equipment.find((x) => x.equipment_id === t.equipment_id); const pr = progress(t, p); return `<tr>
         <td><b>${esc(taskTitle(e))}</b><div class="muted small">${esc(taskSub(e))}</div></td>
         <td><select data-assign="${t.task_id}"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === t.assigned_to).map((o) => `<option value="${o.operator_id}" ${o.operator_id === t.assigned_to ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></td>
@@ -5620,6 +5620,16 @@ $('#account').onclick = async () => {
   dlg.showModal();
 };
 $$('nav [data-view]').forEach((b) => (b.onclick = () => show(b.dataset.view)));
+
+// Phones: list rows are cards; tapping anywhere on a row opens it (its Edit / Open button).
+const PHONE = window.matchMedia('(max-width: 700px)');
+document.addEventListener('click', (e) => {
+  if (!PHONE.matches) return;
+  const tr = e.target.closest('table.m-cards tbody tr');
+  if (!tr || e.target.closest('button, a, input, select, textarea, label')) return;
+  const btn = tr.querySelector('[data-edit], [data-open], [data-job], [data-task], [data-edit-cy]') ?? [...tr.querySelectorAll('td:last-child button')].at(-1);
+  btn?.click();
+});
 
 window.addEventListener('beforeunload', (e) => {
   if (currentView === 'order' && orderState.dirty) { e.preventDefault(); e.returnValue = ''; }

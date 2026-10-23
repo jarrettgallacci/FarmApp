@@ -637,3 +637,56 @@ h4.overdue { color: var(--danger); }
 .charge { color: var(--green); font-weight: 600; }
 .home-head { display: flex; justify-content: space-between; align-items: flex-end; gap: .8rem; flex-wrap: wrap; }
 .scan-btn { padding: .6rem 1rem; font-weight: 600; }
+
+/* ---------- Phones ---------- */
+@media (max-width: 700px) {
+  /* No zoom-in when a box is tapped (iOS zooms below 16px), bigger tap targets */
+  input, select, textarea { font-size: 16px; }
+  button { min-height: 40px; }
+  button.small { min-height: 34px; }
+  button.icon { min-height: 0; }
+  main#view { padding-left: 12px; padding-right: 12px; }
+  .section-head h2 { font-size: 1.25rem; }
+  .filters input { flex: 1 1 100%; }
+  .filters select { flex: 1 1 calc(50% - .25rem); min-width: 0; }
+  .subtabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -12px; margin-right: -12px; padding: 0 12px; }
+  .subtabs::-webkit-scrollbar { display: none; }
+  .subtabs button { white-space: nowrap; flex: none; }
+  .section-head { align-items: center; }
+  .section-head .row { flex: 1 1 auto; }
+  .row4 { grid-template-columns: 1fr 1fr; }
+
+  /* Lists become tappable cards: the first three facts, a chevron, tap to open */
+  .table-wrap:has(table.m-cards) { overflow-x: visible; }
+  table.m-cards, table.m-cards tbody { display: block; width: 100%; }
+  table.m-cards thead { display: none; }
+  table.m-cards tr { display: block; position: relative; padding: .7rem 2.2rem .7rem .2rem; border-bottom: 1px solid var(--border); cursor: pointer; }
+  table.m-cards tbody tr:last-child { border-bottom: 0; }
+  table.m-cards td { display: none; padding: 0; border: 0; white-space: normal; }
+  table.m-cards td:nth-child(1), table.m-cards td:nth-child(2), table.m-cards td:nth-child(3) { display: inline; }
+  table.m-cards td:nth-child(1) { font-weight: 600; }
+  table.m-cards td:nth-child(2)::before, table.m-cards td:nth-child(3)::before { content: " · "; color: var(--muted); font-weight: 400; }
+  table.m-cards td:nth-child(3) { color: var(--muted); font-size: .88rem; }
+  table.m-cards td:empty { display: none; }
+  table.m-cards td:nth-child(1):empty + td::before, table.m-cards td:nth-child(2):empty + td::before { content: none; }
+  table.m-cards td div { font-size: .85rem; }
+  table.m-cards td[colspan] { display: block; }
+  table.m-cards td[colspan]::before { content: none; }
+  /* Action cell: keep extra buttons (Done, Label…), hide the plain Edit/Open since the row opens it */
+  table.m-cards td:last-child { display: flex; position: absolute; right: 1.6rem; top: 50%; transform: translateY(-50%); gap: .3rem; }
+  table.m-cards td:last-child::before { content: none; }
+  table.m-cards td:last-child [data-edit], table.m-cards td:last-child [data-open], table.m-cards td:last-child [data-job], table.m-cards td:last-child [data-task], table.m-cards td:last-child [data-edit-cy] { display: none; }
+  table.m-cards tr:has(td:last-child button:not([data-edit]):not([data-open]):not([data-job]):not([data-task]):not([data-edit-cy])) { padding-right: 6.5rem; }
+  table.m-cards tbody tr:not(:has(td[colspan]))::after { content: "›"; position: absolute; right: .4rem; top: 50%; transform: translateY(-50%); font-size: 1.4rem; color: var(--muted); }
+  table.run-table td:nth-child(2) { display: none; }
+  table.run-table td:nth-child(3)::before { content: " · "; }
+  table.run-table td:nth-child(4) { display: inline; }
+  table.run-table td:nth-child(4)::before { content: " "; }
+
+  /* Pop-ups fill the screen, scroll on their own, and keep Save/Cancel in reach */
+  dialog, dialog.wide { width: 100vw; max-width: 100vw; max-height: 100dvh; height: 100dvh; margin: 0; border-radius: 0; border: 0; padding: 1rem 1rem 0; }
+  dialog > form, dialog > .form { min-height: calc(100dvh - 1rem); display: flex; flex-direction: column; }
+  dialog .actions:last-child { position: sticky; bottom: 0; margin-top: auto; background: var(--surface); padding: .7rem 0 calc(.7rem + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); z-index: 2; }
+}
+dialog { overflow-y: auto; overscroll-behavior: contain; }
+html:has(dialog[open]) { overflow: hidden; }
