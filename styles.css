@@ -632,3 +632,6 @@ label.btn { display: flex; align-items: center; justify-content: center; border:
 .hours-row label { display: flex; flex-direction: column; gap: .2rem; }
 h4.overdue { color: var(--danger); }
 .work-form .seg { margin-bottom: .3rem; }
+.custom-box { display: flex; flex-direction: column; gap: .5rem; border: 1px dashed var(--border); border-radius: var(--radius); padding: .6rem .7rem; }
+.gps-row { flex-wrap: wrap; }
+.charge { color: var(--green); font-weight: 600; }

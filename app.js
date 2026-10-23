@@ -35,7 +35,7 @@ async function q(request) {
 // =====================================================================
 // Reference data used across screens
 // =====================================================================
-const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [], workTypes: [], equipment: [], appRates: [] };
+const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [], workTypes: [], equipment: [], appRates: [], customers: [] };
 
 async function loadRefs() {
   const [riders, turnouts, fields, leases, crops, chemicals, operators] = await Promise.all([
@@ -53,6 +53,7 @@ async function loadRefs() {
   const eqRes = await sb.from('equipment').select('*, equipment_work_types(operation), equipment_fields(field_id)').order('name');
   refs.equipment = (eqRes.error ? (await sb.from('equipment').select('*, equipment_work_types(operation)').order('name')).data : eqRes.data) ?? [];
   refs.appRates = (await sb.from('application_rates').select('*')).data ?? [];
+  refs.customers = (await sb.from('customers').select('*').order('name')).data ?? [];
 }
 // ---- Cost rates ($/acre). Machine override first, then the work type's / application method's rate.
 const money = (v, d = 2) => (v == null || v === '' ? '' : '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }));
@@ -160,6 +161,9 @@ function leasedOutIn(fieldId, season) {
 }
 const fieldById = (id) => refs.fields.find((f) => f.field_id === Number(id));
 const fieldName = (id) => fieldById(id)?.name ?? '';
+const customerName = (id) => refs.customers.find((c) => c.customer_id === id)?.name ?? '';
+// Where a work record happened: one of our fields, or a customer's ground.
+const workWhere = (r) => (r.customer_id ? `${customerName(r.customer_id)}${r.location ? ' · ' + r.location : ''}` : fieldName(r.field_id));
 
 // =====================================================================
 // Generic list + edit screens (fields and setup tables)
@@ -333,6 +337,19 @@ const CRUD = {
       { key: 'color', label: 'Map color', type: 'color', list: true,
         fallback: (row) => (row ? PALETTE[row.crop_id % PALETTE.length] : '#2563a8') },
       { key: 'active', label: 'Active (shows in the crop list)', type: 'checkbox', default: true, list: true },
+    ],
+  },
+  customers: {
+    table: 'customers', pk: 'customer_id', title: 'Customers', singular: 'customer', order: 'name',
+    allowDelete: true, refreshRefs: true, search: true,
+    columns: [
+      { key: 'name', label: 'Name', type: 'text', required: true, list: true },
+      { key: 'phone', label: 'Phone', type: 'text', list: true },
+      { key: 'email', label: 'Email', type: 'text' },
+      { key: 'address', label: 'Address', type: 'textarea' },
+      { key: 'default_rate', label: 'Usual rate ($/acre)', listLabel: '$/ac', type: 'number', step: '0.01', list: true },
+      { key: 'notes', label: 'Notes', type: 'textarea' },
+      { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
     ],
   },
   leases: {
@@ -1044,11 +1061,11 @@ async function drawSchedule(box, reload) {
   if (!box) return;
   const today = localDate(), until = addDays(today, 14);
   const [wRes, cRes] = await Promise.all([
-    sb.from('work_events').select('event_id, field_id, operation, performed_on, equipment_id, tractor_id, harvest_stage').eq('status', 'planned').lte('performed_on', until).order('performed_on'),
+    sb.from('work_events').select('*').eq('status', 'planned').lte('performed_on', until).order('performed_on'),
     sb.from('chemical_events').select('event_id, field_id, applied_on, method, chemical_event_products(chemical_id)').eq('status', 'planned').lte('applied_on', until).order('applied_on'),
   ]);
   const items = [
-    ...(wRes.data ?? []).map((w) => ({ date: w.performed_on, kind: 'work', id: w.event_id, field: w.field_id,
+    ...(wRes.data ?? []).map((w) => ({ date: w.performed_on, kind: 'work', id: w.event_id, field: w.field_id, where: workWhere(w), custom: !!w.customer_id,
       what: `${workLabel(w.operation)}${w.harvest_stage ? ' · ' + stageName(w.harvest_stage) : ''}`, sub: [equipName(w.tractor_id), equipName(w.equipment_id)].filter(Boolean).join(' + ') })),
     ...(cRes.data ?? []).map((c) => ({ date: c.applied_on, kind: 'chem', id: c.event_id, field: c.field_id,
       what: methodName(c.method), sub: c.chemical_event_products.map((l) => chemById(l.chemical_id)?.name).filter(Boolean).join(', ') })),
@@ -1059,7 +1076,7 @@ async function drawSchedule(box, reload) {
   const groups = [];
   items.forEach((it) => { const k = it.date < today ? 'Overdue' : it.date; const g = groups.find((x) => x.k === k); if (g) g.items.push(it); else groups.push({ k, label: day(it.date), items: [it] }); });
   box.innerHTML = groups.map((g) => `<div class="group"><h4 class="${g.k === 'Overdue' ? 'overdue' : ''}">${esc(g.label)}</h4><ul class="list">${g.items.map((it) => `<li>
-    <span class="li-name"><b>${esc(fieldName(it.field))}</b> ${esc(it.what)}${it.kind === 'chem' ? ' <span class="badge up">Chem</span>' : ''}${it.sub ? `<span class="muted small">${esc(it.sub)}${g.k === 'Overdue' ? ' · ' + esc(fmtDay(it.date)) : ''}</span>` : ''}</span>
+    <span class="li-name"><b>${esc(it.where ?? fieldName(it.field))}</b> ${esc(it.what)}${it.kind === 'chem' ? ' <span class="badge up">Chem</span>' : ''}${it.custom ? ' <span class="badge up">Custom</span>' : ''}${it.sub ? `<span class="muted small">${esc(it.sub)}${g.k === 'Overdue' ? ' · ' + esc(fmtDay(it.date)) : ''}</span>` : ''}</span>
     <span class="li-value"><button class="small" data-sched="${it.kind}:${it.id}">Open</button></span></li>`).join('')}</ul></div>`).join('');
   $$('[data-sched]', box).forEach((b) => (b.onclick = async () => {
     const [kind, id] = b.dataset.sched.split(':');
@@ -2145,7 +2162,7 @@ function endEdit() {
 // Work records: one record per field per pass (tillage, planting, ...).
 // Planting adds seed and planter details and links to the crop year.
 // =====================================================================
-const workState = { season: new Date().getFullYear(), op: '', q: '', view: 'records', status: '' };
+const workState = { season: new Date().getFullYear(), op: '', q: '', view: 'records', status: '', ground: '' };
 const HARVEST_STAGES = [['swath', 'Swath / cut'], ['merge', 'Merge / lift'], ['thresh', 'Combine / thresh'], ['other', 'Other']];
 const stageName = (k) => HARVEST_STAGES.find(([x]) => x === k)?.[1] ?? '';
 const PLANT_LABELS = ['Female', 'Male 1', 'Male 2', 'Male 3'];
@@ -2169,8 +2186,9 @@ async function renderWork(el) {
     if (r.crop_year_id) return { cy: cys.find((c) => c.crop_year_id === r.crop_year_id) ?? (r.crop_years ? { ...r.crop_years, season: '' } : null), auto: false };
     return { cy: autoCropYear(r.operation, r.performed_on, cys.filter((c) => c.field_id === r.field_id)), auto: true };
   };
-  const rows = data.filter((r) => (!s.op || r.operation === s.op) && (!s.status || (r.status ?? 'done') === s.status) &&
-    (!term || fieldName(r.field_id).toLowerCase().includes(term) || equipName(r.equipment_id).toLowerCase().includes(term)));
+  const rows = data.filter((r) => (!s.op || r.operation === s.op) && (!s.status || (r.status ?? 'done') === s.status)
+    && (!s.ground || (s.ground === 'custom') === !!r.customer_id) &&
+    (!term || workWhere(r).toLowerCase().includes(term) || equipName(r.equipment_id).toLowerCase().includes(term)));
   el.innerHTML = `
     ${workViewTabs()}
     <div class="section-head"><h2>Work records</h2>
@@ -2183,27 +2201,28 @@ async function renderWork(el) {
     <div class="filters">
       <input type="search" data-f="q" placeholder="Search field or equipment…" value="${esc(s.q)}">
       <select data-f="status"><option value="">Planned and done</option><option value="planned" ${s.status === 'planned' ? 'selected' : ''}>Planned</option><option value="done" ${s.status === 'done' ? 'selected' : ''}>Done</option></select>
+      <select data-f="ground"><option value="">Our fields and custom</option><option value="ours" ${s.ground === 'ours' ? 'selected' : ''}>Our fields</option><option value="custom" ${s.ground === 'custom' ? 'selected' : ''}>Custom work</option></select>
       <select data-f="op"><option value="">All work</option>${refs.workTypes.map((w) => `<option value="${esc(w.operation)}" ${s.op === w.operation ? 'selected' : ''}>${esc(workLabel(w.operation))}</option>`).join('')}</select>
     </div>
-    <p class="muted small">${rows.length} of ${data.length} record(s) in ${s.season}.${rows.some((r) => r.cost_total != null) ? ` Work cost shown: <b>${money(rows.reduce((n, r) => n + Number(r.cost_total || 0), 0), 0)}</b>.` : ''}</p>
+    <p class="muted small">${rows.length} of ${data.length} record(s) in ${s.season}.${rows.some((r) => r.cost_total != null) ? ` Work cost shown: <b>${money(rows.reduce((n, r) => n + Number(r.cost_total || 0), 0), 0)}</b>.` : ''}${rows.some((r) => r.custom_total != null) ? ` Custom work charged: <b>${money(rows.reduce((n, r) => n + Number(r.custom_total || 0), 0), 0)}</b>.` : ''}</p>
     ${rows.length ? `<div class="card table-wrap"><table>
       <thead><tr><th>Date</th><th>Field</th><th>Work</th><th>Equipment</th><th class="r">Acres</th><th>By</th><th></th></tr></thead>
       <tbody>${rows.map((r) => {
         const d = r.planting_details?.[0] ?? r.planting_details;
-        const ch = chargedTo(r);
-        const crop = ch.cy ? `${cropName(ch.cy.crop_id)}${ch.cy.variety ? ' · ' + ch.cy.variety : ''}${ch.auto && ch.cy.season ? ` ${ch.cy.season}` : ''}${ch.auto ? ' (auto)' : ''}` : r.operation === 'tillage' ? 'next crop not entered' : '';
+        const ch = r.customer_id ? { cy: null } : chargedTo(r);
+        const crop = ch.cy ? `${cropName(ch.cy.crop_id)}${ch.cy.variety ? ' · ' + ch.cy.variety : ''}${ch.auto && ch.cy.season ? ` ${ch.cy.season}` : ''}${ch.auto ? ' (auto)' : ''}` : r.operation === 'tillage' && !r.customer_id ? 'next crop not entered' : '';
         return `<tr><td class="nowrap">${esc(dateRange(r.performed_on, r.end_date))}</td>
-          <td><b>${esc(fieldName(r.field_id))}</b></td>
+          <td>${r.customer_id ? `<b>${esc(customerName(r.customer_id))}</b> <span class="badge up">Custom</span>${r.location ? `<div class="muted small">${esc(r.location)}</div>` : ''}` : `<b>${esc(fieldName(r.field_id))}</b>`}</td>
           <td>${r.status === 'planned' ? `<span class="badge ${r.performed_on < localDate() ? 'bad' : 'down'}">${r.performed_on < localDate() ? 'Overdue' : 'Planned'}</span> ` : ''}${esc(workLabel(r.operation))}${r.harvest_stage ? ` · ${esc(stageName(r.harvest_stage))}` : ''}${d?.planting_label ? ` <span class="badge up">${esc(d.planting_label)}</span>` : ''}${crop ? `<div class="muted small">${esc(crop)}</div>` : ''}${patText(r, d) ? `<div class="muted small">${esc(patText(r, d))}</div>` : ''}</td>
           <td>${esc([equipName(r.tractor_id), equipName(r.equipment_id)].filter(Boolean).join(' + '))}</td>
-          <td class="r">${r.acres != null ? num(r.acres, 1) : ''}${r.cost_total != null ? `<div class="muted small">${money(r.cost_total, 0)}</div>` : ''}</td>
+          <td class="r">${r.acres != null ? num(r.acres, 1) : ''}${r.cost_total != null ? `<div class="muted small">${money(r.cost_total, 0)}</div>` : ''}${r.custom_total != null ? `<div class="small charge">charge ${money(r.custom_total, 0)}</div>` : ''}</td>
           <td>${esc(operatorName(r.performed_by))}</td>
           <td class="r nowrap">${r.status === 'planned' ? `<button class="small primary" data-done="${r.event_id}">Done</button> ` : ''}<button class="small" data-edit="${r.event_id}">Edit</button></td></tr>`;
       }).join('')}</tbody></table></div>` : `<div class="empty">No work records${data.length ? ' match' : ` for ${s.season}`}.</div>`}`;
   const reload = () => renderWork(el);
   wireWorkViewTabs(el);
   $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
-  $('[data-act=add]', el).onclick = () => openWorkForm({}, reload);
+  $('[data-act=add]', el).onclick = () => openWorkForm({ custom: s.ground === 'custom' }, reload);
   $$('[data-edit]', el).forEach((b) => (b.onclick = () => openWorkForm({ eventId: Number(b.dataset.edit) }, reload)));
   $$('[data-done]', el).forEach((b) => (b.onclick = () => openWorkForm({ eventId: Number(b.dataset.done), markDone: true }, reload)));
   $$('[data-f]', el).forEach((inp) => {
@@ -2226,6 +2245,7 @@ async function openWorkForm(opts, onDone) {
   const v = ev ? { ...ev } : { operation: opts.operation ?? (multi || opts.fieldIds ? 'tillage' : 'planting'), performed_on: localDate(), field_id: opts.fieldId ?? opts.fieldIds?.[0] ?? null,
     crop_year_id: opts.cropYearId ?? null, harvest_stage: opts.stage ?? null, status: opts.status ?? 'done' };
   if (opts.markDone) { v.status = 'done'; v.performed_on = localDate(); }
+  let custom = !!v.customer_id || !!opts.custom;
   v.status ??= 'done';
   const bands = ev ? await q(sb.from('chemical_events').select('*, chemical_event_products(*)').eq('work_event_id', ev.event_id)) : [];
   const types = refs.workTypes.filter((w) => (w.active || w.operation === v.operation) && !(multi && w.operation === 'planting'));
@@ -2240,10 +2260,26 @@ async function openWorkForm(opts, onDone) {
       <button type="button" data-status="done" class="${v.status === 'done' ? 'on' : ''}">Done<small>work that happened</small></button>
       <button type="button" data-status="planned" class="${v.status === 'planned' ? 'on' : ''}">Planned<small>schedule it</small></button>
     </div>
+    ${multi ? '' : `<div class="seg" role="group" aria-label="Whose ground">
+      <button type="button" data-ground="ours" class="${custom ? '' : 'on'}">Our field</button>
+      <button type="button" data-ground="custom" class="${custom ? 'on' : ''}">Custom work<small>for another farmer</small></button></div>`}
+    <div class="custom-box" data-custom>
+      <div class="row2">
+        <label>Customer *<select name="customer_id"><option value="">Choose…</option>${refs.customers.filter((c) => c.active || c.customer_id === v.customer_id).map((c) => `<option value="${c.customer_id}" ${c.customer_id === v.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}<option value="new">+ New customer…</option></select></label>
+        <label data-newcust hidden>New customer name<input name="new_customer"></label>
+      </div>
+      <label>Location (their field)<input name="location" value="${esc(v.location ?? '')}" placeholder="e.g. Rd 7 & M, north circle"></label>
+      <div class="row gps-row"><button type="button" class="small" data-act="gps">📍 Use my location</button><span class="muted small" id="gps-text">${v.lat != null ? `${Number(v.lat).toFixed(5)}, ${Number(v.lng).toFixed(5)}` : ''}</span></div>
+      <div class="row2">
+        <label>Acres *<input type="number" inputmode="decimal" step="any" min="0" name="c_acres" value="${esc(v.acres ?? '')}"></label>
+        <label>Rate charged ($/acre)<input type="number" inputmode="decimal" step="0.01" min="0" name="custom_rate" value="${esc(v.custom_rate ?? '')}"></label>
+      </div>
+      <p class="cost-line" id="custom-total"></p>
+    </div>
     <div class="row2">
       <label>Work *<select name="operation" required>${types.map((w) => `<option value="${esc(w.operation)}" ${w.operation === v.operation ? 'selected' : ''}>${esc(workLabel(w.operation))}</option>`).join('')}</select></label>
       ${multi ? `<div class="ro-field"><span>Fields (${opts.fieldIds.length}, one record each)</span><b>${opts.fieldIds.map((id) => esc(fieldName(id))).join(', ')}</b><input type="hidden" name="field_id" value="${opts.fieldIds[0]}"></div>`
-        : `<label>Field *<select name="field_id" required><option value="">Choose…</option>${fields.map((f) => `<option value="${f.field_id}" ${f.field_id === v.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}</select></label>`}
+        : `<label data-ours>Field *<select name="field_id" required><option value="">Choose…</option>${fields.map((f) => `<option value="${f.field_id}" ${f.field_id === v.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}</select></label>`}
     </div>
     <label data-harvest>Harvest pass<select name="harvest_stage"><option value="">—</option>${HARVEST_STAGES.map(([k, l]) => `<option value="${k}" ${v.harvest_stage === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     <div class="row2">
@@ -2251,15 +2287,15 @@ async function openWorkForm(opts, onDone) {
       <label>End date<input type="date" name="end_date" value="${esc(v.end_date ?? '')}"></label>
     </div>
     <p class="muted small form-hint">Leave the end date blank if it was done in one day.</p>
-    <label ${multi ? 'hidden' : ''}><span id="cy-label">Crop and variety *</span><select name="crop_year_id"></select></label>
-    <p class="muted small" id="cy-hint" ${multi ? 'hidden' : ''}></p>
+    <label ${multi ? 'hidden' : ''} data-ours><span id="cy-label">Crop and variety *</span><select name="crop_year_id"></select></label>
+    <p class="muted small" id="cy-hint" ${multi ? 'hidden' : ''} data-ours></p>
     <div class="row2">
       <label>Tractor<select name="tractor_id"></select></label>
       <label><span id="impl-label">Implement</span><select name="equipment_id"></select></label>
     </div>
     <div class="row2">
       <label>Operator<select name="performed_by"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === v.performed_by).map((o) => `<option value="${o.operator_id}" ${o.operator_id === v.performed_by ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
-      <label ${multi ? 'hidden' : ''}>Acres<input type="number" step="any" min="0" name="acres" value="${esc(v.acres ?? '')}"></label>
+      <label ${multi ? 'hidden' : ''} data-ours>Acres<input type="number" step="any" min="0" name="acres" value="${esc(v.acres ?? '')}"></label>
     </div>
     <p class="cost-line" id="cost-line"></p>
     <div class="row2 pattern-row">
@@ -2348,7 +2384,7 @@ async function openWorkForm(opts, onDone) {
   };
   const showCost = () => {
     const r = workRate(op(), el.equipment_id.value);
-    const ac = multi ? opts.fieldIds.reduce((n, id) => n + Number(fieldById(id)?.acres || 0), 0) : Number(el.acres.value);
+    const ac = multi ? opts.fieldIds.reduce((n, id) => n + Number(fieldById(id)?.acres || 0), 0) : custom ? Number(el.c_acres.value) : Number(el.acres.value);
     $('#cost-line', dlg).innerHTML = r.rate == null ? '<span class="muted small">No cost rate for this work. Set one under Setup → Cost rates.</span>'
       : `Cost <b>${money(r.rate)}/ac</b>${ac > 0 ? ` × ${num(ac, 1)} ac = <b>${money(r.rate * ac)}</b>` : ''} <span class="muted small">(${esc(r.basis)})</span>`;
   };
@@ -2394,11 +2430,37 @@ async function openWorkForm(opts, onDone) {
   el.pattern.onchange = syncPattern; syncPattern();
   const sync = () => {
     const planting = op() === 'planting';
-    $$('[data-plant]', dlg).forEach((x) => (x.hidden = !planting));
+    $$('[data-plant]', dlg).forEach((x) => (x.hidden = !planting || custom));
     $$('[data-harvest]', dlg).forEach((x) => (x.hidden = op() !== 'harvest'));
-    el.crop_year_id.required = planting;
+    $$('[data-custom]', dlg).forEach((x) => (x.hidden = !custom));
+    $$('[data-ours]', dlg).forEach((x) => (x.hidden = custom || multi));
+    if (!multi) el.field_id.required = !custom;
+    el.crop_year_id.required = planting && !custom;
+    el.c_acres.required = custom;
+    showCustom();
     $$('[data-stagger]', dlg).forEach((x) => (x.hidden = !el.staggered.checked));
     fillEquip(); plateLabel(); showCost();
+  };
+  const showCustom = () => {
+    if (!custom) return;
+    const ac = Number(el.c_acres.value), rate = Number(el.custom_rate.value);
+    $('#custom-total', dlg).innerHTML = ac > 0 && rate > 0 ? `Charge <b>${money(rate * ac)}</b> <span class="muted small">(${money(rate)}/ac × ${num(ac, 1)} ac)</span>` : '<span class="muted small">Enter acres and the rate to see the charge.</span>';
+  };
+  $$('[data-ground]', dlg).forEach((b) => (b.onclick = () => { custom = b.dataset.ground === 'custom'; $$('[data-ground]', dlg).forEach((x) => x.classList.toggle('on', x === b)); sync(); }));
+  el.customer_id.onchange = () => {
+    $('[data-newcust]', dlg).hidden = el.customer_id.value !== 'new';
+    const c = refs.customers.find((x) => x.customer_id === Number(el.customer_id.value));
+    if (c?.default_rate != null && !el.custom_rate.value) { el.custom_rate.value = c.default_rate; showCustom(); }
+    if (el.customer_id.value === 'new') el.new_customer.focus();
+  };
+  el.c_acres.oninput = () => { showCustom(); showCost(); };
+  el.custom_rate.oninput = showCustom;
+  let gps = v.lat != null ? { lat: Number(v.lat), lng: Number(v.lng) } : null;
+  $('[data-act=gps]', dlg).onclick = () => {
+    if (!navigator.geolocation) return toast('Location isn’t available on this device', true);
+    $('#gps-text', dlg).textContent = 'Finding you…';
+    navigator.geolocation.getCurrentPosition((p) => { gps = { lat: p.coords.latitude, lng: p.coords.longitude }; $('#gps-text', dlg).textContent = `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} (±${Math.round(p.coords.accuracy)} m)`; },
+      () => { $('#gps-text', dlg).textContent = 'Couldn’t get your location.'; }, { enableHighAccuracy: true, timeout: 15000 });
   };
   const fieldChanged = () => {
     const f = fieldById(el.field_id.value);
@@ -2449,13 +2511,27 @@ async function openWorkForm(opts, onDone) {
     const planting = op() === 'planting';
     if (val('end_date') && val('end_date') < val('performed_on')) return toast('End date is before the start date', true);
     if (multi) return saveMany();
+    if (custom) {
+      if (el.customer_id.value === 'new') {
+        const nm = el.new_customer.value.trim();
+        if (!nm) return toast('Enter the new customer’s name', true);
+        try {
+          const [c] = await q(sb.from('customers').insert({ name: nm }).select('*'));
+          refs.customers.push(c); el.customer_id.insertAdjacentHTML('afterbegin', `<option value="${c.customer_id}">${esc(c.name)}</option>`); el.customer_id.value = c.customer_id;
+        } catch { return; }
+      }
+      if (!el.customer_id.value) return toast('Pick the customer', true);
+    }
     const row = {
-      operation: op(), field_id: Number(val('field_id')), performed_on: val('performed_on'), end_date: val('end_date') || null,
+      operation: op(), field_id: custom ? null : Number(val('field_id')), performed_on: val('performed_on'), end_date: val('end_date') || null,
       tractor_id: numOrNull('tractor_id'), equipment_id: numOrNull('equipment_id'), performed_by: numOrNull('performed_by'),
-      acres: numOrNull('acres'), notes: val('notes') || null, crop_year_id: numOrNull('crop_year_id'),
+      acres: custom ? numOrNull('c_acres') : numOrNull('acres'), notes: val('notes') || null, crop_year_id: custom ? null : numOrNull('crop_year_id'),
       pattern: val('pattern') || null, heading_deg: val('pattern') === 'straight' ? numOrNull('heading_deg') : null,
       ...(op() === 'harvest' || ev?.harvest_stage ? { harvest_stage: op() === 'harvest' ? val('harvest_stage') || null : null } : {}),
       status,
+      ...(custom ? { field_id: null, customer_id: Number(val('customer_id')), location: val('location') || null, lat: gps?.lat ?? null, lng: gps?.lng ?? null,
+        custom_rate: numOrNull('custom_rate'), custom_total: numOrNull('custom_rate') != null && numOrNull('c_acres') != null ? Math.round(numOrNull('custom_rate') * numOrNull('c_acres') * 100) / 100 : null }
+        : (ev?.customer_id ? { customer_id: null, location: null, lat: null, lng: null, custom_rate: null, custom_total: null } : {})),
     };
     // Freeze the cost with today's rate.
     const cr = workRate(row.operation, row.equipment_id);
@@ -2473,6 +2549,7 @@ async function openWorkForm(opts, onDone) {
       // Until the newer SQL files are run, save without those columns rather than failing.
       const write = (r) => (ev ? sb.from('work_events').update(r).eq('event_id', id) : sb.from('work_events').insert(r).select('event_id').single());
       let res = await write(row);
+      if (res.error && custom && /customer_id|location|custom_|lat|lng|null value in column "field_id"/.test(res.error.message ?? '')) { toast('Custom work needs custom_work.sql run in Supabase first', true); throw res.error; }
       if (res.error && /status/.test(res.error.message ?? '') && !/check constraint/.test(res.error.message ?? '')) {
         if (status === 'planned') { toast('Planning needs work_plan.sql run in Supabase first', true); throw res.error; }
         delete row.status; res = await write(row);
@@ -2492,7 +2569,7 @@ async function openWorkForm(opts, onDone) {
       }
       if (res.error) { toast(res.error.message, true); throw res.error; }
       if (!ev) id = res.data.event_id;
-      if (planting) {
+      if (planting && !custom) {
         await q(sb.from('planting_details').upsert({ event_id: id, ...det }));
         await syncPlantingDate(row.crop_year_id);
         if (ev?.crop_year_id && ev.crop_year_id !== row.crop_year_id) await syncPlantingDate(ev.crop_year_id);
@@ -4769,7 +4846,7 @@ async function openEquipCard(id) {
 }
 
 async function renderSetup(el) {
-  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'costs', 'leases'];
+  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'costs', 'customers', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>
     `<button data-tab="${t}" class="${t === setupTab ? 'active' : ''}">${esc(t === 'costs' ? 'Cost rates' : CRUD[t].title)}</button>`).join('')}</div>
     <div id="setup-body"><p class="muted">Loading…</p></div>`;
