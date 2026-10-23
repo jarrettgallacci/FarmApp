@@ -308,7 +308,7 @@ const CRUD = {
       ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
-    afterRender: (form, row) => { pumpOnlyFields(form); equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row); equipmentService(form, row); equipmentPhotos(form, row); },
+    afterRender: (form, row) => { equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row).then(() => syncType()); equipmentService(form, row); equipmentPhotos(form, row); const syncType = typeOnlyFields(form, row); },
   },
   worktypes: {
     table: 'operation_types', pk: 'operation', title: 'Work types', singular: 'work type', order: ['sort_order', 'operation'],
@@ -3483,11 +3483,35 @@ function equipTypeOptions() {
   const extra = [...new Set(used.filter((t) => !EQ_TYPES.some((x) => x.toLowerCase() === t.toLowerCase())))].sort();
   return [...EQ_TYPES, ...extra].map((t) => [t, t]);
 }
-// Pump details only show for pumps.
-function pumpOnlyFields(form) {
-  const keys = ['hp', 'frame_size', 'meter_no', 'vfd'].filter((k) => form.elements[k]);
-  const sync = () => { const pump = /pump/i.test(form.elements.type?.value ?? ''); keys.forEach((k) => { form.elements[k].closest('label').hidden = !pump; }); };
-  form.elements.type?.addEventListener('input', sync); form.elements.type?.addEventListener('change', sync); sync();
+// Type-specific parts of the equipment form show only for the types they apply to.
+const ENGINE_RE = /tractor|combine|swather|windrower|sprayer|pickup|truck|loader|forklift|scraper|blade|excavat|backhoe|skid|pump/i;
+const IRRIG_RE = /pivot|solid ?set|handline|hand line|wheel ?line|pump|mainline|well/i;
+const TYPE_FIELDS = [
+  [/pump/i, ['hp', 'frame_size', 'meter_no', 'vfd']],
+  [/planter|drill/i, ['planting_settings']],
+  [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow|planter|drill|cultivat|corrugat|dammer|toolbar|bedder|bean cutter|header|digger|combine|swather|windrower|sprayer|implement/i, ['cost_per_acre']],
+  [ENGINE_RE, ['hours', 'hours_date', 'engine_serial']],
+  [/pickup|truck|trailer/i, ['license_plate']],
+];
+function typeOnlyFields(form, row) {
+  const typeIn = form.elements.type;
+  const sync = () => {
+    const t = typeIn?.value ?? '';
+    for (const [re, keys] of TYPE_FIELDS) {
+      keys.filter((k) => form.elements[k]).forEach((k) => {
+        const el = form.elements[k], has = el.type === 'checkbox' ? el.checked : String(el.value ?? '').trim() !== '';
+        const show = re.test(t) || (has && !!row && t === (row.type ?? ''));   // keep showing data an existing record already has
+        el.closest('label').hidden = !show;
+      });
+    }
+    const fieldsBox = form.parentElement?.querySelector('.eq-fields') ?? $('.eq-fields', form);
+    if (fieldsBox) fieldsBox.hidden = !IRRIG_RE.test(t) && !fieldsBox.dataset.linked;
+    const workBox = $('.eq-work', form);
+    if (workBox) workBox.hidden = !t || IRRIG_RE.test(t) || /building|shop|shed/i.test(t);
+  };
+  typeIn?.addEventListener('input', sync); typeIn?.addEventListener('change', sync);
+  sync();
+  return sync;
 }
 // Suggest the next free number for the type typed in.
 function equipmentNumberHint(form, row) {
@@ -3515,6 +3539,7 @@ async function equipmentFieldLinks(form, row) {
   const res = await sb.from('equipment_fields').select('field_id').eq('equipment_id', row.equipment_id);
   if (res.error) return box.remove();
   const have = new Set(res.data.map((x) => x.field_id));
+  if (have.size) box.dataset.linked = '1';
   const irr = eqCat(row) === 'irrigation';
   box.open = irr || have.size > 0;
   box.innerHTML = `<summary><b>Fields it serves</b> <span class="muted small">${have.size ? [...have].map((id) => esc(fieldById(id)?.name ?? '')).join(', ') : irr ? 'none yet' : 'pivots, pumps, wells'}</span></summary>
