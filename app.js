@@ -308,6 +308,8 @@ const CRUD = {
       ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
+    headExtra: '<button data-act="scan">Scan QR</button><button data-act="qr">Print QR labels</button>',
+    wireHead: (el, rows) => { $('[data-act=scan]', el).onclick = () => openScanner(); $('[data-act=qr]', el).onclick = () => openQrLabels(rows); },
     afterRender: (form, row) => { equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row).then(() => syncType()); equipmentService(form, row); equipmentPhotos(form, row); const syncType = typeOnlyFields(form, row); },
   },
   worktypes: {
@@ -369,7 +371,7 @@ async function renderCrud(cfg, el) {
   const tab = cfg.tabs?.find((t) => t.key === st.tab);
   el.innerHTML = `
     <div class="section-head"><h2>${esc(cfg.title)}</h2>
-      <button class="primary" data-act="add">Add ${esc(cfg.singular)}</button></div>
+      <div class="row">${cfg.headExtra ?? ''}<button class="primary" data-act="add">Add ${esc(cfg.singular)}</button></div></div>
     ${cfg.tabs ? `<div class="subtabs">${cfg.tabs.map((t) => `<button class="${t.key === st.tab ? 'active' : ''}" data-tab="${t.key}">
       ${esc(t.label)} <span class="muted">${rows.filter(t.test).length}</span></button>`).join('')}</div>` : ''}
     ${cfg.search || filters.length || cfg.sorts ? `<div class="filters">
@@ -404,6 +406,7 @@ async function renderCrud(cfg, el) {
       cfg.rowAction.fn(rows.find((r) => String(r[cfg.pk]) === b.dataset.rowAct), reload)));
   };
   $('[data-act=add]', el).onclick = () => openForm(cfg, null, reload);
+  cfg.wireHead?.(el, rows);
   $$('[data-tab]', el).forEach((b) => (b.onclick = () => { st.tab = b.dataset.tab; reload(); }));
   const search = $('.search', el);
   if (search) search.oninput = () => { st.q = search.value; draw(); };
@@ -3484,7 +3487,7 @@ function equipTypeOptions() {
   return [...EQ_TYPES, ...extra].map((t) => [t, t]);
 }
 // Type-specific parts of the equipment form show only for the types they apply to.
-const ENGINE_RE = /tractor|combine|swather|windrower|sprayer|pickup|truck|loader|forklift|scraper|blade|excavat|backhoe|skid|pump/i;
+const ENGINE_RE = /tractor|combine|swather|windrower|sprayer|pickup|truck|loader|forklift|scraper|blade|excavat|backhoe|skid/i;
 const IRRIG_RE = /pivot|solid ?set|handline|hand line|wheel ?line|pump|mainline|well/i;
 const TYPE_FIELDS = [
   [/pump/i, ['hp', 'frame_size', 'meter_no', 'vfd']],
@@ -3707,6 +3710,7 @@ async function renderMaint(el) {
     <div class="section-head"><h2>${{ repairs: 'Repairs', service: 'Service due', history: 'Maintenance history' }[s.view]}</h2>
       <div class="row">
         ${s.view === 'history' ? `<button data-season="-1" aria-label="Previous year">‹</button><strong class="season">${s.season}</strong><button data-season="1" aria-label="Next year">›</button>` : ''}
+        <button data-act="scan">Scan QR</button>
         ${s.view === 'service' ? '<button data-act="add-iv">+ Interval</button>' : ''}
         <button class="primary" data-act="report">${s.view === 'service' ? 'Log service' : s.view === 'history' ? 'Log work done' : 'Report a problem'}</button>
       </div></div>
@@ -3741,6 +3745,7 @@ async function renderMaint(el) {
   $('[data-act=report]', el).onclick = () => openJob(s.view === 'service' ? { kind: 'service', status: 'done', equipmentId: Number(s.equip) || null }
     : s.view === 'history' ? { status: 'done', equipmentId: Number(s.equip) || null } : { equipmentId: Number(s.equip) || null }, reload);
   $('[data-act=add-iv]', el)?.addEventListener('click', () => openInterval({ equipmentId: Number(s.equip) || null }, reload));
+  $('[data-act=scan]', el).onclick = () => openScanner();
   $$('[data-job]', el).forEach((b) => (b.onclick = () => openJob({ jobId: Number(b.dataset.job) }, reload)));
   $$('[data-iv]', el).forEach((b) => (b.onclick = () => openInterval({ intervalId: Number(b.dataset.iv) }, reload)));
   $$('[data-svc]', el).forEach((b) => (b.onclick = () => {
@@ -4511,6 +4516,174 @@ async function editProcedure(procId, onDone) {
   if (!dlg.open) dlg.showModal();
 }
 
+// =====================================================================
+// QR labels: each machine gets a code that opens its card in the app.
+// =====================================================================
+const equipLink = (id) => `${location.origin}${location.pathname}#eq=${id}`;
+const loadScript = (src, global) => (window[global] ? Promise.resolve(window[global]) : new Promise((res, rej) => {
+  const sc = document.createElement('script'); sc.src = src; sc.onload = () => res(window[global]); sc.onerror = () => rej(new Error('Could not load ' + src));
+  document.head.appendChild(sc);
+}));
+const QR_LIB = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js';
+const JSQR_LIB = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+
+async function qrSvg(text, cell = 4) {
+  const qrcode = await loadScript(QR_LIB, 'qrcode');
+  const qr = qrcode(0, 'M'); qr.addData(text); qr.make();
+  return qr.createSvgTag({ cellSize: cell, margin: 2, scalable: true });
+}
+
+function openQrLabels(rows) {
+  const list = (rows ?? refs.equipment).filter((e) => e.active).sort(eqSort);
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.innerHTML = `<form class="form">
+    <div class="dialog-head"><h3>Print QR labels</h3><p class="muted small">Scanning a label opens that machine in the app (after signing in).</p></div>
+    <div class="row2"><label>Category<select data-qcat><option value="">All</option>${EQ_BANDS.filter(([k]) => list.some((e) => eqCat(e) === k)).map(([k, l, b]) => `<option value="${k}">${b}s · ${esc(l)}</option>`).join('')}</select></label>
+      <label>Label size<select data-qsize><option value="2">2 in (6 per row)</option><option value="1.5">1.5 in</option><option value="3">3 in</option></select></label></div>
+    <div class="lines-head"><b>Equipment</b><span><button type="button" class="small" data-all="1">All</button> <button type="button" class="small" data-all="0">None</button></span></div>
+    <div class="pick-list" id="qr-list"></div>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Print</button></div></form>`;
+  const draw = () => {
+    const cat = $('[data-qcat]', dlg).value;
+    $('#qr-list', dlg).innerHTML = list.filter((e) => !cat || eqCat(e) === cat).map((e) => `<label class="check"><input type="checkbox" value="${e.equipment_id}" checked> ${esc(eqLabel(e))}</label>`).join('');
+  };
+  $('[data-qcat]', dlg).onchange = draw; draw();
+  $$('[data-all]', dlg).forEach((b) => (b.onclick = () => $$('#qr-list input', dlg).forEach((c) => (c.checked = b.dataset.all === '1'))));
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  $('form', dlg).onsubmit = async (e) => {
+    e.preventDefault();
+    const ids = $$('#qr-list input:checked', dlg).map((c) => Number(c.value));
+    if (!ids.length) return toast('Pick at least one', true);
+    const size = Number($('[data-qsize]', dlg).value);
+    const w = window.open('', '_blank');
+    if (!w) return toast('Allow pop-ups to print labels', true);
+    w.document.write('<p style="font:14px sans-serif">Making labels…</p>');
+    try {
+      const labels = [];
+      for (const id of ids) {
+        const eq = refs.equipment.find((x) => x.equipment_id === id);
+        labels.push(`<div class="lab"><div class="qr">${await qrSvg(equipLink(id))}</div><div class="num">${eqNum(eq) != null ? '#' + eqNum(eq) : ''}</div><div class="nm">${esc(eq.name)}</div></div>`);
+      }
+      w.document.open();
+      w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Equipment QR labels</title><style>
+        body { font-family: Arial, sans-serif; margin: .3in; }
+        .grid { display: flex; flex-wrap: wrap; gap: .15in; }
+        .lab { width: ${size}in; border: 1px dashed #bbb; padding: .08in; text-align: center; break-inside: avoid; }
+        .qr svg { width: 100%; height: auto; display: block; }
+        .num { font-weight: 700; font-size: ${Math.max(10, size * 9)}pt; margin-top: .03in; }
+        .nm { font-size: ${Math.max(7, size * 4.5)}pt; line-height: 1.15; }
+        @media print { .lab { border-color: #ddd; } .tip { display: none; } }
+      </style></head><body><p class="tip" style="font-size:12px;color:#666">Print at 100% (no "fit to page"). Cut on the dashed lines.</p>
+      <div class="grid">${labels.join('')}</div><script>setTimeout(() => print(), 400)<\/script></body></html>`);
+      w.document.close();
+      dlg.close();
+    } catch (err) { w.close(); toast(err.message, true); }
+  };
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+// In-app scanner: the phone camera, decoded with the browser's BarcodeDetector or jsQR.
+async function openScanner() {
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  dlg.innerHTML = `<div class="form scan-form"><div class="dialog-head"><h3>Scan a QR label</h3></div>
+    <video playsinline muted></video><p class="muted small" id="scan-msg">Point the camera at the label.</p>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button></div></div>`;
+  let stream = null, stop = false;
+  const end = () => { stop = true; stream?.getTracks().forEach((t) => t.stop()); };
+  dlg.onclose = end;
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  if (!dlg.open) dlg.showModal();
+  const video = $('video', dlg);
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = stream; await video.play();
+  } catch {
+    $('#scan-msg', dlg).textContent = 'Camera not available. Allow camera access, or scan the label with your phone’s camera app instead.';
+    return;
+  }
+  let detect;
+  if ('BarcodeDetector' in window) {
+    const bd = new window.BarcodeDetector({ formats: ['qr_code'] });
+    detect = async () => (await bd.detect(video))[0]?.rawValue ?? null;
+  } else {
+    const jsQR = await loadScript(JSQR_LIB, 'jsQR');
+    const c = document.createElement('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+    detect = async () => {
+      if (!video.videoWidth) return null;
+      const k = Math.min(1, 640 / video.videoWidth);
+      c.width = video.videoWidth * k; c.height = video.videoHeight * k;
+      ctx.drawImage(video, 0, 0, c.width, c.height);
+      return jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height)?.data ?? null;
+    };
+  }
+  const loop = async () => {
+    if (stop) return;
+    let text = null;
+    try { text = await detect(); } catch { /* keep trying */ }
+    const m = text?.match(/eq=(\d+)/);
+    if (m) { dlg.close(); openEquipCard(Number(m[1])); return; }
+    if (text) $('#scan-msg', dlg).textContent = 'That code isn’t an equipment label.';
+    setTimeout(loop, 250);
+  };
+  loop();
+}
+
+// What you get after scanning: the machine, its open repairs and service due, and quick actions.
+async function openEquipCard(id) {
+  await loadRefs();
+  const eq = refs.equipment.find((e) => e.equipment_id === id);
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  if (!eq) { dlg.innerHTML = '<div class="form"><h3>Not found</h3><p>That equipment isn’t in the app (it may have been deleted).</p><div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Close</button></div></div>'; $('[data-act=cancel]', dlg).onclick = () => dlg.close(); if (!dlg.open) dlg.showModal(); return; }
+  const [jobRes, ivRes] = await Promise.all([sb.from('maint_jobs').select('*').eq('equipment_id', id), sb.from('service_intervals').select('*').eq('equipment_id', id).eq('active', true)]);
+  const jobs = jobRes.data ?? [], open = jobs.filter((j) => j.status !== 'done'), ivs = ivRes.data ?? [];
+  const reopen = () => openEquipCard(id);
+  const engine = ENGINE_RE.test(eq.type ?? '');
+  dlg.innerHTML = `<div class="form eq-card">
+    <div class="dialog-head"><h3>${esc(eqNum(eq) != null ? `#${eqNum(eq)} ` : '')}${esc(eq.name)}</h3>
+      <p class="muted small">${esc([eq.type, eq.make, eq.model, eq.model_year, eqFields(eq).length ? 'field ' + eqFields(eq).join(', ') : ''].filter(Boolean).join(' · '))}</p></div>
+    <div class="eq-actions">
+      <button type="button" class="primary" data-act="problem">Report a problem</button>
+      <button type="button" data-act="service">Log service</button>
+      <label class="btn">Add photo<input type="file" accept="image/*" capture="environment" hidden data-act="photo"></label>
+      <button type="button" data-act="checked">Checked today</button>
+    </div>
+    ${engine ? `<div class="row hours-row"><label>Hours now<input type="number" inputmode="decimal" step="0.1" min="0" data-hours placeholder="${eq.hours != null ? num(eq.hours, 0) : ''}"></label><button type="button" data-act="hours">Update</button>
+      <span class="muted small">${eq.hours != null ? `last ${num(eq.hours, 0)}${eq.hours_date ? ' on ' + fmtDateY(eq.hours_date) : ''}` : 'no hours yet'}</span></div>` : ''}
+    <div class="lines-head"><b>Open repairs</b><span class="muted small">${open.length || 'none'}</span></div>
+    ${open.length ? `<ul class="list">${open.map((j) => `<li><span class="li-name">${esc(j.title)} ${j.down ? '<span class="badge bad">DOWN</span>' : ''}<span class="muted small">${jobStatusName(j.status)} · ${fmtDateY(j.reported_on)}</span></span><span class="li-value"><button type="button" class="small" data-job="${j.job_id}">Open</button></span></li>`).join('')}</ul>` : ''}
+    ${ivs.length ? `<div class="lines-head"><b>Service</b></div><ul class="list">${ivs.map((iv) => { const d = serviceDue(iv, eq, jobs); return `<li class="due-${d.state}"><span class="li-name">${esc(iv.name)}<span class="small">${dueText(d, iv, eq)}</span></span><span class="li-value"><button type="button" class="small" data-svc="${iv.interval_id}">Done</button></span></li>`; }).join('')}</ul>` : ''}
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="close">Close</button></div></div>`;
+  $('[data-act=close]', dlg).onclick = () => dlg.close();
+  $('[data-act=problem]', dlg).onclick = () => openJob({ equipmentId: id }, null);
+  $('[data-act=service]', dlg).onclick = () => openJob({ kind: 'service', status: 'done', equipmentId: id }, null);
+  $$('[data-job]', dlg).forEach((b) => (b.onclick = () => openJob({ jobId: Number(b.dataset.job) }, null)));
+  $$('[data-svc]', dlg).forEach((b) => (b.onclick = () => { const iv = ivs.find((x) => x.interval_id === Number(b.dataset.svc)); openJob({ kind: 'service', status: 'done', equipmentId: id, intervalId: iv.interval_id, title: iv.name }, null); }));
+  $('[data-act=checked]', dlg).onclick = async () => { try { await q(sb.from('equipment').update({ verified_on: localDate() }).eq('equipment_id', id)); toast('Marked checked today'); } catch { /* shown */ } };
+  $('[data-act=hours]', dlg)?.addEventListener('click', async () => {
+    const v = Number($('[data-hours]', dlg).value);
+    if (!(v > 0)) return toast('Enter the hours', true);
+    if (eq.hours != null && v < Number(eq.hours) && !confirm(`That's less than the last reading (${num(eq.hours, 0)}). Save anyway?`)) return;
+    try { await q(sb.from('equipment').update({ hours: v, hours_date: localDate() }).eq('equipment_id', id)); toast('Hours updated'); reopen(); } catch { /* shown */ }
+  });
+  $('[data-act=photo]', dlg).onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try {
+      const blob = await shrinkImage(f);
+      const path = `${id}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
+      const { error } = await sb.storage.from('equipment').upload(path, blob, { contentType: blob.type || 'image/jpeg' });
+      if (error) throw error;
+      await q(sb.from('equipment_photos').insert({ equipment_id: id, path }));
+      await q(sb.from('equipment').update({ verified_on: localDate() }).eq('equipment_id', id));
+      toast('Photo added');
+    } catch (err) { toast(`Upload failed: ${err.message ?? err}`, true); }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
 async function renderSetup(el) {
   const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'costs', 'leases'];
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>
@@ -5200,8 +5373,17 @@ async function startApp() {
   $('#login').hidden = true;
   $('#app').hidden = false;
   try { await loadRefs(); } catch { return; }
-  show(currentView);
+  await show(currentView);
+  openFromHash();
 }
+// A QR label holds the app link + #eq=<id>; opening it (camera app or in-app scan) shows that machine's card.
+function openFromHash() {
+  const m = location.hash.match(/eq=(\d+)/);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  openEquipCard(Number(m[1]));
+}
+window.addEventListener('hashchange', () => { if (started) openFromHash(); });
 
 function showLogin() {
   $('#app').hidden = true;

@@ -624,3 +624,9 @@ label.link { color: var(--accent); text-decoration: underline; }
 .add-step { display: flex; flex-direction: column; gap: .5rem; margin: .8rem 0; }
 .skipped summary { cursor: pointer; color: var(--muted); margin: .4rem 0; }
 .cl-sec { margin: .9rem 0 .2rem; padding-bottom: .2rem; border-bottom: 1px solid var(--border); }
+.scan-form video { width: 100%; max-height: 60vh; background: #000; border-radius: var(--radius); }
+.eq-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .4rem 0 .8rem; }
+.eq-actions button, .eq-actions .btn { padding: .75rem .5rem; font-size: 1rem; }
+label.btn { display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; font-weight: 500; }
+.hours-row { align-items: flex-end; flex-wrap: wrap; margin-bottom: .6rem; }
+.hours-row label { display: flex; flex-direction: column; gap: .2rem; }
