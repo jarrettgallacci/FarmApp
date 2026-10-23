@@ -613,3 +613,6 @@ button.link { background: none; border: none; padding: 0; color: var(--accent); 
 .section-head .row { flex-wrap: wrap; justify-content: flex-end; }
 .ro-field { display: flex; flex-direction: column; gap: .25rem; font-size: .9rem; }
 .ro-field b { padding: .45rem 0; }
+.step-note { margin: .2rem 0 0 1.8rem; padding: .35rem .6rem; background: var(--amber-soft); border-radius: var(--radius); font-size: .88rem; }
+.step-note-in { margin: .2rem 0 0 1.8rem; font-size: .85rem; }
+.sys-group { display: flex; flex-direction: column; gap: .2rem; margin-bottom: .6rem; }
