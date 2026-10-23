@@ -1630,7 +1630,10 @@ const draftRing = (d) => (d.shape === 'pivot' ? pivotRing(d) : d.ring.length ? [
 
 const mapState = { map: null, view: null, season: new Date().getFullYear(), editMode: false, layers: [], ed: null, irrMode: false, irr: null };
 // Irrigation status from the latest startup/shutdown round each pivot was in.
-const IRR_STATES = { ready: ['#2563eb', 'Started up (ready)'], starting: ['#93c5fd', 'Startup in progress'], shutting: ['#facc15', 'Shutdown in progress'], shut: ['#dc2626', 'Shut down'], none: ['#9aa5b1', 'No round yet'] };
+const IRR_STATES = { on: ['#2563eb', 'Water on'], progress: ['#facc15', 'In progress'], winterized: ['#16a34a', 'Winterized'] };
+// Each system's state comes from the latest startup or shutdown round it's in (a pivot on a pump station's
+// checklist counts through the station). A field is green only when every system on it is winterized,
+// blue when all are on, yellow otherwise. No round yet = water on.
 async function loadIrrStatus() {
   const res = await sb.from('procedure_runs').select('run_id, started_on, procedures(kind), procedure_tasks(equipment_id, status)').order('started_on', { ascending: false }).order('run_id', { ascending: false }).limit(200);
   if (res.error) return null;
@@ -1638,18 +1641,25 @@ async function loadIrrStatus() {
   for (const r of res.data) {
     const kind = r.procedures?.kind;
     if (kind !== 'startup' && kind !== 'shutdown') continue;
-    for (const t of r.procedure_tasks) if (!byEq.has(t.equipment_id)) byEq.set(t.equipment_id, kind === 'startup' ? (t.status === 'done' ? 'ready' : 'starting') : (t.status === 'done' ? 'shut' : 'shutting'));
+    for (const t of r.procedure_tasks) {
+      if (byEq.has(t.equipment_id)) continue;
+      byEq.set(t.equipment_id, t.status === 'in_progress' ? 'progress'
+        : kind === 'shutdown' ? (t.status === 'done' ? 'winterized' : 'on') : (t.status === 'done' ? 'on' : 'winterized'));
+    }
   }
   const links = (await sb.from('equipment_fields').select('equipment_id, field_id')).data ?? [];
-  const byField = new Map();
+  const perField = new Map(), irrigated = new Set();
   for (const e of refs.equipment.filter((x) => x.active && ['pivots', 'pumps', 'solid_sets'].includes(sysType(x)))) {
-    for (const fid of links.filter((x) => x.equipment_id === e.equipment_id).map((x) => x.field_id)) {
-      const st = byEq.get(e.equipment_id) ?? null;   // systems not in any round (e.g. a pivot on its pump station's checklist) don't count
-      const order = ['shutting', 'starting', 'shut', 'ready'];   // a field shows its least-finished system
-      if (!st) { if (!byField.has(fid)) byField.set(fid, 'none'); continue; }
-      const cur = byField.get(fid);
-      if (!cur || cur === 'none' || order.indexOf(st) < order.indexOf(cur)) byField.set(fid, st);
-    }
+    links.filter((x) => x.equipment_id === e.equipment_id).forEach((l) => irrigated.add(l.field_id));
+    const st = byEq.get(e.equipment_id);
+    if (!st) continue;   // not in any round (e.g. a pivot on its pump station's checklist)
+    for (const l of links.filter((x) => x.equipment_id === e.equipment_id)) perField.set(l.field_id, [...(perField.get(l.field_id) ?? []), st]);
+  }
+  const byField = new Map();
+  for (const f of refs.fields) {
+    if (!irrigated.has(f.field_id)) continue;   // no pivot, pump or solid set on it: not colored
+    const sts = perField.get(f.field_id);
+    byField.set(f.field_id, !sts ? 'on' : sts.every((x) => x === 'winterized') ? 'winterized' : sts.every((x) => x === 'on') ? 'on' : 'progress');
   }
   return byField;
 }
@@ -4256,6 +4266,9 @@ async function renderSeasonal(el) {
       <div class="section-head"><h2>${esc(p?.name ?? 'Procedure')} · ${run.season}</h2>
         <div class="row"><button data-act="back">‹ All rounds</button><button data-act="add-sys">+ Systems</button><button data-act="new-sys">+ New system</button></div></div>
       <p class="muted small">${nDone} of ${run.procedure_tasks.length} done · started ${fmtDateY(run.started_on)}${run.due_on ? ` · due ${fmtDateY(run.due_on)}` : ''}</p>
+      ${(() => { const st = run.procedure_tasks.map((x) => refs.equipment.find((e) => e.equipment_id === x.equipment_id)).filter((e) => sysType(e) === 'pumps');
+        const dups = run.procedure_tasks.filter((x) => st.some((p) => coveredBy(p).some((c) => c.equipment_id === x.equipment_id)));
+        return dups.length ? `<div class="notice"><b>${dups.length} pivot/solid set checklist(s) are duplicates</b> of sections on a pump station's checklist. <button class="small primary" data-act="merge">Merge them</button></div>` : ''; })()}
       <div class="progress"><span style="width:${run.procedure_tasks.length ? (nDone / run.procedure_tasks.length) * 100 : 0}%"></span></div>
       <div class="filters"><label class="check"><input type="checkbox" data-mine ${s.mine ? 'checked' : ''} ${me ? '' : 'disabled'}> Only my tasks${me ? '' : ' <span class="muted small">(set your sign-in email under Setup → Operators)</span>'}</label></div>
       <div class="card table-wrap"><table class="m-cards run-table"><thead><tr><th>Field</th><th>Assigned</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
@@ -4275,6 +4288,11 @@ async function renderSeasonal(el) {
     $$('[data-task]', el).forEach((b) => (b.onclick = () => openTask(Number(b.dataset.task), p, reload)));
     $('[data-act=add-sys]', el).onclick = () => startRound(procs, reload, run);
     $('[data-act=new-sys]', el).onclick = () => newSystem(run, reload);
+    $('[data-act=merge]', el)?.addEventListener('click', async () => {
+      if (!confirm('Move their ticks onto the pump station checklists and remove the duplicate checklists?')) return;
+      try { const m = await mergeCoveredTasks(run.run_id); toast(`Merged ${m}`); } catch { /* shown */ }
+      reload();
+    });
     $('[data-act=del-run]', el).onclick = async () => {
       if (!confirm('Delete this whole round and everything ticked off in it?')) return;
       try { await q(sb.from('procedure_runs').delete().eq('run_id', run.run_id)); s.run = null; reload(); } catch { /* shown */ }
@@ -4353,6 +4371,88 @@ function startRound(procs, onDone, run = null) {
   if (!dlg.open) dlg.showModal();
 }
 
+// A pump station's checklist covers every pivot / solid set sharing a field with it. If one of those also has
+// its own checklist in the same round, fold its ticks into the station's and drop the duplicate.
+async function mergeCoveredTasks(runId) {
+  await loadRefs();
+  const [run] = await q(sb.from('procedure_runs').select('*, procedures(*, procedure_steps(*)), procedure_tasks(*, procedure_checks(*))').eq('run_id', runId));
+  if (!run) return 0;
+  const proc = run.procedures;
+  const eqOf = (id) => refs.equipment.find((e) => e.equipment_id === id);
+  let merged = 0;
+  for (const st of run.procedure_tasks.filter((x) => sysType(eqOf(x.equipment_id)) === 'pumps')) {
+    const station = eqOf(st.equipment_id);
+    const items = checklistFor(proc, station).items;
+    const have = new Set(st.procedure_checks.map((c) => `${c.step_id}:${c.sub_id ?? 0}`));
+    for (const c of coveredBy(station)) {
+      const dup = run.procedure_tasks.find((x) => x.equipment_id === c.equipment_id && x.task_id !== st.task_id);
+      if (!dup) continue;
+      const moves = [];
+      for (const ck of dup.procedure_checks) {
+        const it = items.find((i) => i.step.step_id === ck.step_id && i.sub === c.equipment_id) ?? items.find((i) => i.step.step_id === ck.step_id && i.sub === 0);
+        if (it && !have.has(it.key)) { have.add(it.key); moves.push({ task_id: st.task_id, step_id: ck.step_id, sub_id: it.sub, done_at: ck.done_at, done_by_name: ck.done_by_name }); }
+      }
+      if (moves.length) await q(sb.from('procedure_checks').insert(moves));
+      if (dup.notes && !st.notes) await q(sb.from('procedure_tasks').update({ notes: dup.notes }).eq('task_id', st.task_id));
+      await q(sb.from('procedure_tasks').delete().eq('task_id', dup.task_id));
+      merged++;
+    }
+    // Status of the station after the merge
+    const after = (await q(sb.from('procedure_checks').select('step_id, sub_id').eq('task_id', st.task_id))).map((c) => `${c.step_id}:${c.sub_id ?? 0}`);
+    const skipRows = (await sb.from('procedure_step_notes').select('step_id, equipment_id').eq('skip', true)).data ?? [];
+    const live = items.filter((i) => !skipRows.some((s2) => s2.step_id === i.step.step_id && s2.equipment_id === i.noteEq));
+    const n = live.filter((i) => after.includes(i.key)).length;
+    const status = n === 0 ? 'todo' : n >= live.length ? 'done' : 'in_progress';
+    if (status !== st.status) await q(sb.from('procedure_tasks').update({ status, completed_on: status === 'done' ? localDate() : null }).eq('task_id', st.task_id));
+  }
+  return merged;
+}
+
+// From a pump station's checklist: add a pivot or solid set it serves (existing, or new).
+function addCovered(station, onDone) {
+  const covered = new Set(coveredBy(station).map((e) => e.equipment_id));
+  const others = refs.equipment.filter((e) => e.active && ['pivots', 'solid_sets'].includes(sysType(e)) && !covered.has(e.equipment_id)).sort(taskSort);
+  const dlg2 = document.createElement('dialog');
+  dlg2.className = 'stacked';
+  dlg2.innerHTML = `<form class="form"><div class="dialog-head"><h3>Add to ${esc(taskTitle(station))}</h3><p class="muted small">Its steps become a section on this pump station's checklist.</p></div>
+    <div class="seg" role="group"><button type="button" data-mode="new" class="on">New</button><button type="button" data-mode="existing">Already in the app</button></div>
+    <div data-new><div class="row2"><label>Kind<select name="kind"><option value="Solid set">Solid set</option><option value="Pivot">Pivot</option></select></label>
+      <label>Name *<input name="name" placeholder="e.g. Solid set-274"></label></div>
+      <p class="muted small">Linked to the same field(s) as this pump station: ${esc(eqFields(station).join(', ') || 'none yet')}.</p></div>
+    <div data-existing hidden><label>System<select name="existing"><option value="">Choose…</option>${others.map((e) => `<option value="${e.equipment_id}">${esc(taskTitle(e))} · ${esc(taskSub(e))}</option>`).join('')}</select></label>
+      <p class="muted small">This pump station will be marked as serving its field(s).</p></div>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Add</button></div></form>`;
+  document.body.appendChild(dlg2);
+  let mode = 'new';
+  $$('[data-mode]', dlg2).forEach((b) => (b.onclick = () => { mode = b.dataset.mode; $$('[data-mode]', dlg2).forEach((x) => x.classList.toggle('on', x === b)); $('[data-new]', dlg2).hidden = mode !== 'new'; $('[data-existing]', dlg2).hidden = mode !== 'existing'; }));
+  const close = () => { dlg2.close(); dlg2.remove(); };
+  $('[data-act=cancel]', dlg2).onclick = close;
+  $('form', dlg2).onsubmit = async (e) => {
+    e.preventDefault();
+    const el = e.target.elements;
+    try {
+      const fids = (station.equipment_fields ?? []).map((x) => x.field_id);
+      if (mode === 'new') {
+        const name = el.name.value.trim();
+        if (!name) return toast('Enter a name', true);
+        const kind = el.kind.value, band = kind === 'Pivot' ? 700 : 740;
+        const [ne] = await q(sb.from('equipment').insert({ name, type: kind, unit_no: String(nextFreeNumber(band) ?? ''), active: true }).select('equipment_id'));
+        if (fids.length) await q(sb.from('equipment_fields').insert(fids.map((f) => ({ equipment_id: ne.equipment_id, field_id: f }))));
+        else toast('This pump station has no fields, so link both to a field under Setup → Equipment', true);
+      } else {
+        const sys = refs.equipment.find((x) => x.equipment_id === Number(el.existing.value));
+        if (!sys) return toast('Pick a system', true);
+        const sf = (sys.equipment_fields ?? []).map((x) => x.field_id);
+        if (sf.length) await q(sb.from('equipment_fields').upsert(sf.map((f) => ({ equipment_id: station.equipment_id, field_id: f }))));
+        else if (fids.length) await q(sb.from('equipment_fields').insert(fids.map((f) => ({ equipment_id: sys.equipment_id, field_id: f }))));
+      }
+      await loadRefs();
+      close(); toast('Added'); onDone?.();
+    } catch { /* shown */ }
+  };
+  dlg2.showModal();
+}
+
 // Add a pump station / pivot / solid set that isn't in the app yet, straight into a round.
 function newSystem(run, onDone) {
   const kinds = [['Pump', 'Pump station', 760], ['Pivot', 'Pivot', 700], ['Solid set', 'Solid set', 740], ['Mainline', 'Mainline or well', 780]];
@@ -4375,6 +4475,7 @@ function newSystem(run, onDone) {
       const fids = $$('.chips input:checked', dlg).map((c) => Number(c.value));
       if (fids.length) await q(sb.from('equipment_fields').insert(fids.map((f) => ({ equipment_id: eq.equipment_id, field_id: f }))));
       await q(sb.from('procedure_tasks').insert({ run_id: run.run_id, equipment_id: eq.equipment_id }));
+      if (kind[0] === 'Pump') { const m = await mergeCoveredTasks(run.run_id); if (m) toast(`${m} pivot/solid set checklist(s) moved onto this pump station`); }
       await loadRefs();
       dlg.close(); toast('System added'); onDone?.();
     } catch { /* shown */ }
@@ -4392,7 +4493,7 @@ async function openTask(taskId, proc, onDone) {
   const checks = new Map(t.procedure_checks.map((c) => [`${c.step_id}:${c.sub_id ?? 0}`, c]));
   const dlg = $('#dialog');
   dlg.classList.add('wide');
-  let cl = { secs: [], items: [] }, notes = new Map(), urls = new Map(), editing = null;
+  let cl = { secs: [], items: [] }, notes = new Map(), urls = new Map(), editing = null, photos = [];
   const nk = (it) => `${it.step.step_id}:${it.noteEq}`;
   const load = async () => {
     [proc] = await q(sb.from('procedures').select('*, procedure_steps(*)').eq('procedure_id', proc.procedure_id));
@@ -4400,7 +4501,8 @@ async function openTask(taskId, proc, onDone) {
     const eqIds = [...new Set(cl.secs.map((sc) => sc.sys.equipment_id))];
     const stepIds = [...new Set(cl.items.map((it) => it.step.step_id))];
     notes = new Map(stepIds.length ? ((await sb.from('procedure_step_notes').select('*').in('equipment_id', eqIds).in('step_id', stepIds)).data ?? []).map((n) => [`${n.step_id}:${n.equipment_id}`, n]) : []);
-    const paths = [...cl.items.map((it) => it.step.photo_path), ...[...notes.values()].map((n) => n.photo_path)].filter((x) => x && !urls.has(x));
+    photos = stepIds.length ? ((await sb.from('procedure_step_photos').select('*').in('equipment_id', eqIds).in('step_id', stepIds).order('taken_at')).data ?? []) : [];
+    const paths = [...cl.items.map((it) => it.step.photo_path), ...[...notes.values()].map((n) => n.photo_path), ...photos.map((ph) => ph.path)].filter((x) => x && !urls.has(x));
     if (paths.length) ((await sb.storage.from('maintenance').createSignedUrls(paths, 3600)).data ?? []).forEach((u, i) => urls.set(paths[i], u.signedUrl));
   };
   const live = () => cl.items.filter((it) => !notes.get(nk(it))?.skip);
@@ -4432,13 +4534,13 @@ async function openTask(taskId, proc, onDone) {
       <label class="check"><input type="checkbox" data-step="${k}" ${c ? 'checked' : ''}><span>${esc(st.text)}${st.equipment_id ? ' <span class="badge up">This system</span>' : ''}</span></label>
       ${st.photo_path ? `<a href="${esc(urls.get(st.photo_path) ?? '#')}" target="_blank" rel="noopener"><img class="step-img" src="${esc(urls.get(st.photo_path) ?? '')}" alt=""></a>` : ''}
       ${n?.note ? `<p class="step-note">⚠ ${esc(n.note)}</p>` : ''}
-      ${n?.photo_path ? `<a href="${esc(urls.get(n.photo_path) ?? '#')}" target="_blank" rel="noopener"><img class="step-img" src="${esc(urls.get(n.photo_path) ?? '')}" alt=""></a>` : ''}
+      ${(() => { const ps = photos.filter((ph) => ph.step_id === st.step_id && ph.equipment_id === it.noteEq); const legacy = n?.photo_path;
+        return ps.length || legacy ? `<div class="step-photos">${legacy ? `<a href="${esc(urls.get(legacy) ?? '#')}" target="_blank" rel="noopener"><img src="${esc(urls.get(legacy) ?? '')}" alt=""></a>` : ''}${ps.map((ph) => `<span class="sp"><a href="${esc(urls.get(ph.path) ?? '#')}" target="_blank" rel="noopener"><img src="${esc(urls.get(ph.path) ?? '')}" alt=""></a><button type="button" class="icon" data-rm-ph="${ph.photo_id}" aria-label="Delete photo">✕</button></span>`).join('')}</div>` : ''; })()}
       ${editing === k ? `<div class="note-edit"><input data-note-in value="${esc(n?.note ?? '')}" placeholder="Note for this system only"><button type="button" class="small primary" data-note-save="${k}">Save</button></div>` : ''}
       <div class="step-tools">
         ${c ? `<span class="muted small">✓ ${esc(c.done_by_name ?? '')} ${new Date(c.done_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>` : ''}
         <button type="button" class="link small" data-note="${k}">${n?.note ? 'Edit note' : 'Note'}</button>
-        <label class="link small">${n?.photo_path ? 'Replace photo' : 'Photo'}<input type="file" accept="image/*" capture="environment" hidden data-photo="${k}"></label>
-        ${n?.photo_path ? `<button type="button" class="link small" data-rm-photo="${k}">Remove photo</button>` : ''}
+        <label class="link small">+ Photos<input type="file" accept="image/*" multiple hidden data-photo="${k}"></label>
         ${st.equipment_id ? `<button type="button" class="link small" data-del-own="${k}">Delete step</button>` : `<button type="button" class="link small" data-skip="${k}">Not on this system</button>`}
       </div></li>`;
   };
@@ -4453,6 +4555,7 @@ async function openTask(taskId, proc, onDone) {
       ${cl.secs.map((sc) => { const its = sc.items.filter((it) => !notes.get(nk(it))?.skip); return `${many ? `<h4 class="cl-sec">${esc(sc.label)} <span class="muted small">${its.filter((it) => checks.has(it.key)).length}/${its.length}</span></h4>` : ''}
         <ol class="checklist">${its.map(itemRow).join('')}</ol>`; }).join('')}
       ${skipped.length ? `<details class="skipped"><summary>${skipped.length} step${skipped.length > 1 ? 's' : ''} not on this system</summary><ul class="list">${skipped.map((it) => `<li><span class="li-name muted">${many ? `<b>${esc(it.sec.label)}:</b> ` : ''}${esc(it.step.text)}</span><span class="li-value"><button type="button" class="small" data-unskip="${it.key}">Put back</button></span></li>`).join('')}</ul></details>` : ''}
+      ${sysType(eq) === 'pumps' ? `<button type="button" class="small" data-act="add-covered">+ Pivot or solid set on this pump station</button>` : ''}
       <div class="add-step card">
         <b>Add a step</b>
         <textarea rows="2" data-new-text placeholder="What did you do here?"></textarea>
@@ -4486,23 +4589,24 @@ async function openTask(taskId, proc, onDone) {
     $$('[data-unskip]', dlg).forEach((b) => (b.onclick = () => busy(() => saveNote(itOf(b.dataset.unskip), { skip: false }))));
     $$('[data-del-own]', dlg).forEach((b) => (b.onclick = () => { if (confirm('Delete this step from this system?')) busy(() => q(sb.from('procedure_steps').update({ active: false }).eq('step_id', itOf(b.dataset.delOwn).step.step_id))); }));
     $$('[data-photo]', dlg).forEach((inp) => (inp.onchange = (e) => {
-      const f = e.target.files[0]; if (!f) return;
+      const files = [...e.target.files]; if (!files.length) return;
       const it = itOf(inp.dataset.photo);
       busy(async () => {
-        const blob = await shrinkImage(f, 1600);
-        const path = `procedures/${proc.procedure_id}/sys-${it.noteEq}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
-        const { error } = await sb.storage.from('maintenance').upload(path, blob, { contentType: blob.type || 'image/jpeg' });
-        if (error) { toast(`Upload failed: ${error.message}`, true); return; }
-        const old = notes.get(nk(it))?.photo_path;
-        await saveNote(it, { photo_path: path });
-        if (old) await sb.storage.from('maintenance').remove([old]);
+        for (const f of files) {
+          const blob = await shrinkImage(f, 1600);
+          const path = `procedures/${proc.procedure_id}/sys-${it.noteEq}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
+          const { error } = await sb.storage.from('maintenance').upload(path, blob, { contentType: blob.type || 'image/jpeg' });
+          if (error) { toast(`Upload failed: ${error.message}`, true); return; }
+          await q(sb.from('procedure_step_photos').insert({ step_id: it.step.step_id, equipment_id: it.noteEq, path }));
+        }
+        toast(files.length > 1 ? `${files.length} photos added` : 'Photo added');
       });
     }));
-    $$('[data-rm-photo]', dlg).forEach((b) => (b.onclick = () => busy(async () => {
-      const it = itOf(b.dataset.rmPhoto), old = notes.get(nk(it))?.photo_path;
-      await saveNote(it, { photo_path: null });
-      if (old) await sb.storage.from('maintenance').remove([old]);
-    })));
+    $$('[data-rm-ph]', dlg).forEach((b) => (b.onclick = () => {
+      if (!confirm('Delete this photo?')) return;
+      const ph = photos.find((x) => x.photo_id === Number(b.dataset.rmPh));
+      busy(async () => { await sb.storage.from('maintenance').remove([ph.path]); await q(sb.from('procedure_step_photos').delete().eq('photo_id', ph.photo_id)); });
+    }));
     $('[data-act=add-step]', dlg).onclick = () => {
       const text = $('[data-new-text]', dlg).value.trim();
       if (!text) return $('[data-new-text]', dlg).focus();
@@ -4529,6 +4633,10 @@ async function openTask(taskId, proc, onDone) {
       dlg.close(); onDone?.();
     };
     $('[data-act=problem]', dlg).onclick = () => openJob({ equipmentId: t.equipment_id }, onDone);
+    $('[data-act=add-covered]', dlg)?.addEventListener('click', () => addCovered(eq, async () => {
+      await mergeCoveredTasks(t.run_id);
+      openTask(taskId, proc, onDone);
+    }));
   };
   await load();
   draw();

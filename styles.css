@@ -594,7 +594,11 @@ button.link { background: none; border: none; padding: 0; color: var(--accent); 
 .checklist { padding-left: 1.3rem; display: flex; flex-direction: column; gap: .55rem; }
 .checklist li.done > label span { color: var(--muted); text-decoration: line-through; }
 .checklist .check { align-items: flex-start; }
-.checklist input[type=checkbox] { width: 1.25rem; height: 1.25rem; flex: none; margin-top: .1rem; }
+.checklist input[type=checkbox] { width: 26px; height: 26px; flex: none; margin-top: -.1rem; border-radius: 7px; background: var(--surface); border: 2px solid var(--border); }
+.checklist input[type=checkbox]::after { display: none; }
+.checklist input[type=checkbox]:checked { background: var(--green); border-color: var(--green); }
+.checklist input[type=checkbox]:checked::after { display: block; content: ""; position: absolute; left: 7px; top: 2px; width: 7px; height: 13px; border: solid #fff; border-width: 0 3px 3px 0; border-radius: 0; background: none; box-shadow: none; transform: rotate(45deg); }
+.checklist .check { display: flex; gap: .6rem; }
 .step-img { max-width: 220px; max-height: 160px; border-radius: var(--radius); margin: .3rem 0 0 1.8rem; display: block; }
 .step-list { padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: .4rem; }
 .step-row { display: flex; gap: .4rem; align-items: flex-start; }
@@ -690,3 +694,10 @@ h4.overdue { color: var(--danger); }
 }
 dialog { overflow-y: auto; overscroll-behavior: contain; }
 html:has(dialog[open]) { overflow: hidden; }
+.step-photos { display: flex; flex-wrap: wrap; gap: .4rem; margin: .35rem 0 0 2.4rem; }
+.step-photos img { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; display: block; }
+.step-photos .sp { position: relative; }
+.step-photos .sp button { position: absolute; top: 2px; right: 2px; background: rgb(255 255 255 / .85); width: 24px; height: 24px; min-height: 0; }
+.step-tools { margin-left: 2.4rem; }
+.step-note { margin-left: 2.4rem; }
+dialog.stacked { z-index: 10; }
