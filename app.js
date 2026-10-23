@@ -83,15 +83,15 @@ function autoCropYear(operation, date, cys) {
 const cyName = (c) => (c ? `${cropName(c.crop_id)}${c.variety ? ' · ' + c.variety : ''} (${c.season})` : '');
 const equipName = (id) => refs.equipment.find((e) => e.equipment_id === id)?.name ?? '';
 // ---- Equipment numbers: 3 digits, the hundreds say the category. Unnumbered gear falls back to its type.
-const EQ_BANDS = [['tractor', 'Tractors', 100], ['pickup', 'Pickups', 200], ['truck', 'Heavy trucks & trailers', 300], ['construction', 'Construction', 400],
-  ['implement', 'Implements', 500], ['other', 'Other', 600], ['irrigation', 'Irrigation', 700], ['self', 'Self-propelled', 800], ['building', 'Buildings & shop', 900]];
+const EQ_BANDS = [['tractor', 'Tractors & self-propelled', 100], ['pickup', 'Pickups', 200], ['truck', 'Heavy trucks & trailers', 300], ['construction', 'Construction', 400],
+  ['implement', 'Implements', 500], ['other', 'Other', 600], ['irrigation', 'Irrigation', 700], ['building', 'Buildings & shop', 900]];
 const EQ_SUBS = {
   implement: [['Tillage', 500, 519], ['Planting', 520, 539], ['Cultivation & bedding', 540, 559], ['Harvest', 560, 579], ['Application', 580, 599]],
   irrigation: [['Pivots', 700, 749], ['Pumps', 750, 779], ['Mainlines & wells', 780, 799]],
 };
-const TYPE_BAND = [[/tractor/i, 100], [/pickup/i, 200], [/truck|trailer/i, 300], [/loader|forklift|scraper|blade|excavat|backhoe|skid/i, 400],
+const TYPE_BAND = [[/tractor|combine|swather|windrower|sprayer/i, 100], [/pickup/i, 200], [/truck|trailer/i, 300], [/loader|forklift|scraper|blade|excavat|backhoe|skid/i, 400],
   [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow/i, 500], [/planter|drill/i, 520], [/cultivat|corrugat|dammer|toolbar|bedder|marker/i, 540],
-  [/bean cutter|header|digger/i, 560], [/combine|swather|windrower|sprayer/i, 800], [/pivot/i, 700], [/pump/i, 750], [/well|mainline/i, 780],
+  [/bean cutter|header|digger/i, 560], [/pivot/i, 700], [/pump/i, 750], [/well|mainline/i, 780],
   [/building|shop|shed|\bbin/i, 900]];
 const eqNum = (e) => (/^\d{3}$/.test(String(e?.unit_no ?? '').trim()) ? Number(e.unit_no) : null);
 const eqBandStart = (e) => { const n = eqNum(e); return n != null ? n : TYPE_BAND.find(([re]) => re.test(e?.type ?? ''))?.[1] ?? 600; };
@@ -283,8 +283,12 @@ const CRUD = {
       { key: 'model', label: 'Model', type: 'text', list: true },
       { key: 'model_year', label: 'Model year', listLabel: 'Year', type: 'number', step: '1', list: true },
       { key: 'serial_no', label: 'Serial number / PIN', listLabel: 'Serial / PIN', type: 'text', list: true },
-      { key: 'unit_no', label: 'Equipment # (100s tractors, 200s pickups, 300s trucks & trailers, 400s construction, 500s implements, 600s other, 700s irrigation, 800s self-propelled, 900s buildings)', listLabel: 'No.', type: 'text' },
+      { key: 'unit_no', label: 'Equipment # (100s tractors & self-propelled, 200s pickups, 300s trucks & trailers, 400s construction, 500s implements, 600s other, 700s irrigation, 900s buildings)', listLabel: 'No.', type: 'text' },
       { key: 'engine_serial', label: 'Engine serial', type: 'text' },
+      { key: 'hp', label: 'Horsepower (pumps)', type: 'number', step: '0.1' },
+      { key: 'frame_size', label: 'Frame size (pumps)', type: 'text' },
+      { key: 'meter_no', label: 'Meter number (pumps)', type: 'text' },
+      { key: 'vfd', label: 'Has a VFD (pumps)', type: 'checkbox' },
       { key: 'hours', label: 'Hours', type: 'number', step: '0.1', list: true },
       { key: 'hours_date', label: 'Hours as of', type: 'date' },
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
@@ -304,7 +308,7 @@ const CRUD = {
       ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
-    afterRender: (form, row) => { equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row); equipmentService(form, row); equipmentPhotos(form, row); },
+    afterRender: (form, row) => { pumpOnlyFields(form); equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row); equipmentService(form, row); equipmentPhotos(form, row); },
   },
   worktypes: {
     table: 'operation_types', pk: 'operation', title: 'Work types', singular: 'work type', order: ['sort_order', 'operation'],
@@ -3468,6 +3472,12 @@ async function shareFields(fields) {
 // =====================================================================
 let setupTab = 'riders';
 // ---- "Used for" tags: which work types a machine can do. Saved as you tap.
+// Pump details only show for pumps.
+function pumpOnlyFields(form) {
+  const keys = ['hp', 'frame_size', 'meter_no', 'vfd'].filter((k) => form.elements[k]);
+  const sync = () => { const pump = /pump/i.test(form.elements.type?.value ?? ''); keys.forEach((k) => { form.elements[k].closest('label').hidden = !pump; }); };
+  form.elements.type?.addEventListener('input', sync); sync();
+}
 // Suggest the next free number for the type typed in.
 function equipmentNumberHint(form, row) {
   const inp = form.elements.unit_no, typeIn = form.elements.type;
@@ -3671,7 +3681,7 @@ async function renderMaint(el) {
     </div>
     ${s.view === 'repairs' ? (open.length ? `<ul class="list job-list card">${open.map((j) => `<li class="${j.down ? 'down' : ''}">
         <span class="li-name"><b>${esc(j.title)}</b> ${j.down ? '<span class="badge bad">DOWN</span>' : ''} <span class="badge ${j.status === 'in_progress' ? 'up' : ''}">${jobStatusName(j.status)}</span>
-          <span class="muted small">${esc(eqOf(j.equipment_id) ? eqLabel(eqOf(j.equipment_id)) : '')} · reported ${fmtDateY(j.reported_on)}${j.reported_by ? ' by ' + esc(operatorName(j.reported_by)) : ''}${photoN(j, 'problem') ? ` · 📷 ${photoN(j, 'problem')}` : ''}</span></span>
+          <span class="muted small">${esc(eqOf(j.equipment_id) ? eqLabel(eqOf(j.equipment_id)) : '')} · reported ${fmtDateY(j.reported_on)}${j.reported_by || j.reported_by_email ? ' by ' + esc(operatorName(j.reported_by) || j.reported_by_email) : ''}${photoN(j, 'problem') ? ` · 📷 ${photoN(j, 'problem')}` : ''}</span></span>
         <span class="li-value"><button class="small" data-job="${j.job_id}">Open</button></span></li>`).join('')}</ul>`
       : '<div class="empty">No open repairs.</div>') : ''}
     ${s.view === 'service' ? (dues.length ? `<ul class="list job-list card">${dues.map(({ iv, eq, d }) => `<li class="due-${d.state}">
@@ -3710,6 +3720,9 @@ async function openJob(opts, onDone) {
   const v = j ?? { kind: opts.kind ?? 'repair', status: opts.status ?? 'open', equipment_id: opts.equipmentId ?? null, interval_id: opts.intervalId ?? null,
     title: opts.title ?? '', reported_on: localDate(), completed_on: opts.status === 'done' ? localDate() : null, down: false };
   const ivs = (await sb.from('service_intervals').select('*').eq('active', true)).data ?? [];
+  // Whoever is signed in is the reporter on a new record; an existing record keeps its reporter.
+  const me = await myOperator();
+  const reporter = j ? (operatorName(j.reported_by) || j.reported_by_email || '—') : (me?.name ?? myEmail ?? '—');
   const dlg = $('#dialog');
   dlg.classList.add('wide');
   dlg.innerHTML = `<form class="form job-form">
@@ -3724,7 +3737,7 @@ async function openJob(opts, onDone) {
     <label class="check"><input type="checkbox" name="down" ${v.down ? 'checked' : ''}> Down — can't be used until fixed</label>
     <div class="row2">
       <label>Status<select name="status">${JOB_STATUS.map(([k, l]) => `<option value="${k}" ${v.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      <label>Reported by<select name="reported_by"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === v.reported_by).map((o) => `<option value="${o.operator_id}" ${o.operator_id === v.reported_by ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
+      <div class="ro-field"><span>Reported by</span><b>${esc(reporter)}</b></div>
     </div>
     <div class="row2">
       <label>Reported on<input type="date" name="reported_on" value="${esc(v.reported_on ?? '')}"></label>
@@ -3777,7 +3790,7 @@ async function openJob(opts, onDone) {
     const row = {
       equipment_id: Number(val('equipment_id')), kind: val('kind'), interval_id: val('kind') === 'service' ? n('interval_id') : null,
       title: val('title'), description: val('description') || null, down: isDone ? false : el.down.checked, status: val('status'),
-      reported_by: n('reported_by'), reported_on: val('reported_on') || localDate(), completed_on: isDone ? val('completed_on') || localDate() : null,
+      ...(j ? {} : { reported_by: me?.operator_id ?? null, reported_by_email: myEmail || null }), reported_on: val('reported_on') || localDate(), completed_on: isDone ? val('completed_on') || localDate() : null,
       done_by: isDone ? val('done_by') || null : null, hours_at: isDone ? n('hours_at') : null, cost: isDone ? n('cost') : null,
       vendor: isDone ? val('vendor') || null : null, invoice_no: isDone ? val('invoice_no') || null : null, notes: val('notes') || null,
       updated_at: new Date().toISOString(),
@@ -3786,7 +3799,12 @@ async function openJob(opts, onDone) {
     try {
       let id = j?.job_id;
       if (j) await q(sb.from('maint_jobs').update(row).eq('job_id', id));
-      else id = (await q(sb.from('maint_jobs').insert(row).select('job_id').single())).job_id;
+      else {
+        let r = await sb.from('maint_jobs').insert(row).select('job_id').single();
+        if (r.error && /reported_by_email/.test(r.error.message ?? '')) { delete row.reported_by_email; r = await sb.from('maint_jobs').insert(row).select('job_id').single(); }
+        if (r.error) { toast(r.error.message, true); throw r.error; }
+        id = r.data.job_id;
+      }
       // Newer hours reading → update the machine's hours.
       const eq = refs.equipment.find((x) => x.equipment_id === row.equipment_id);
       if (row.hours_at != null && (eq?.hours == null || row.hours_at > Number(eq.hours))) {

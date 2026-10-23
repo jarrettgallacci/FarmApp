@@ -611,3 +611,5 @@ button.link { background: none; border: none; padding: 0; color: var(--accent); 
 .irr-legend i { display: inline-block; width: .9rem; height: .9rem; border-radius: 50%; margin-right: .3rem; vertical-align: -2px; }
 .section-head { flex-wrap: wrap; gap: .5rem; }
 .section-head .row { flex-wrap: wrap; justify-content: flex-end; }
+.ro-field { display: flex; flex-direction: column; gap: .25rem; font-size: .9rem; }
+.ro-field b { padding: .45rem 0; }
