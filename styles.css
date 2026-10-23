@@ -630,3 +630,5 @@ label.link { color: var(--accent); text-decoration: underline; }
 label.btn { display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; font-weight: 500; }
 .hours-row { align-items: flex-end; flex-wrap: wrap; margin-bottom: .6rem; }
 .hours-row label { display: flex; flex-direction: column; gap: .2rem; }
+h4.overdue { color: var(--danger); }
+.work-form .seg { margin-bottom: .3rem; }
