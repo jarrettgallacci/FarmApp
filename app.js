@@ -894,21 +894,28 @@ async function renderHome(el) {
 
 
   // ---- Water changes card (by field)
-  const changeLine = ({ a, b }) => {
+  // Changes already made in the field (shared across everyone).
+  const checks = changedToday ? ((await sb.from('water_change_checks').select('field_id').eq('order_id', current.order_id)).data ?? null) : [];
+  const checked = new Set((checks ?? []).map((c) => c.field_id));
+  const changeLine = ({ f, a, b }) => {
     let value, badge, name = b.on ? b.name : a.name;
     if (!b.on) { value = 'Off'; badge = '<span class="badge off">Off</span>'; }
     else if (!a.on) { value = `On ${num(b.cfs)} CFS`; badge = '<span class="badge new">On</span>'; }
     else if (a.halfKey !== b.halfKey && Math.abs(a.cfs - b.cfs) < 0.001) { name = b.name; value = `Moved from ${esc(a.name)}`; badge = '<span class="badge up">Move</span>'; }
     else { value = `${num(a.cfs)} → ${num(b.cfs)} CFS`; badge = b.cfs > a.cfs ? '<span class="badge up">Up</span>' : '<span class="badge down">Down</span>'; }
-    return `<li><span class="li-name">${esc(name)}</span><span class="li-value">${value} ${badge}</span></li>`;
+    const tick = checks ? `<label class="done-tick" title="Mark done"><input type="checkbox" data-wdone="${f.field_id}" ${checked.has(f.field_id) ? 'checked' : ''}><span>Done</span></label>` : '';
+    return `<li class="${checked.has(f.field_id) ? 'is-done' : ''}"><span class="li-name">${esc(name)}</span><span class="li-value">${value} ${badge}${tick}</span></li>`;
   };
   const groupHtml = (gs, line) => gs.map((g) => `<div class="group"><h4>${esc(g.rider.name)}</h4>
     <ul class="list">${g.rows.map(line).join('')}</ul></div>`).join('');
 
   let changesHtml;
   if (changedToday) {
+    const todo = changeGroups.map((g) => ({ ...g, rows: g.rows.filter((r) => !checked.has(r.f.field_id)) })).filter((g) => g.rows.length);
+    const doneRows = changeGroups.flatMap((g) => g.rows.filter((r) => checked.has(r.f.field_id)));
     changesHtml = changeGroups.length
-      ? groupHtml(changeGroups, changeLine)
+      ? (todo.length ? groupHtml(todo, changeLine) : '<p class="muted">All of today\'s changes are done.</p>')
+        + (doneRows.length ? `<details class="done-list"><summary>${doneRows.length} done</summary><ul class="list">${doneRows.map(changeLine).join('')}</ul></details>` : '')
       : `<p class="muted">Today's order is the same as the previous one. No changes.</p>`;
   } else if (todayRows[0]) {
     changesHtml = `<p class="notice">Today's order was saved as a draft but never sent, so it isn't counted.
@@ -964,6 +971,14 @@ async function renderHome(el) {
     </div>`;
 
   $$('[data-act=tomorrow]', el).forEach((b) => (b.onclick = () => { orderState.date = tomorrow; show('order'); }));
+  $$('[data-wdone]', el).forEach((c) => (c.onchange = async () => {
+    const fid = Number(c.dataset.wdone);
+    try {
+      if (c.checked) await q(sb.from('water_change_checks').upsert({ order_id: current.order_id, field_id: fid }));
+      else await q(sb.from('water_change_checks').delete().eq('order_id', current.order_id).eq('field_id', fid));
+    } catch { /* shown */ }
+    renderHome(el);
+  }));
   drawForecast($('#forecast', el));
 }
 
