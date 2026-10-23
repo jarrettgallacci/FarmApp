@@ -635,3 +635,5 @@ h4.overdue { color: var(--danger); }
 .custom-box { display: flex; flex-direction: column; gap: .5rem; border: 1px dashed var(--border); border-radius: var(--radius); padding: .6rem .7rem; }
 .gps-row { flex-wrap: wrap; }
 .charge { color: var(--green); font-weight: 600; }
+.home-head { display: flex; justify-content: space-between; align-items: flex-end; gap: .8rem; flex-wrap: wrap; }
+.scan-btn { padding: .6rem 1rem; font-weight: 600; }

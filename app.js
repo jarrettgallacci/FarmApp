@@ -1028,8 +1028,9 @@ async function renderHome(el) {
 
   el.innerHTML = `
     <div class="home-head">
-      <p class="eyebrow">${esc(fmtLong(today))}</p>
-      <h2>Today on the farm</h2>
+      <div><p class="eyebrow">${esc(fmtLong(today))}</p>
+      <h2>Today on the farm</h2></div>
+      <button class="scan-btn" data-act="scan">📷 Scan QR</button>
     </div>
     ${needsOrder ? `<div class="alert">
       <span><b>Tomorrow's water order hasn't been sent.</b> It's due to the ditch riders around 2:30 PM.</span>
@@ -1055,6 +1056,7 @@ async function renderHome(el) {
 
   $$('[data-act=tomorrow]', el).forEach((b) => (b.onclick = () => { orderState.date = tomorrow; show('order'); }));
   drawSchedule($('#dash-sched', el), () => renderHome(el));
+  $('[data-act=scan]', el).onclick = () => openScanner();
   $$('[data-wdone]', el).forEach((c) => (c.onchange = async () => {
     const fid = Number(c.dataset.wdone);
     try {
