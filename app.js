@@ -277,7 +277,7 @@ const CRUD = {
     filters: [{ key: 'cat', all: 'All categories', options: () => EQ_BANDS.map(([k, l, b]) => [k, `${b}s · ${l}`]), test: (r, v) => eqCat(r) === v },
       { key: 'work', all: 'All work', options: () => refs.workTypes.filter((w) => w.active).map((w) => [w.operation, workLabel(w.operation)]),
       test: (r, v) => (r.equipment_work_types ?? []).some((x) => x.operation === v) },
-      { key: 'type', all: 'All types', options: () => ['Tractor', 'Combine', 'Sprayer', 'Windrower', 'Implement', 'Truck', 'Pivot', 'Pump', 'Well', 'Mainline', 'Building', 'Other'].map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
+      { key: 'type', all: 'All types', options: () => typesInCategory(CRUD.equipment.state?.f?.cat).map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
     columns: [
       { key: 'num_list', label: 'No.', list: true, form: false, compute: (r) => (eqNum(r) != null ? `#${eqNum(r)}` : '') },
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
@@ -313,8 +313,18 @@ const CRUD = {
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
     headExtra: '<button data-act="scan">Scan QR</button><button data-act="qr">Print QR labels</button>',
-    wireHead: (el, rows) => { $('[data-act=scan]', el).onclick = () => openScanner(); $('[data-act=qr]', el).onclick = () => openQrLabels(rows); },
-    afterRender: (form, row) => { equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row).then(() => syncType()); equipmentService(form, row); equipmentPhotos(form, row); const syncType = typeOnlyFields(form, row); },
+    wireHead: (el, rows) => {
+      $('[data-act=scan]', el).onclick = () => openScanner(); $('[data-act=qr]', el).onclick = () => openQrLabels(rows);
+      // Picking a category narrows the type list to that category's types.
+      const catSel = $('[data-filter=cat]', el), typeSel = $('[data-filter=type]', el), st = CRUD.equipment.state;
+      catSel?.addEventListener('change', () => {
+        const types = typesInCategory(catSel.value);
+        typeSel.innerHTML = `<option value="">All types</option>${types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('')}`;
+        if (st.f.type && types.some((t) => t.toLowerCase() === st.f.type.toLowerCase())) typeSel.value = types.find((t) => t.toLowerCase() === st.f.type.toLowerCase());
+        else if (st.f.type) { st.f.type = ''; typeSel.value = ''; typeSel.dispatchEvent(new Event('change')); }
+      });
+    },
+    afterRender: (form, row) => { narrowTypeChoices(form, row); equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row).then(() => syncType()); equipmentService(form, row); equipmentPhotos(form, row); const syncType = typeOnlyFields(form, row); },
   },
   worktypes: {
     table: 'operation_types', pk: 'operation', title: 'Work types', singular: 'work type', order: ['sort_order', 'operation'],
@@ -3638,6 +3648,12 @@ async function shareFields(fields) {
 // =====================================================================
 let setupTab = 'riders';
 // ---- "Used for" tags: which work types a machine can do. Saved as you tap.
+// Types in a category: the standard ones for it plus any in use there. No category = every type.
+function typesInCategory(cat) {
+  const all = equipTypeOptions().map(([t]) => t);
+  const inUse = new Set(refs.equipment.filter((e) => !cat || eqCat(e) === cat).map((e) => (e.type ?? '').trim().toLowerCase()));
+  return all.filter((t) => !cat || eqCat({ type: t }) === cat || inUse.has(t.toLowerCase()));
+}
 // Equipment types for the dropdown, in number-band order; any other type already in use is kept.
 const EQ_TYPES = ['Tractor', 'Combine', 'Swather / windrower', 'Sprayer', 'Pickup', 'Truck', 'Trailer', 'Loader', 'Forklift', 'Scraper', 'Blade',
   'Disk', 'Disk ripper', 'Ripper', 'Plough', 'Rototiller', 'Packer', 'Skewtreader', 'Shredder', 'Planter', 'Drill',
@@ -3646,6 +3662,13 @@ function equipTypeOptions() {
   const used = refs.equipment.map((e) => (e.type ?? '').trim()).filter(Boolean);
   const extra = [...new Set(used.filter((t) => !EQ_TYPES.some((x) => x.toLowerCase() === t.toLowerCase())))].sort();
   return [...EQ_TYPES, ...extra].map((t) => [t, t]);
+}
+// New equipment while a category filter is on: only that category's types in the Type dropdown.
+function narrowTypeChoices(form, row) {
+  const cat = CRUD.equipment.state?.f?.cat, sel = form.elements.type;
+  if (row || !cat || !sel) return;
+  const keep = new Set(typesInCategory(cat).map((t) => t.toLowerCase()));
+  [...sel.options].forEach((o) => { if (o.value && !keep.has(o.value.toLowerCase())) o.remove(); });
 }
 // Type-specific parts of the equipment form show only for the types they apply to.
 const ENGINE_RE = /tractor|combine|swather|windrower|sprayer|pickup|truck|loader|forklift|scraper|blade|excavat|backhoe|skid/i;
