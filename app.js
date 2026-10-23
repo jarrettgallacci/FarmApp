@@ -3976,7 +3976,11 @@ async function renderSeasonal(el) {
   const procs = procRes.data, runs = runRes.data ?? [];
   const me = await myOperator();
   const procOf = (id) => procs.find((p) => p.procedure_id === id);
-  const progress = (t, p) => { const n = stepsFor(p?.procedure_steps ?? [], t.equipment_id).length; return { done: (t.procedure_checks ?? []).length, n }; };
+  const skips = new Set(((await sb.from('procedure_step_notes').select('step_id, equipment_id').eq('skip', true)).data ?? []).map((x) => `${x.step_id}:${x.equipment_id}`));
+  const progress = (t, p) => {
+    const live = stepsFor(p?.procedure_steps ?? [], t.equipment_id).filter((st) => !skips.has(`${st.step_id}:${t.equipment_id}`));
+    return { done: (t.procedure_checks ?? []).filter((c) => live.some((st) => st.step_id === c.step_id)).length, n: live.length };
+  };
   const run = s.run ? runs.find((r) => r.run_id === s.run) : null;
   const reload = () => renderSeasonal(el);
   if (run) {
@@ -3986,7 +3990,7 @@ async function renderSeasonal(el) {
     const nDone = run.procedure_tasks.filter((t) => t.status === 'done').length;
     el.innerHTML = `${maintTabs()}
       <div class="section-head"><h2>${esc(p?.name ?? 'Procedure')} · ${run.season}</h2>
-        <div class="row"><button data-act="back">‹ All rounds</button><button data-act="add-sys">+ Systems</button></div></div>
+        <div class="row"><button data-act="back">‹ All rounds</button><button data-act="add-sys">+ Systems</button><button data-act="new-sys">+ New system</button></div></div>
       <p class="muted small">${nDone} of ${run.procedure_tasks.length} done · started ${fmtDateY(run.started_on)}${run.due_on ? ` · due ${fmtDateY(run.due_on)}` : ''}</p>
       <div class="progress"><span style="width:${run.procedure_tasks.length ? (nDone / run.procedure_tasks.length) * 100 : 0}%"></span></div>
       <div class="filters"><label class="check"><input type="checkbox" data-mine ${s.mine ? 'checked' : ''} ${me ? '' : 'disabled'}> Only my tasks${me ? '' : ' <span class="muted small">(set your sign-in email under Setup → Operators)</span>'}</label></div>
@@ -4006,6 +4010,7 @@ async function renderSeasonal(el) {
     }));
     $$('[data-task]', el).forEach((b) => (b.onclick = () => openTask(Number(b.dataset.task), p, reload)));
     $('[data-act=add-sys]', el).onclick = () => startRound(procs, reload, run);
+    $('[data-act=new-sys]', el).onclick = () => newSystem(run, reload);
     $('[data-act=del-run]', el).onclick = async () => {
       if (!confirm('Delete this whole round and everything ticked off in it?')) return;
       try { await q(sb.from('procedure_runs').delete().eq('run_id', run.run_id)); s.run = null; reload(); } catch { /* shown */ }
@@ -4083,52 +4088,157 @@ function startRound(procs, onDone, run = null) {
   if (!dlg.open) dlg.showModal();
 }
 
-// One system's checklist: tick steps; status follows the ticks.
+// Add a pump station / pivot / solid set that isn't in the app yet, straight into a round.
+function newSystem(run, onDone) {
+  const kinds = [['Pump', 'Pump station', 760], ['Pivot', 'Pivot', 700], ['Solid set', 'Solid set', 740], ['Mainline', 'Mainline or well', 780]];
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.innerHTML = `<form class="form">
+    <div class="dialog-head"><h3>New system</h3><p class="muted small">Added to equipment and to this round.</p></div>
+    <div class="row2"><label>Name *<input name="name" required placeholder="e.g. Pump Station 3"></label>
+      <label>Kind<select name="kind">${kinds.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label></div>
+    <div class="lines-head"><b>Fields it serves</b></div>
+    <div class="chips">${fieldsInOrder().filter((f) => f.active).map((f) => `<label class="chip-toggle"><input type="checkbox" value="${f.field_id}"><span>${esc(f.name)}</span></label>`).join('')}</div>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Add</button></div></form>`;
+  const form = $('form', dlg);
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const kind = kinds.find(([k]) => k === form.elements.kind.value);
+    try {
+      const [eq] = await q(sb.from('equipment').insert({ name: form.elements.name.value.trim(), type: kind[0], unit_no: String(nextFreeNumber(kind[2]) ?? ''), active: true }).select('equipment_id'));
+      const fids = $$('.chips input:checked', dlg).map((c) => Number(c.value));
+      if (fids.length) await q(sb.from('equipment_fields').insert(fids.map((f) => ({ equipment_id: eq.equipment_id, field_id: f }))));
+      await q(sb.from('procedure_tasks').insert({ run_id: run.run_id, equipment_id: eq.equipment_id }));
+      await loadRefs();
+      dlg.close(); toast('System added'); onDone?.();
+    } catch { /* shown */ }
+  };
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+// One system's checklist: tick steps, and build the procedure while doing it —
+// add steps, notes and photos for this system, or mark a step "not on this system".
 async function openTask(taskId, proc, onDone) {
   const [t] = await q(sb.from('procedure_tasks').select('*, procedure_checks(*)').eq('task_id', taskId));
-  const steps = stepsFor(proc?.procedure_steps ?? [], t.equipment_id);
-  const notes = new Map(steps.length ? ((await sb.from('procedure_step_notes').select('step_id, note').eq('equipment_id', t.equipment_id).in('step_id', steps.map((x) => x.step_id))).data ?? []).map((n) => [n.step_id, n.note]) : []);
-  const paths = steps.filter((st) => st.photo_path).map((st) => st.photo_path);
-  const urls = paths.length ? (await sb.storage.from('maintenance').createSignedUrls(paths, 3600)).data ?? [] : [];
-  const urlOf = (p) => urls[paths.indexOf(p)]?.signedUrl;
   const eq = refs.equipment.find((e) => e.equipment_id === t.equipment_id);
+  const type = sysType(eq);
+  const typeLabel = SYS_TYPES.find(([k]) => k === type)?.[1]?.toLowerCase();
   const me = await myOperator();
   const checks = new Map(t.procedure_checks.map((c) => [c.step_id, c]));
   const dlg = $('#dialog');
   dlg.classList.add('wide');
+  let steps = [], notes = new Map(), urls = new Map(), editing = null;
+  const load = async () => {
+    [proc] = await q(sb.from('procedures').select('*, procedure_steps(*)').eq('procedure_id', proc.procedure_id));
+    steps = stepsFor(proc.procedure_steps ?? [], t.equipment_id);
+    notes = new Map(steps.length ? ((await sb.from('procedure_step_notes').select('*').eq('equipment_id', t.equipment_id).in('step_id', steps.map((x) => x.step_id))).data ?? []).map((n) => [n.step_id, n]) : []);
+    const paths = [...steps.map((st) => st.photo_path), ...[...notes.values()].map((n) => n.photo_path)].filter((x) => x && !urls.has(x));
+    if (paths.length) ((await sb.storage.from('maintenance').createSignedUrls(paths, 3600)).data ?? []).forEach((u, i) => urls.set(paths[i], u.signedUrl));
+  };
+  const live = () => steps.filter((st) => !notes.get(st.step_id)?.skip);
+  const setStatus = async () => {
+    const lv = live(), n = lv.filter((st) => checks.has(st.step_id)).length;
+    const status = n === 0 ? 'todo' : n >= lv.length ? 'done' : 'in_progress';
+    if (status !== t.status) {
+      await q(sb.from('procedure_tasks').update({ status, completed_on: status === 'done' ? localDate() : null }).eq('task_id', t.task_id));
+      if (status === 'done') toast('All steps done');
+      t.status = status;
+    }
+  };
+  const saveNote = async (sid, patch) => {
+    const cur = notes.get(sid) ?? { step_id: sid, equipment_id: t.equipment_id, note: null, photo_path: null, skip: false };
+    const row = { ...cur, ...patch };
+    delete row.created_at;
+    if (!row.note && !row.photo_path && !row.skip) await q(sb.from('procedure_step_notes').delete().eq('step_id', sid).eq('equipment_id', t.equipment_id));
+    else await q(sb.from('procedure_step_notes').upsert({ step_id: sid, equipment_id: t.equipment_id, note: row.note, photo_path: row.photo_path, skip: row.skip }));
+  };
+  const tick = async (sid, on) => {
+    if (on) {
+      const row = { task_id: t.task_id, step_id: sid, done_by_name: me?.name ?? myEmail ?? null };
+      await q(sb.from('procedure_checks').insert(row));
+      checks.set(sid, { ...row, done_at: new Date().toISOString() });
+    } else { await q(sb.from('procedure_checks').delete().eq('task_id', t.task_id).eq('step_id', sid)); checks.delete(sid); }
+  };
   const draw = () => {
+    const lv = live(), skipped = steps.filter((st) => notes.get(st.step_id)?.skip);
     dlg.innerHTML = `<div class="form task-form">
       <div class="dialog-head"><h3>${esc(eq ? eqLabel(eq) : '?')}</h3><p class="muted small">${esc(proc?.name ?? '')}${proc?.notes ? ` · ${esc(proc.notes)}` : ''}</p></div>
-      <p><b>${checks.size}</b> of ${steps.length} steps done</p>
-      <ol class="checklist">${steps.map((st) => { const c = checks.get(st.step_id); return `<li class="${c ? 'done' : ''}">
+      <p><b>${lv.filter((st) => checks.has(st.step_id)).length}</b> of ${lv.length} steps done</p>
+      <ol class="checklist">${lv.map((st) => { const c = checks.get(st.step_id), n = notes.get(st.step_id); return `<li class="${c ? 'done' : ''}">
         <label class="check"><input type="checkbox" data-step="${st.step_id}" ${c ? 'checked' : ''}><span>${esc(st.text)}${st.equipment_id ? ' <span class="badge up">This system</span>' : ''}</span></label>
-        ${notes.get(st.step_id) ? `<p class="step-note">⚠ ${esc(notes.get(st.step_id))}</p>` : ''}
-        ${st.photo_path ? `<a href="${esc(urlOf(st.photo_path) ?? '#')}" target="_blank" rel="noopener"><img class="step-img" src="${esc(urlOf(st.photo_path) ?? '')}" alt=""></a>` : ''}
-        ${c ? `<span class="muted small">✓ ${esc(c.done_by_name ?? '')} ${new Date(c.done_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>` : ''}</li>`; }).join('')}</ol>
+        ${st.photo_path ? `<a href="${esc(urls.get(st.photo_path) ?? '#')}" target="_blank" rel="noopener"><img class="step-img" src="${esc(urls.get(st.photo_path) ?? '')}" alt=""></a>` : ''}
+        ${n?.note ? `<p class="step-note">⚠ ${esc(n.note)}</p>` : ''}
+        ${n?.photo_path ? `<a href="${esc(urls.get(n.photo_path) ?? '#')}" target="_blank" rel="noopener"><img class="step-img" src="${esc(urls.get(n.photo_path) ?? '')}" alt=""></a>` : ''}
+        ${editing === st.step_id ? `<div class="note-edit"><input data-note-in value="${esc(n?.note ?? '')}" placeholder="Note for this system only"><button type="button" class="small primary" data-note-save="${st.step_id}">Save</button></div>` : ''}
+        <div class="step-tools">
+          ${c ? `<span class="muted small">✓ ${esc(c.done_by_name ?? '')} ${new Date(c.done_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>` : ''}
+          <button type="button" class="link small" data-note="${st.step_id}">${n?.note ? 'Edit note' : 'Note'}</button>
+          <label class="link small">${n?.photo_path ? 'Replace photo' : 'Photo'}<input type="file" accept="image/*" capture="environment" hidden data-photo="${st.step_id}"></label>
+          ${n?.photo_path ? `<button type="button" class="link small" data-rm-photo="${st.step_id}">Remove photo</button>` : ''}
+          ${st.equipment_id ? `<button type="button" class="link small" data-del-own="${st.step_id}">Delete step</button>` : `<button type="button" class="link small" data-skip="${st.step_id}">Not on this system</button>`}
+        </div></li>`; }).join('')}</ol>
+      ${skipped.length ? `<details class="skipped"><summary>${skipped.length} step${skipped.length > 1 ? 's' : ''} not on this system</summary><ul class="list">${skipped.map((st) => `<li><span class="li-name muted">${esc(st.text)}</span><span class="li-value"><button type="button" class="small" data-unskip="${st.step_id}">Put back</button></span></li>`).join('')}</ul></details>` : ''}
+      <div class="add-step card">
+        <b>Add a step</b>
+        <textarea rows="2" data-new-text placeholder="What did you do here?"></textarea>
+        <div class="row2">
+          <label>For<select data-new-scope><option value="mine">Only ${esc(eq?.name ?? 'this system')}</option>${type ? `<option value="type">Every ${esc((typeLabel ?? '').replace(/s$/, ''))}</option>` : ''}<option value="all">Every system in this procedure</option></select></label>
+          <label>Where<select data-new-after><option value="end">At the end</option>${lv.map((st, i) => `<option value="${st.step_id}">After step ${i + 1}</option>`).join('')}</select></label>
+        </div>
+        <label class="check"><input type="checkbox" data-new-done checked> Done already</label>
+        <button type="button" class="primary small" data-act="add-step">Add step</button>
+      </div>
       <label>Notes<textarea name="notes" rows="2">${esc(t.notes ?? '')}</textarea></label>
       <div class="actions"><button type="button" data-act="problem">Report a problem</button><span class="spacer"></span><button type="button" class="primary" data-act="close">Close</button></div></div>`;
-    $$('[data-step]', dlg).forEach((c) => (c.onchange = async () => {
-      const sid = Number(c.dataset.step);
-      try {
-        if (c.checked) {
-          const row = { task_id: t.task_id, step_id: sid, done_by_name: me?.name ?? myEmail ?? null };
-          await q(sb.from('procedure_checks').insert(row));
-          checks.set(sid, { ...row, done_at: new Date().toISOString() });
-        } else { await q(sb.from('procedure_checks').delete().eq('task_id', t.task_id).eq('step_id', sid)); checks.delete(sid); }
-        const status = checks.size === 0 ? 'todo' : checks.size >= steps.length ? 'done' : 'in_progress';
-        await q(sb.from('procedure_tasks').update({ status, completed_on: status === 'done' ? localDate() : null }).eq('task_id', t.task_id));
-        if (status === 'done' && t.status !== 'done') toast('All steps done');
-        t.status = status;
-      } catch { c.checked = !c.checked; }
-      draw();
+    const busy = async (fn) => { try { await fn(); } catch { /* shown */ } await load(); await setStatus().catch(() => {}); draw(); };
+    $$('[data-step]', dlg).forEach((c) => (c.onchange = () => busy(() => tick(Number(c.dataset.step), c.checked))));
+    $$('[data-note]', dlg).forEach((b) => (b.onclick = () => { editing = Number(b.dataset.note); draw(); $('[data-note-in]', dlg)?.focus(); }));
+    $$('[data-note-save]', dlg).forEach((b) => (b.onclick = () => { const v = $('[data-note-in]', dlg).value.trim() || null; editing = null; busy(() => saveNote(Number(b.dataset.noteSave), { note: v })); }));
+    $('[data-note-in]', dlg)?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('[data-note-save]', dlg).click(); } });
+    $$('[data-skip]', dlg).forEach((b) => (b.onclick = () => busy(async () => { const sid = Number(b.dataset.skip); if (checks.has(sid)) await tick(sid, false); await saveNote(sid, { skip: true }); })));
+    $$('[data-unskip]', dlg).forEach((b) => (b.onclick = () => busy(() => saveNote(Number(b.dataset.unskip), { skip: false }))));
+    $$('[data-del-own]', dlg).forEach((b) => (b.onclick = () => { if (confirm('Delete this step from this system?')) busy(() => q(sb.from('procedure_steps').update({ active: false }).eq('step_id', Number(b.dataset.delOwn)))); }));
+    $$('[data-photo]', dlg).forEach((inp) => (inp.onchange = (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      busy(async () => {
+        const blob = await shrinkImage(f, 1600);
+        const path = `procedures/${proc.procedure_id}/sys-${t.equipment_id}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
+        const { error } = await sb.storage.from('maintenance').upload(path, blob, { contentType: blob.type || 'image/jpeg' });
+        if (error) { toast(`Upload failed: ${error.message}`, true); return; }
+        const old = notes.get(Number(inp.dataset.photo))?.photo_path;
+        await saveNote(Number(inp.dataset.photo), { photo_path: path });
+        if (old) await sb.storage.from('maintenance').remove([old]);
+      });
     }));
+    $$('[data-rm-photo]', dlg).forEach((b) => (b.onclick = () => busy(async () => {
+      const sid = Number(b.dataset.rmPhoto), old = notes.get(sid)?.photo_path;
+      await saveNote(sid, { photo_path: null });
+      if (old) await sb.storage.from('maintenance').remove([old]);
+    })));
+    $('[data-act=add-step]', dlg).onclick = () => {
+      const text = $('[data-new-text]', dlg).value.trim();
+      if (!text) return $('[data-new-text]', dlg).focus();
+      const scope = $('[data-new-scope]', dlg).value, after = $('[data-new-after]', dlg).value, done = $('[data-new-done]', dlg).checked;
+      const ref = lv.find((st) => String(st.step_id) === after);
+      const position = ref ? ref.position + 1 : Math.max(0, ...steps.map((st) => st.position)) + 10;
+      busy(async () => {
+        const row = { procedure_id: proc.procedure_id, position, text,
+          equipment_id: scope === 'mine' ? t.equipment_id : null, system_type: scope === 'type' ? type : null };
+        const [ns] = await q(sb.from('procedure_steps').insert(row).select('step_id'));
+        if (done) await tick(ns.step_id, true);
+        toast(scope === 'mine' ? 'Step added for this system' : 'Step added for every ' + (scope === 'type' ? (typeLabel ?? '').replace(/s$/, '') : 'system'));
+      });
+    };
     $('[data-act=close]', dlg).onclick = async () => {
-      const notes = $('textarea[name=notes]', dlg).value.trim() || null;
-      if (notes !== (t.notes ?? null)) { try { await q(sb.from('procedure_tasks').update({ notes }).eq('task_id', t.task_id)); } catch { /* shown */ } }
+      const nv = $('textarea[name=notes]', dlg).value.trim() || null;
+      if (nv !== (t.notes ?? null)) { try { await q(sb.from('procedure_tasks').update({ notes: nv }).eq('task_id', t.task_id)); } catch { /* shown */ } }
       dlg.close(); onDone?.();
     };
     $('[data-act=problem]', dlg).onclick = () => openJob({ equipmentId: t.equipment_id }, onDone);
   };
+  await load();
   draw();
   dlg.onclose = () => dlg.classList.remove('wide');
   if (!dlg.open) dlg.showModal();
