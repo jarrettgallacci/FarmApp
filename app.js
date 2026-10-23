@@ -3962,7 +3962,7 @@ async function myOperator() {
 // Seasonal tasks are labelled by field; the machine is the small print.
 const sysKind = (e) => SYS_TYPES.find(([k]) => k === sysType(e))?.[1]?.replace(/s$/, '') ?? e?.type ?? '';
 const taskTitle = (e) => (e ? (eqFields(e).length ? eqFields(e).join(', ') : e.name) : '?');
-const taskSub = (e) => (e ? [sysKind(e), eqNum(e) != null ? `#${eqNum(e)}` : '', eqFields(e).length ? e.name : ''].filter(Boolean).join(' · ') : '');
+const taskSub = (e) => (e ? [sysKind(e), eqNum(e) != null ? `#${eqNum(e)}` : '', eqFields(e).length && !eqFields(e).every((f) => e.name.includes(f)) ? e.name : ''].filter(Boolean).join(' · ') : '');
 const fieldRank = (e) => { const fs = (e?.equipment_fields ?? []).map((x) => fieldsInOrder().findIndex((f) => f.field_id === x.field_id)).filter((i) => i >= 0); return fs.length ? Math.min(...fs) : 1e6; };
 const taskSort = (a, b) => fieldRank(a) - fieldRank(b) || (SYS_TYPES.findIndex(([k]) => k === sysType(a)) - SYS_TYPES.findIndex(([k]) => k === sysType(b))) || eqSort(a, b);
 const stepsFor = (steps, eqId) => {
