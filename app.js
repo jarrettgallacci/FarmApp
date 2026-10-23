@@ -50,7 +50,8 @@ async function loadRefs() {
   Object.assign(refs, { riders, turnouts, fields, leases, crops, chemicals, operators });
   // Work types (tolerates the table/columns not being set up yet)
   refs.workTypes = (await sb.from('operation_types').select('*').order('sort_order', { nullsFirst: false }).order('operation')).data ?? [];
-  refs.equipment = (await sb.from('equipment').select('*, equipment_work_types(operation)').order('name')).data ?? [];
+  const eqRes = await sb.from('equipment').select('*, equipment_work_types(operation), equipment_fields(field_id)').order('name');
+  refs.equipment = (eqRes.error ? (await sb.from('equipment').select('*, equipment_work_types(operation)').order('name')).data : eqRes.data) ?? [];
   refs.appRates = (await sb.from('application_rates').select('*')).data ?? [];
 }
 // ---- Cost rates ($/acre). Machine override first, then the work type's / application method's rate.
@@ -81,6 +82,55 @@ function autoCropYear(operation, date, cys) {
 }
 const cyName = (c) => (c ? `${cropName(c.crop_id)}${c.variety ? ' · ' + c.variety : ''} (${c.season})` : '');
 const equipName = (id) => refs.equipment.find((e) => e.equipment_id === id)?.name ?? '';
+// ---- Equipment numbers: 3 digits, the hundreds say the category. Unnumbered gear falls back to its type.
+const EQ_BANDS = [['tractor', 'Tractors', 100], ['pickup', 'Pickups', 200], ['truck', 'Heavy trucks & trailers', 300], ['construction', 'Construction', 400],
+  ['implement', 'Implements', 500], ['other', 'Other', 600], ['irrigation', 'Irrigation', 700], ['self', 'Self-propelled', 800], ['building', 'Buildings & shop', 900]];
+const EQ_SUBS = {
+  implement: [['Tillage', 500, 519], ['Planting', 520, 539], ['Cultivation & bedding', 540, 559], ['Harvest', 560, 579], ['Application', 580, 599]],
+  irrigation: [['Pivots', 700, 749], ['Pumps', 750, 779], ['Mainlines & wells', 780, 799]],
+};
+const TYPE_BAND = [[/tractor/i, 100], [/pickup/i, 200], [/truck|trailer/i, 300], [/loader|forklift|scraper|blade|excavat|backhoe|skid/i, 400],
+  [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow/i, 500], [/planter|drill/i, 520], [/cultivat|corrugat|dammer|toolbar|bedder|marker/i, 540],
+  [/bean cutter|header|digger/i, 560], [/combine|swather|windrower|sprayer/i, 800], [/pivot/i, 700], [/pump/i, 750], [/well|mainline/i, 780],
+  [/building|shop|shed|\bbin/i, 900]];
+const eqNum = (e) => (/^\d{3}$/.test(String(e?.unit_no ?? '').trim()) ? Number(e.unit_no) : null);
+const eqBandStart = (e) => { const n = eqNum(e); return n != null ? n : TYPE_BAND.find(([re]) => re.test(e?.type ?? ''))?.[1] ?? 600; };
+const eqCat = (e) => EQ_BANDS.find(([, , b]) => Math.floor(eqBandStart(e) / 100) * 100 === b)?.[0] ?? 'other';
+const eqSub = (e) => (EQ_SUBS[eqCat(e)] ?? []).find(([, lo, hi]) => eqBandStart(e) >= lo && eqBandStart(e) <= hi)?.[0] ?? null;
+const eqFields = (e) => (e?.equipment_fields ?? []).map((x) => fieldById(x.field_id)?.name).filter(Boolean);
+const eqLabel = (e) => `${eqNum(e) != null ? `#${eqNum(e)} ` : ''}${e.name}${eqCat(e) === 'irrigation' && eqFields(e).length ? ` · field ${eqFields(e).join(', ')}` : ''}`;
+const eqSort = (a, b) => (eqNum(a) ?? 1e4) - (eqNum(b) ?? 1e4) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
+function nextFreeNumber(start) {
+  const band = Object.values(EQ_SUBS).flat().find(([, lo]) => lo === start) ?? [null, start, Math.floor(start / 100) * 100 + 99];
+  const used = new Set(refs.equipment.map(eqNum).filter((n) => n != null));
+  for (let n = band[1]; n <= band[2]; n++) if (!used.has(n)) return n;
+  return null;
+}
+// Category first, then the equipment in it. Returns HTML; wire with wireEquipPicker.
+function equipPickerHtml(name, cur, { required = true, label = 'Equipment' } = {}) {
+  const e0 = refs.equipment.find((e) => e.equipment_id === cur);
+  const cat = e0 ? eqCat(e0) : '';
+  return `<div class="row2 eq-picker" data-eqpick="${name}">
+    <label>Category<select data-eqcat><option value="">All categories</option>${EQ_BANDS.filter(([k]) => refs.equipment.some((e) => eqCat(e) === k)).map(([k, l, b]) => `<option value="${k}" ${k === cat ? 'selected' : ''}>${b}s · ${esc(l)}</option>`).join('')}</select></label>
+    <label>${label}${required ? ' *' : ''}<select name="${name}" ${required ? 'required' : ''}></select></label></div>`;
+}
+function wireEquipPicker(root, name, onChange) {
+  const box = $(`[data-eqpick="${name}"]`, root), catSel = $('[data-eqcat]', box), sel = $(`select[name="${name}"]`, box);
+  let cur = Number(sel.dataset.cur || 0) || null;
+  const fill = () => {
+    const cat = catSel.value;
+    const list = refs.equipment.filter((e) => (e.active || e.equipment_id === cur) && (!cat || eqCat(e) === cat)).sort(eqSort);
+    const groups = new Map();
+    list.forEach((e) => { const g = cat ? eqSub(e) ?? '' : EQ_BANDS.find(([k]) => k === eqCat(e))?.[1]; groups.set(g, [...(groups.get(g) ?? []), e]); });
+    sel.innerHTML = '<option value="">Choose…</option>' + [...groups].map(([g, es]) => {
+      const opts = es.map((e) => `<option value="${e.equipment_id}" ${e.equipment_id === cur ? 'selected' : ''}>${esc(eqLabel(e))}</option>`).join('');
+      return g ? `<optgroup label="${esc(g)}">${opts}</optgroup>` : opts;
+    }).join('');
+  };
+  catSel.onchange = () => { fill(); onChange?.(); };
+  sel.addEventListener('change', () => { cur = Number(sel.value) || null; onChange?.(); });
+  return { set(id) { cur = id; const e = refs.equipment.find((x) => x.equipment_id === id); if (e) catSel.value = eqCat(e); fill(); }, fill };
+}
 const isTractor = (e) => /tractor/i.test(e.type ?? '');
 const isSprayer = (e) => /sprayer/i.test(e.type ?? '');
 const doesWork = (e, op) => (e.equipment_work_types ?? []).some((x) => x.operation === op);
@@ -176,6 +226,7 @@ const CRUD = {
       { key: 'type', label: 'Type (contractor = work hired out)', type: 'select', required: true, list: true,
         options: () => [['partner', 'Partner'], ['employee', 'Employee'], ['contractor', 'Contractor']] },
       { key: 'license_no', label: 'Pesticide license / certification no.', type: 'text', list: true, listLabel: 'License no.' },
+      { key: 'login_email', label: 'App sign-in email (so "My tasks" shows their tasks)', listLabel: 'Login', type: 'text', list: true },
       { key: 'phone', label: 'Phone', type: 'text' },
       { key: 'address', label: 'Address', type: 'textarea' },
       { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
@@ -219,25 +270,26 @@ const CRUD = {
     table: 'equipment', pk: 'equipment_id', title: 'Equipment', singular: 'equipment', order: 'name',
     allowDelete: true, refreshRefs: true,
     search: true,
-    filters: [{ key: 'work', all: 'All work', options: () => refs.workTypes.filter((w) => w.active).map((w) => [w.operation, workLabel(w.operation)]),
+    filters: [{ key: 'cat', all: 'All categories', options: () => EQ_BANDS.map(([k, l, b]) => [k, `${b}s · ${l}`]), test: (r, v) => eqCat(r) === v },
+      { key: 'work', all: 'All work', options: () => refs.workTypes.filter((w) => w.active).map((w) => [w.operation, workLabel(w.operation)]),
       test: (r, v) => (r.equipment_work_types ?? []).some((x) => x.operation === v) },
       { key: 'type', all: 'All types', options: () => ['Tractor', 'Combine', 'Sprayer', 'Windrower', 'Implement', 'Truck', 'Pivot', 'Pump', 'Well', 'Mainline', 'Building', 'Other'].map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
     columns: [
+      { key: 'num_list', label: 'No.', list: true, form: false, compute: (r) => (eqNum(r) != null ? `#${eqNum(r)}` : '') },
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
-      { key: 'type', label: 'Type (tractor, combine, sprayer, implement...)', listLabel: 'Type', type: 'text', list: true },
+      { key: 'type', label: 'Type (tractor, pickup, disk, planter, pivot, pump...)', listLabel: 'Type', type: 'text', list: true },
+      { key: 'fields_list', label: 'Fields', list: true, form: false, compute: (r) => eqFields(r).join(', ') },
       { key: 'make', label: 'Make', type: 'text', list: true },
       { key: 'model', label: 'Model', type: 'text', list: true },
       { key: 'model_year', label: 'Model year', listLabel: 'Year', type: 'number', step: '1', list: true },
       { key: 'serial_no', label: 'Serial number / PIN', listLabel: 'Serial / PIN', type: 'text', list: true },
-      { key: 'unit_no', label: 'Unit number or nickname', type: 'text' },
+      { key: 'unit_no', label: 'Equipment # (100s tractors, 200s pickups, 300s trucks & trailers, 400s construction, 500s implements, 600s other, 700s irrigation, 800s self-propelled, 900s buildings)', listLabel: 'No.', type: 'text' },
       { key: 'engine_serial', label: 'Engine serial', type: 'text' },
       { key: 'hours', label: 'Hours', type: 'number', step: '0.1', list: true },
       { key: 'hours_date', label: 'Hours as of', type: 'date' },
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
       { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
-      { key: 'field_id', label: 'Field it serves (pivots, pumps, wells)', type: 'select', num: true,
-        options: () => fieldsInOrder().filter((f) => f.active).map((f) => [f.field_id, f.name]) },
       { key: 'cost_per_acre', label: 'Cost per acre when this machine is used ($/ac, optional; overrides the work type or application rate)', listLabel: '$/ac', type: 'number', step: '0.01', list: true },
       { key: 'planting_settings', label: 'Planting settings to record (planters only, one per line; for a choice write "Name: Option A | Option B")', type: 'textarea' },
       { key: 'work', label: 'Used for', list: true, form: false, compute: (r) => (r.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', ') },
@@ -247,12 +299,12 @@ const CRUD = {
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
     tabs: [{ key: 'active', label: 'Active', test: (r) => r.active }, { key: 'inactive', label: 'Sold / inactive', test: (r) => !r.active }],
-    select: '*, equipment_photos(count), equipment_work_types(operation)',
-    sorts: [['name', 'Name', (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true })],
+    select: '*, equipment_photos(count), equipment_work_types(operation), equipment_fields(field_id)',
+    sorts: [['number', 'Equipment #', eqSort], ['name', 'Name', (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true })],
       ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
-    afterRender: (form, row) => { equipmentWorkTags(form, row); equipmentService(form, row); equipmentPhotos(form, row); },
+    afterRender: (form, row) => { equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row); equipmentService(form, row); equipmentPhotos(form, row); },
   },
   worktypes: {
     table: 'operation_types', pk: 'operation', title: 'Work types', singular: 'work type', order: ['sort_order', 'operation'],
@@ -1511,7 +1563,29 @@ function toDraft(f) {
 }
 const draftRing = (d) => (d.shape === 'pivot' ? pivotRing(d) : d.ring.length ? [...d.ring, d.ring[0]] : []);
 
-const mapState = { map: null, view: null, season: new Date().getFullYear(), editMode: false, layers: [], ed: null };
+const mapState = { map: null, view: null, season: new Date().getFullYear(), editMode: false, layers: [], ed: null, irrMode: false, irr: null };
+// Irrigation status from the latest startup/shutdown round each pivot was in.
+const IRR_STATES = { ready: ['#2563eb', 'Started up (ready)'], starting: ['#93c5fd', 'Startup in progress'], shutting: ['#facc15', 'Shutdown in progress'], shut: ['#dc2626', 'Shut down'], none: ['#9aa5b1', 'No round yet'] };
+async function loadIrrStatus() {
+  const res = await sb.from('procedure_runs').select('run_id, started_on, procedures(kind), procedure_tasks(equipment_id, status)').order('started_on', { ascending: false }).order('run_id', { ascending: false }).limit(200);
+  if (res.error) return null;
+  const byEq = new Map();
+  for (const r of res.data) {
+    const kind = r.procedures?.kind;
+    if (kind !== 'startup' && kind !== 'shutdown') continue;
+    for (const t of r.procedure_tasks) if (!byEq.has(t.equipment_id)) byEq.set(t.equipment_id, kind === 'startup' ? (t.status === 'done' ? 'ready' : 'starting') : (t.status === 'done' ? 'shut' : 'shutting'));
+  }
+  const links = (await sb.from('equipment_fields').select('equipment_id, field_id')).data ?? [];
+  const byField = new Map();
+  for (const e of refs.equipment.filter((x) => x.active && eqSub(x) === 'Pivots')) {
+    for (const fid of links.filter((x) => x.equipment_id === e.equipment_id).map((x) => x.field_id)) {
+      const st = byEq.get(e.equipment_id) ?? 'none';
+      const order = ['shutting', 'starting', 'shut', 'ready', 'none'];   // a field with two pivots shows the least-finished one
+      if (!byField.has(fid) || order.indexOf(st) < order.indexOf(byField.get(fid))) byField.set(fid, st);
+    }
+  }
+  return byField;
+}
 
 async function renderMap(el) {
   if (!window.L) {
@@ -1526,6 +1600,7 @@ async function renderMap(el) {
   rows.forEach((r) => cropsByField.set(r.field_id, [...(cropsByField.get(r.field_id) ?? []), r]));
   mapState.cropsByField = cropsByField;
   mapState.rot = await loadRotationData().catch(() => null);
+  mapState.irr = mapState.irrMode ? await loadIrrStatus() : null;
 
   el.innerHTML = `
     <div class="section-head"><h2>Farm map</h2>
@@ -1534,8 +1609,11 @@ async function renderMap(el) {
         <strong class="season">${season}</strong>
         <button data-season="1" aria-label="Next season">›</button>
         ${mapState.editMode ? '' : `<button class="${mapState.selecting ? 'primary' : ''}" data-act="select">${mapState.selecting ? 'Done selecting' : 'Select fields'}</button>`}
+        ${mapState.editMode ? '' : `<button class="${mapState.irrMode ? 'primary' : ''}" data-act="irr">${mapState.irrMode ? 'Show crops' : 'Irrigation status'}</button>`}
         <button class="${mapState.editMode ? 'primary' : ''}" data-act="edit">${mapState.editMode ? 'Done editing' : 'Edit shapes'}</button>
       </div></div>
+    ${mapState.irrMode ? (mapState.irr ? `<div class="irr-legend">${Object.values(IRR_STATES).map(([c, l]) => `<span><i style="background:${c}"></i>${l}</span>`).join('')}</div>`
+      : '<p class="notice">Irrigation status needs <b>irrigation_procedures.sql</b> run in Supabase.</p>') : ''}
     <div class="map-wrap"><div id="map"></div><aside class="card map-side" id="map-side"></aside></div>`;
 
   $$('[data-season]', el).forEach((b) => (b.onclick = () => {
@@ -1549,6 +1627,8 @@ async function renderMap(el) {
     if (!mapState.selecting) mapState.selected = new Set();
     renderMap(el);
   };
+  const irrBtn = $('[data-act=irr]', el);
+  if (irrBtn) irrBtn.onclick = () => { mapState.irrMode = !mapState.irrMode; renderMap(el); };
   $('[data-act=edit]', el).onclick = () => {
     if (!confirmDiscard()) return;
     mapState.selecting = false;
@@ -1590,6 +1670,16 @@ function drawFields() {
     const crops = mapState.cropsByField.get(f.field_id) ?? [];
     const color = crops.length ? cropColor(crops[0].crop_id) : '#9aa5b1';
     const planned = crops.length > 0 && crops.every((r) => r.status === 'planned');
+    const irrSt = mapState.irrMode && mapState.irr && !mapState.editMode ? mapState.irr.get(f.field_id) ?? null : undefined;
+    if (irrSt !== undefined) {
+      const c = irrSt ? IRR_STATES[irrSt][0] : '#ffffff';
+      const layer = L.polygon(f.boundary.geometry.coordinates[0].map(toLL), { color: irrSt ? c : '#ffffff', weight: irrSt ? 2 : 1, dashArray: irrSt ? null : '3 5', fillColor: c, fillOpacity: irrSt ? 0.6 : 0.08 }).addTo(map);
+      layer.bindTooltip(esc(f.name), { permanent: true, direction: 'center', className: 'field-label' });
+      layer.on('click', (e) => { L.DomEvent.stopPropagation(e); if (mapState.selecting) toggleSelect(f); else showFieldInfo(f); });
+      if (mapState.selected?.has(f.field_id)) layer.setStyle({ color: '#ffd400', weight: 4, dashArray: null });
+      mapState.layers.push({ field: f, layer });
+      continue;
+    }
     const layer = L.polygon(f.boundary.geometry.coordinates[0].map(toLL), {
       color: mapState.editMode ? '#ffffff' : planned ? '#ffffff' : color, weight: mapState.editMode ? 2 : planned ? 2 : 1.5,
       dashArray: planned ? '3 5' : crops.length > 1 ? '8 4' : null,
@@ -3378,6 +3468,45 @@ async function shareFields(fields) {
 // =====================================================================
 let setupTab = 'riders';
 // ---- "Used for" tags: which work types a machine can do. Saved as you tap.
+// Suggest the next free number for the type typed in.
+function equipmentNumberHint(form, row) {
+  const inp = form.elements.unit_no, typeIn = form.elements.type;
+  if (!inp) return;
+  const hint = document.createElement('p'); hint.className = 'muted small form-hint';
+  inp.closest('label').after(hint);
+  const draw = () => {
+    if (eqNum(row) != null && String(inp.value).trim() === String(row.unit_no).trim()) { hint.textContent = ''; return; }
+    const start = TYPE_BAND.find(([re]) => re.test(typeIn?.value ?? ''))?.[1] ?? 600;
+    const n = nextFreeNumber(start);
+    const sub = Object.values(EQ_SUBS).flat().find(([, lo]) => lo === start)?.[0] ?? EQ_BANDS.find(([, , b]) => b === Math.floor(start / 100) * 100)?.[1];
+    hint.innerHTML = n ? `Next free ${esc(sub)} number: <button type="button" class="link">${n}</button>` : `The ${esc(sub)} range is full.`;
+    $('button', hint)?.addEventListener('click', () => { inp.value = n; draw(); });
+  };
+  typeIn?.addEventListener('input', draw); inp.addEventListener('input', draw); draw();
+}
+
+// Fields a pivot / pump / well serves.
+async function equipmentFieldLinks(form, row) {
+  const box = document.createElement('details');
+  box.className = 'eq-fields';
+  form.querySelector('.actions').before(box);
+  if (!row) return box.remove();
+  const res = await sb.from('equipment_fields').select('field_id').eq('equipment_id', row.equipment_id);
+  if (res.error) return box.remove();
+  const have = new Set(res.data.map((x) => x.field_id));
+  const irr = eqCat(row) === 'irrigation';
+  box.open = irr || have.size > 0;
+  box.innerHTML = `<summary><b>Fields it serves</b> <span class="muted small">${have.size ? [...have].map((id) => esc(fieldById(id)?.name ?? '')).join(', ') : irr ? 'none yet' : 'pivots, pumps, wells'}</span></summary>
+    <div class="chips">${fieldsInOrder().filter((f) => f.active || have.has(f.field_id)).map((f) => `<label class="chip-toggle"><input type="checkbox" value="${f.field_id}" ${have.has(f.field_id) ? 'checked' : ''}><span>${esc(f.name)}</span></label>`).join('')}</div>`;
+  $$('input', box).forEach((c) => (c.onchange = async () => {
+    try {
+      if (c.checked) await q(sb.from('equipment_fields').insert({ equipment_id: row.equipment_id, field_id: Number(c.value) }));
+      else await q(sb.from('equipment_fields').delete().eq('equipment_id', row.equipment_id).eq('field_id', Number(c.value)));
+      loadRefs();
+    } catch { c.checked = !c.checked; }
+  }));
+}
+
 async function equipmentWorkTags(form, row) {
   const box = document.createElement('div');
   box.className = 'eq-work';
@@ -3467,7 +3596,7 @@ async function equipmentPhotos(form, row) {
 // Maintenance & repair: open problems, service due, history.
 // Pivots, pumps, wells, mainlines and buildings are equipment rows too.
 // =====================================================================
-const maintState = { view: 'repairs', q: '', equip: '', season: new Date().getFullYear() };
+const maintState = { view: 'repairs', q: '', equip: '', cat: '', season: new Date().getFullYear() };
 const JOB_STATUS = [['open', 'Open'], ['in_progress', 'In progress'], ['done', 'Done']];
 const jobStatusName = (k) => JOB_STATUS.find(([x]) => x === k)?.[1] ?? k;
 const addMonths = (iso, m) => { const d = new Date(iso + 'T12:00'); d.setMonth(d.getMonth() + Number(m)); return localDate(d); };
@@ -3499,8 +3628,11 @@ function dueText(d, iv, eq) {
 }
 const everyText = (iv) => [iv.every_hours != null && `every ${num(iv.every_hours, 0)} hrs`, iv.every_months != null && `every ${iv.every_months} mo`].filter(Boolean).join(' or ');
 
+const maintTabs = (labels = {}) => `<div class="subtabs">${[['repairs', 'Repairs'], ['service', 'Service due'], ['history', 'History'], ['tasks', 'Seasonal tasks']]
+  .map(([k, l]) => `<button data-mview="${k}" class="${maintState.view === k ? 'active' : ''}">${labels[k] ?? l}</button>`).join('')}</div>`;
 async function renderMaint(el) {
   const s = maintState;
+  if (s.view === 'tasks') return renderSeasonal(el);
   const [jobsRes, ivRes] = await Promise.all([
     sb.from('maint_jobs').select('*, maint_photos(photo_id, kind)').order('reported_on', { ascending: false }).order('job_id', { ascending: false }),
     sb.from('service_intervals').select('*').eq('active', true),
@@ -3510,7 +3642,9 @@ async function renderMaint(el) {
   const jobs = jobsRes.data, ivs = ivRes.data ?? [];
   const eqById = (id) => refs.equipment.find((e) => e.equipment_id === id);
   const term = s.q.trim().toLowerCase();
-  const match = (eqId, text = '') => (!s.equip || Number(s.equip) === eqId) && (!term || `${equipName(eqId)} ${text}`.toLowerCase().includes(term));
+  const eqOf = (id) => refs.equipment.find((e) => e.equipment_id === id);
+  const match = (eqId, text = '') => (!s.equip || Number(s.equip) === eqId) && (!s.cat || eqCat(eqOf(eqId)) === s.cat)
+    && (!term || `${eqOf(eqId) ? eqLabel(eqOf(eqId)) : ''} ${text}`.toLowerCase().includes(term));
   const open = jobs.filter((j) => j.status !== 'done' && match(j.equipment_id, j.title))
     .sort((a, b) => Number(b.down) - Number(a.down) || (a.status === 'in_progress' ? -1 : 0) - (b.status === 'in_progress' ? -1 : 0) || a.reported_on.localeCompare(b.reported_on));
   const dues = ivs.filter((iv) => match(iv.equipment_id, iv.name) && eqById(iv.equipment_id)?.active !== false)
@@ -3519,12 +3653,11 @@ async function renderMaint(el) {
   dues.sort((a, b) => rank[a.d.state] - rank[b.d.state] || (a.d.leftHrs ?? 1e9) - (b.d.leftHrs ?? 1e9) || String(a.d.dueDate ?? '9').localeCompare(String(b.d.dueDate ?? '9')));
   const nOver = dues.filter((x) => x.d.state === 'over').length, nSoon = dues.filter((x) => x.d.state === 'soon').length;
   const done = jobs.filter((j) => j.status === 'done' && (j.completed_on ?? j.reported_on).startsWith(String(s.season)) && match(j.equipment_id, j.title));
-  const eqOpts = refs.equipment.filter((e) => e.active || jobs.some((j) => j.equipment_id === e.equipment_id));
+  const eqOpts = refs.equipment.filter((e) => (e.active || jobs.some((j) => j.equipment_id === e.equipment_id)) && (!s.cat || eqCat(e) === s.cat)).sort(eqSort);
   const photoN = (j, k) => (j.maint_photos ?? []).filter((p) => p.kind === k).length;
 
   el.innerHTML = `
-    <div class="subtabs">${[['repairs', `Repairs${open.length ? ` (${open.length})` : ''}`], ['service', `Service due${nOver ? ` (${nOver} over)` : nSoon ? ` (${nSoon} soon)` : ''}`], ['history', 'History']]
-      .map(([k, l]) => `<button data-mview="${k}" class="${s.view === k ? 'active' : ''}">${l}</button>`).join('')}</div>
+    ${maintTabs({ repairs: `Repairs${open.length ? ` (${open.length})` : ''}`, service: `Service due${nOver ? ` (${nOver} over)` : nSoon ? ` (${nSoon} soon)` : ''}` })}
     <div class="section-head"><h2>${{ repairs: 'Repairs', service: 'Service due', history: 'Maintenance history' }[s.view]}</h2>
       <div class="row">
         ${s.view === 'history' ? `<button data-season="-1" aria-label="Previous year">‹</button><strong class="season">${s.season}</strong><button data-season="1" aria-label="Next year">›</button>` : ''}
@@ -3533,29 +3666,31 @@ async function renderMaint(el) {
       </div></div>
     <div class="filters">
       <input type="search" data-f="q" placeholder="Search equipment or job…" value="${esc(s.q)}">
-      <select data-f="equip"><option value="">All equipment</option>${eqOpts.map((e) => `<option value="${e.equipment_id}" ${Number(s.equip) === e.equipment_id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select>
+      <select data-f="cat"><option value="">All categories</option>${EQ_BANDS.filter(([k]) => refs.equipment.some((e) => eqCat(e) === k)).map(([k, l, b]) => `<option value="${k}" ${s.cat === k ? 'selected' : ''}>${b}s · ${esc(l)}</option>`).join('')}</select>
+      <select data-f="equip"><option value="">All ${s.cat ? esc(EQ_BANDS.find(([k]) => k === s.cat)[1].toLowerCase()) : 'equipment'}</option>${eqOpts.map((e) => `<option value="${e.equipment_id}" ${Number(s.equip) === e.equipment_id ? 'selected' : ''}>${esc(eqLabel(e))}</option>`).join('')}</select>
     </div>
     ${s.view === 'repairs' ? (open.length ? `<ul class="list job-list card">${open.map((j) => `<li class="${j.down ? 'down' : ''}">
         <span class="li-name"><b>${esc(j.title)}</b> ${j.down ? '<span class="badge bad">DOWN</span>' : ''} <span class="badge ${j.status === 'in_progress' ? 'up' : ''}">${jobStatusName(j.status)}</span>
-          <span class="muted small">${esc(equipName(j.equipment_id))} · reported ${fmtDateY(j.reported_on)}${j.reported_by ? ' by ' + esc(operatorName(j.reported_by)) : ''}${photoN(j, 'problem') ? ` · 📷 ${photoN(j, 'problem')}` : ''}</span></span>
+          <span class="muted small">${esc(eqOf(j.equipment_id) ? eqLabel(eqOf(j.equipment_id)) : '')} · reported ${fmtDateY(j.reported_on)}${j.reported_by ? ' by ' + esc(operatorName(j.reported_by)) : ''}${photoN(j, 'problem') ? ` · 📷 ${photoN(j, 'problem')}` : ''}</span></span>
         <span class="li-value"><button class="small" data-job="${j.job_id}">Open</button></span></li>`).join('')}</ul>`
       : '<div class="empty">No open repairs.</div>') : ''}
     ${s.view === 'service' ? (dues.length ? `<ul class="list job-list card">${dues.map(({ iv, eq, d }) => `<li class="due-${d.state}">
-        <span class="li-name"><b>${esc(eq?.name ?? '?')}</b> · ${esc(iv.name)} <span class="muted small">${everyText(iv)}</span>
+        <span class="li-name"><b>${esc(eq ? eqLabel(eq) : '?')}</b> · ${esc(iv.name)} <span class="muted small">${everyText(iv)}</span>
           <span class="small">${d.state === 'over' ? '<span class="badge bad">Overdue</span> ' : d.state === 'soon' ? '<span class="badge warn">Due soon</span> ' : ''}${dueText(d, iv, eq)}</span></span>
         <span class="li-value"><button class="small" data-iv="${iv.interval_id}">Edit</button> <button class="small primary" data-svc="${iv.interval_id}">Done</button></span></li>`).join('')}</ul>`
       : '<div class="empty">No service intervals yet. Add one with <b>+ Interval</b>, or from a machine under Setup → Equipment.</div>') : ''}
     ${s.view === 'history' ? (done.length ? `<p class="muted small">${done.length} job(s) in ${s.season}${done.some((j) => j.cost != null) ? ` · total <b>${money(done.reduce((n, j) => n + Number(j.cost || 0), 0))}</b>` : ''}</p>
       <div class="card table-wrap"><table><thead><tr><th>Date</th><th>Equipment</th><th>Job</th><th class="r">Hours</th><th class="r">Cost</th><th></th></tr></thead><tbody>
-      ${done.map((j) => `<tr><td class="nowrap">${fmtDateY(j.completed_on ?? j.reported_on)}</td><td>${esc(equipName(j.equipment_id))}</td>
+      ${done.map((j) => `<tr><td class="nowrap">${fmtDateY(j.completed_on ?? j.reported_on)}</td><td>${esc(eqOf(j.equipment_id) ? eqLabel(eqOf(j.equipment_id)) : '')}</td>
         <td>${esc(j.title)} <span class="muted small">${j.kind === 'service' ? 'service' : 'repair'}${photoN(j, 'invoice') ? ' · 🧾' : ''}</span></td>
         <td class="r">${j.hours_at != null ? num(j.hours_at, 0) : ''}</td><td class="r">${money(j.cost)}</td>
         <td class="r"><button class="small" data-job="${j.job_id}">Open</button></td></tr>`).join('')}</tbody></table></div>` : `<div class="empty">Nothing finished in ${s.season}.</div>`) : ''}`;
   const reload = () => renderMaint(el);
-  $$('[data-mview]', el).forEach((b) => (b.onclick = () => { s.view = b.dataset.mview; reload(); }));
+  wireMaintTabs(el);
   $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
   $$('[data-f]', el).forEach((inp) => {
-    if (inp.type === 'search') { let t; inp.oninput = () => { clearTimeout(t); t = setTimeout(() => { s.q = inp.value; reload(); }, 300); }; } else inp.onchange = () => { s.equip = inp.value; reload(); };
+    if (inp.type === 'search') { let t; inp.oninput = () => { clearTimeout(t); t = setTimeout(() => { s.q = inp.value; reload(); }, 300); }; }
+    else inp.onchange = () => { if (inp.dataset.f === 'cat') { s.cat = inp.value; s.equip = ''; } else s.equip = inp.value; reload(); };
   });
   $('[data-act=report]', el).onclick = () => openJob(s.view === 'service' ? { kind: 'service', status: 'done', equipmentId: Number(s.equip) || null }
     : s.view === 'history' ? { status: 'done', equipmentId: Number(s.equip) || null } : { equipmentId: Number(s.equip) || null }, reload);
@@ -3566,14 +3701,6 @@ async function renderMaint(el) {
     const iv = ivs.find((x) => x.interval_id === Number(b.dataset.svc));
     openJob({ kind: 'service', status: 'done', equipmentId: iv.equipment_id, intervalId: iv.interval_id, title: iv.name }, reload);
   }));
-}
-
-function equipSelect(cur) {
-  const list = refs.equipment.filter((e) => e.active || e.equipment_id === cur);
-  const groups = {};
-  list.forEach((e) => { const g = e.type || 'Other'; (groups[g] ??= []).push(e); });
-  return `<option value="">Choose…</option>` + Object.keys(groups).sort().map((g) => `<optgroup label="${esc(g)}">${groups[g].map((e) =>
-    `<option value="${e.equipment_id}" ${e.equipment_id === cur ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</optgroup>`).join('');
 }
 
 // opts: { jobId } to edit; or { equipmentId, kind, status, intervalId, title } for a new job
@@ -3587,8 +3714,8 @@ async function openJob(opts, onDone) {
   dlg.classList.add('wide');
   dlg.innerHTML = `<form class="form job-form">
     <div class="dialog-head"><h3>${j ? (v.kind === 'service' ? 'Service' : 'Repair') : v.kind === 'service' ? 'Log service' : v.status === 'done' ? 'Log work done' : 'Report a problem'}</h3></div>
+    ${equipPickerHtml('equipment_id', v.equipment_id)}
     <div class="row2">
-      <label>Equipment *<select name="equipment_id" required>${equipSelect(v.equipment_id)}</select></label>
       <label>Type<select name="kind"><option value="repair" ${v.kind === 'repair' ? 'selected' : ''}>Repair</option><option value="service" ${v.kind === 'service' ? 'selected' : ''}>Scheduled service</option></select></label>
     </div>
     <label data-svc-only>Service interval<select name="interval_id"></select></label>
@@ -3634,7 +3761,9 @@ async function openJob(opts, onDone) {
     const eq = refs.equipment.find((e) => e.equipment_id === eqId);
     el.hours_at.placeholder = eq?.hours != null ? `last ${num(eq.hours, 0)}` : '';
   };
-  el.kind.onchange = sync; el.status.onchange = sync; el.equipment_id.onchange = sync;
+  const pick = wireEquipPicker(dlg, 'equipment_id', () => sync());
+  pick.set(v.equipment_id);
+  el.kind.onchange = sync; el.status.onchange = sync;
   el.interval_id.onchange = () => { const iv = ivs.find((x) => x.interval_id === Number(el.interval_id.value)); if (iv && !el.title.value.trim()) el.title.value = iv.name; };
   sync();
   if (j) jobPhotos($('#job-photos', dlg), j);
@@ -3732,7 +3861,7 @@ async function openInterval(opts, onDone) {
   const dlg = $('#dialog');
   dlg.innerHTML = `<form class="form">
     <div class="dialog-head"><h3>${iv ? 'Edit' : 'New'} service interval</h3></div>
-    <label>Equipment *<select name="equipment_id" required>${equipSelect(v.equipment_id)}</select></label>
+    ${equipPickerHtml('equipment_id', v.equipment_id)}
     <label>Service *<input name="name" required value="${esc(v.name ?? '')}" placeholder="e.g. Engine oil & filter, Gearbox oil, Grease"></label>
     <div class="row2">
       <label>Every (hours)<input type="number" inputmode="decimal" step="any" min="0" name="every_hours" value="${esc(v.every_hours ?? '')}"></label>
@@ -3753,7 +3882,7 @@ async function openInterval(opts, onDone) {
     </div></form>`;
   const form = $('form', dlg), el = form.elements;
   $('[data-act=cancel]', dlg).onclick = () => dlg.close();
-  el.equipment_id.onchange = () => { const e = refs.equipment.find((x) => x.equipment_id === Number(el.equipment_id.value)); if (!iv && e?.hours != null && !el.start_hours.value) el.start_hours.value = e.hours; };
+  wireEquipPicker(dlg, 'equipment_id', () => { const e = refs.equipment.find((x) => x.equipment_id === Number(el.equipment_id.value)); if (!iv && e?.hours != null && !el.start_hours.value) el.start_hours.value = e.hours; }).set(v.equipment_id);
   form.onsubmit = async (e) => {
     e.preventDefault();
     const n = (k) => (el[k].value === '' ? null : Number(el[k].value));
@@ -3792,6 +3921,323 @@ async function equipmentService(form, row) {
     <div class="row"><button type="button" class="small" data-act="eq-iv">+ Service interval</button><button type="button" class="small" data-act="eq-job">Report a problem</button></div>`;
   $('[data-act=eq-iv]', box).onclick = () => openInterval({ equipmentId: row.equipment_id }, null);
   $('[data-act=eq-job]', box).onclick = () => openJob({ equipmentId: row.equipment_id }, null);
+}
+
+// =====================================================================
+// Seasonal tasks: procedure checklists (startup / shutdown) run across systems each season.
+// Shared steps apply to every system; a step with equipment_id is extra for that one system.
+// =====================================================================
+const PROC_KINDS = [['startup', 'Startup (in-season ready)'], ['shutdown', 'Shutdown (end of season)'], ['other', 'Other']];
+const PROC_SCOPE = [['pivots', 'Pivots'], ['pumps', 'Pumps'], ['wells', 'Mainlines & wells'], ['irrigation', 'All irrigation'], ['all', 'Any equipment']];
+const TASK_STATUS = { todo: 'Not started', in_progress: 'In progress', done: 'Done' };
+const procScopeTest = (scope) => (e) => scope === 'all' ? true : scope === 'irrigation' ? eqCat(e) === 'irrigation'
+  : eqSub(e) === { pivots: 'Pivots', pumps: 'Pumps', wells: 'Mainlines & wells' }[scope];
+const seasonalState = { season: new Date().getFullYear(), run: null, mine: false };
+let myEmail = null;
+async function myOperator() {
+  if (myEmail == null) myEmail = ((await sb.auth.getUser()).data?.user?.email ?? '').toLowerCase();
+  return refs.operators.find((o) => (o.login_email ?? '').trim().toLowerCase() === myEmail) ?? null;
+}
+const stepsFor = (steps, eqId) => steps.filter((st) => st.active && (st.equipment_id == null || st.equipment_id === eqId))
+  .sort((a, b) => a.position - b.position || (a.equipment_id == null ? -1 : 1) || a.step_id - b.step_id);
+
+async function renderSeasonal(el) {
+  const s = seasonalState;
+  await loadRefs();
+  const [procRes, runRes] = await Promise.all([
+    sb.from('procedures').select('*, procedure_steps(*)').order('name'),
+    sb.from('procedure_runs').select('*, procedure_tasks(*, procedure_checks(step_id))').eq('season', s.season).order('started_on', { ascending: false }),
+  ]);
+  if (procRes.error) { el.innerHTML = `${maintTabs()}<div class="empty">Seasonal tasks aren’t set up yet. Run <b>irrigation_procedures.sql</b> in Supabase first.</div>`; wireMaintTabs(el); return; }
+  const procs = procRes.data, runs = runRes.data ?? [];
+  const me = await myOperator();
+  const procOf = (id) => procs.find((p) => p.procedure_id === id);
+  const progress = (t, p) => { const n = stepsFor(p?.procedure_steps ?? [], t.equipment_id).length; return { done: (t.procedure_checks ?? []).length, n }; };
+  const run = s.run ? runs.find((r) => r.run_id === s.run) : null;
+  const reload = () => renderSeasonal(el);
+  if (run) {
+    const p = procOf(run.procedure_id);
+    const tasks = [...run.procedure_tasks].filter((t) => !s.mine || (me && t.assigned_to === me.operator_id))
+      .sort((a, b) => eqSort(refs.equipment.find((e) => e.equipment_id === a.equipment_id) ?? {}, refs.equipment.find((e) => e.equipment_id === b.equipment_id) ?? {}));
+    const nDone = run.procedure_tasks.filter((t) => t.status === 'done').length;
+    el.innerHTML = `${maintTabs()}
+      <div class="section-head"><h2>${esc(p?.name ?? 'Procedure')} · ${run.season}</h2>
+        <div class="row"><button data-act="back">‹ All rounds</button><button data-act="add-sys">+ Systems</button></div></div>
+      <p class="muted small">${nDone} of ${run.procedure_tasks.length} done · started ${fmtDateY(run.started_on)}${run.due_on ? ` · due ${fmtDateY(run.due_on)}` : ''}</p>
+      <div class="progress"><span style="width:${run.procedure_tasks.length ? (nDone / run.procedure_tasks.length) * 100 : 0}%"></span></div>
+      <div class="filters"><label class="check"><input type="checkbox" data-mine ${s.mine ? 'checked' : ''} ${me ? '' : 'disabled'}> Only my tasks${me ? '' : ' <span class="muted small">(set your sign-in email under Setup → Operators)</span>'}</label></div>
+      <div class="card table-wrap"><table><thead><tr><th>System</th><th>Assigned</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
+      ${tasks.map((t) => { const e = refs.equipment.find((x) => x.equipment_id === t.equipment_id); const pr = progress(t, p); return `<tr>
+        <td><b>${esc(e ? eqLabel(e) : '?')}</b></td>
+        <td><select data-assign="${t.task_id}"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === t.assigned_to).map((o) => `<option value="${o.operator_id}" ${o.operator_id === t.assigned_to ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></td>
+        <td>${pr.done}/${pr.n}</td><td><span class="badge ${t.status === 'done' ? 'new' : t.status === 'in_progress' ? 'down' : 'off'}">${TASK_STATUS[t.status]}</span>${t.completed_on ? ` <span class="muted small">${fmtDateY(t.completed_on)}</span>` : ''}</td>
+        <td class="r"><button class="small" data-task="${t.task_id}">Open</button></td></tr>`; }).join('')}
+      </tbody></table></div>
+      <div class="actions"><span class="spacer"></span><button class="danger small" data-act="del-run">Delete this round</button></div>`;
+    wireMaintTabs(el);
+    $('[data-act=back]', el).onclick = () => { s.run = null; reload(); };
+    $('[data-mine]', el).onchange = (e) => { s.mine = e.target.checked; reload(); };
+    $$('[data-assign]', el).forEach((sel) => (sel.onchange = async () => {
+      try { await q(sb.from('procedure_tasks').update({ assigned_to: sel.value ? Number(sel.value) : null }).eq('task_id', Number(sel.dataset.assign))); toast('Assigned'); } catch { /* shown */ }
+    }));
+    $$('[data-task]', el).forEach((b) => (b.onclick = () => openTask(Number(b.dataset.task), p, reload)));
+    $('[data-act=add-sys]', el).onclick = () => startRound(procs, reload, run);
+    $('[data-act=del-run]', el).onclick = async () => {
+      if (!confirm('Delete this whole round and everything ticked off in it?')) return;
+      try { await q(sb.from('procedure_runs').delete().eq('run_id', run.run_id)); s.run = null; reload(); } catch { /* shown */ }
+    };
+    return;
+  }
+  const myOpen = me ? runs.flatMap((r) => r.procedure_tasks.filter((t) => t.assigned_to === me.operator_id && t.status !== 'done').map((t) => ({ t, r }))) : [];
+  el.innerHTML = `${maintTabs()}
+    <div class="section-head"><h2>Seasonal tasks</h2>
+      <div class="row">
+        <button data-season="-1" aria-label="Previous year">‹</button><strong class="season">${s.season}</strong><button data-season="1" aria-label="Next year">›</button>
+        <button data-act="procs">Procedures</button>
+        <button class="primary" data-act="start" ${procs.some((p) => p.active) ? '' : 'disabled'}>Start a round</button>
+      </div></div>
+    ${myOpen.length ? `<div class="card"><h3>My tasks</h3><ul class="list">${myOpen.map(({ t, r }) => { const e = refs.equipment.find((x) => x.equipment_id === t.equipment_id); const pr = progress(t, procOf(r.procedure_id));
+      return `<li><span class="li-name"><b>${esc(e ? eqLabel(e) : '?')}</b> <span class="muted small">${esc(procOf(r.procedure_id)?.name ?? '')} · ${pr.done}/${pr.n}</span></span>
+      <span class="li-value"><button class="small primary" data-mytask="${t.task_id}" data-proc="${r.procedure_id}">Open</button></span></li>`; }).join('')}</ul></div>` : ''}
+    ${!procs.length ? '<div class="empty">No procedures yet. Tap <b>Procedures</b> to write your first checklist (for example, Pivot fall shutdown).</div>'
+      : runs.length ? `<ul class="list card">${runs.map((r) => { const p = procOf(r.procedure_id); const n = r.procedure_tasks.length, d = r.procedure_tasks.filter((t) => t.status === 'done').length;
+        return `<li><span class="li-name"><b>${esc(p?.name ?? '?')}</b> <span class="muted small">${PROC_KINDS.find(([k]) => k === p?.kind)?.[1] ?? ''} · started ${fmtDateY(r.started_on)}${r.due_on ? ` · due ${fmtDateY(r.due_on)}` : ''}</span>
+          <span class="progress"><span style="width:${n ? (d / n) * 100 : 0}%"></span></span><span class="small">${d} of ${n} systems done</span></span>
+          <span class="li-value"><button class="small" data-run="${r.run_id}">Open</button></span></li>`; }).join('')}</ul>`
+      : `<div class="empty">No rounds started in ${s.season}. Tap <b>Start a round</b> to send a procedure out to every system.</div>`}`;
+  wireMaintTabs(el);
+  $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
+  $('[data-act=procs]', el).onclick = () => openProcedures(procs, reload);
+  $('[data-act=start]', el).onclick = () => startRound(procs, reload);
+  $$('[data-run]', el).forEach((b) => (b.onclick = () => { s.run = Number(b.dataset.run); reload(); }));
+  $$('[data-mytask]', el).forEach((b) => (b.onclick = () => openTask(Number(b.dataset.mytask), procOf(Number(b.dataset.proc)), reload)));
+}
+function wireMaintTabs(el) {
+  $$('[data-mview]', el).forEach((b) => (b.onclick = () => { maintState.view = b.dataset.mview; seasonalState.run = null; renderMaint(el); }));
+}
+
+// Start a round (or add systems to one): pick the procedure, the systems, and a due date.
+function startRound(procs, onDone, run = null) {
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  const active = procs.filter((p) => p.active || p.procedure_id === run?.procedure_id);
+  dlg.innerHTML = `<form class="form">
+    <div class="dialog-head"><h3>${run ? 'Add systems' : 'Start a round'}</h3></div>
+    <div class="row2">
+      <label>Procedure *<select name="procedure_id" ${run ? 'disabled' : ''}>${active.map((p) => `<option value="${p.procedure_id}" ${p.procedure_id === run?.procedure_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+      <label>Due by<input type="date" name="due_on" value="${esc(run?.due_on ?? '')}" ${run ? 'disabled' : ''}></label>
+    </div>
+    <div class="lines-head"><b>Systems</b><span><button type="button" class="small" data-all="1">All</button> <button type="button" class="small" data-all="0">None</button></span></div>
+    <div class="pick-list" id="sys-list"></div>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">${run ? 'Add' : 'Start'}</button></div></form>`;
+  const form = $('form', dlg), el = form.elements;
+  const have = new Set((run?.procedure_tasks ?? []).map((t) => t.equipment_id));
+  const draw = () => {
+    const p = procs.find((x) => x.procedure_id === Number(el.procedure_id.value));
+    const list = refs.equipment.filter((e) => e.active && procScopeTest(p?.applies_to ?? 'all')(e) && !have.has(e.equipment_id)).sort(eqSort);
+    $('#sys-list', dlg).innerHTML = list.length ? list.map((e) => `<label class="check"><input type="checkbox" value="${e.equipment_id}" checked> ${esc(eqLabel(e))}</label>`).join('')
+      : `<p class="muted small">No ${run ? 'more ' : ''}active ${esc(PROC_SCOPE.find(([k]) => k === p?.applies_to)?.[1]?.toLowerCase() ?? 'systems')} to add.</p>`;
+  };
+  el.procedure_id.onchange = draw; draw();
+  $$('[data-all]', dlg).forEach((b) => (b.onclick = () => $$('#sys-list input', dlg).forEach((c) => (c.checked = b.dataset.all === '1'))));
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const ids = $$('#sys-list input:checked', dlg).map((c) => Number(c.value));
+    if (!ids.length) return toast('Pick at least one system', true);
+    try {
+      let runId = run?.run_id;
+      if (!run) runId = (await q(sb.from('procedure_runs').insert({ procedure_id: Number(el.procedure_id.value), season: seasonalState.season, due_on: el.due_on.value || null }).select('run_id').single())).run_id;
+      await q(sb.from('procedure_tasks').insert(ids.map((id) => ({ run_id: runId, equipment_id: id }))));
+      seasonalState.run = runId;
+      dlg.close(); toast(`${ids.length} system(s) ${run ? 'added' : 'in this round'}`); onDone?.();
+    } catch { /* shown */ }
+  };
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+// One system's checklist: tick steps; status follows the ticks.
+async function openTask(taskId, proc, onDone) {
+  const [t] = await q(sb.from('procedure_tasks').select('*, procedure_checks(*)').eq('task_id', taskId));
+  const steps = stepsFor(proc?.procedure_steps ?? [], t.equipment_id);
+  const paths = steps.filter((st) => st.photo_path).map((st) => st.photo_path);
+  const urls = paths.length ? (await sb.storage.from('maintenance').createSignedUrls(paths, 3600)).data ?? [] : [];
+  const urlOf = (p) => urls[paths.indexOf(p)]?.signedUrl;
+  const eq = refs.equipment.find((e) => e.equipment_id === t.equipment_id);
+  const me = await myOperator();
+  const checks = new Map(t.procedure_checks.map((c) => [c.step_id, c]));
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  const draw = () => {
+    dlg.innerHTML = `<div class="form task-form">
+      <div class="dialog-head"><h3>${esc(eq ? eqLabel(eq) : '?')}</h3><p class="muted small">${esc(proc?.name ?? '')}${proc?.notes ? ` · ${esc(proc.notes)}` : ''}</p></div>
+      <p><b>${checks.size}</b> of ${steps.length} steps done</p>
+      <ol class="checklist">${steps.map((st) => { const c = checks.get(st.step_id); return `<li class="${c ? 'done' : ''}">
+        <label class="check"><input type="checkbox" data-step="${st.step_id}" ${c ? 'checked' : ''}><span>${esc(st.text)}${st.equipment_id ? ' <span class="badge up">This system</span>' : ''}</span></label>
+        ${st.photo_path ? `<a href="${esc(urlOf(st.photo_path) ?? '#')}" target="_blank" rel="noopener"><img class="step-img" src="${esc(urlOf(st.photo_path) ?? '')}" alt=""></a>` : ''}
+        ${c ? `<span class="muted small">✓ ${esc(c.done_by_name ?? '')} ${new Date(c.done_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>` : ''}</li>`; }).join('')}</ol>
+      <label>Notes<textarea name="notes" rows="2">${esc(t.notes ?? '')}</textarea></label>
+      <div class="actions"><button type="button" data-act="problem">Report a problem</button><span class="spacer"></span><button type="button" class="primary" data-act="close">Close</button></div></div>`;
+    $$('[data-step]', dlg).forEach((c) => (c.onchange = async () => {
+      const sid = Number(c.dataset.step);
+      try {
+        if (c.checked) {
+          const row = { task_id: t.task_id, step_id: sid, done_by_name: me?.name ?? myEmail ?? null };
+          await q(sb.from('procedure_checks').insert(row));
+          checks.set(sid, { ...row, done_at: new Date().toISOString() });
+        } else { await q(sb.from('procedure_checks').delete().eq('task_id', t.task_id).eq('step_id', sid)); checks.delete(sid); }
+        const status = checks.size === 0 ? 'todo' : checks.size >= steps.length ? 'done' : 'in_progress';
+        await q(sb.from('procedure_tasks').update({ status, completed_on: status === 'done' ? localDate() : null }).eq('task_id', t.task_id));
+        if (status === 'done' && t.status !== 'done') toast('All steps done');
+        t.status = status;
+      } catch { c.checked = !c.checked; }
+      draw();
+    }));
+    $('[data-act=close]', dlg).onclick = async () => {
+      const notes = $('textarea[name=notes]', dlg).value.trim() || null;
+      if (notes !== (t.notes ?? null)) { try { await q(sb.from('procedure_tasks').update({ notes }).eq('task_id', t.task_id)); } catch { /* shown */ } }
+      dlg.close(); onDone?.();
+    };
+    $('[data-act=problem]', dlg).onclick = () => openJob({ equipmentId: t.equipment_id }, onDone);
+  };
+  draw();
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+// Procedure templates: shared steps + extra steps for a single system, each optionally with a photo.
+function openProcedures(procs, onDone) {
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.innerHTML = `<div class="form"><div class="dialog-head"><h3>Procedures</h3><p class="muted small">Checklists you send out each season.</p></div>
+    ${procs.length ? `<ul class="list">${procs.map((p) => `<li><span class="li-name"><b>${esc(p.name)}</b>${p.active ? '' : ' <span class="badge off">inactive</span>'}
+      <span class="muted small">${PROC_KINDS.find(([k]) => k === p.kind)?.[1] ?? ''} · ${PROC_SCOPE.find(([k]) => k === p.applies_to)?.[1] ?? ''} · ${(p.procedure_steps ?? []).filter((x) => x.active && x.equipment_id == null).length} steps</span></span>
+      <span class="li-value"><button class="small" data-edit-proc="${p.procedure_id}">Edit</button></span></li>`).join('')}</ul>` : '<p class="muted">None yet.</p>'}
+    <div class="actions"><button type="button" class="primary" data-act="new">New procedure</button><span class="spacer"></span><button type="button" data-act="close">Close</button></div></div>`;
+  $('[data-act=close]', dlg).onclick = () => { dlg.close(); onDone?.(); };
+  $('[data-act=new]', dlg).onclick = () => editProcedure(null, onDone);
+  $$('[data-edit-proc]', dlg).forEach((b) => (b.onclick = () => editProcedure(Number(b.dataset.editProc), onDone)));
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
+}
+
+async function editProcedure(procId, onDone) {
+  let p = procId ? (await q(sb.from('procedures').select('*, procedure_steps(*)').eq('procedure_id', procId)))[0] : null;
+  const dlg = $('#dialog');
+  let sys = '';   // system whose extra steps are shown
+  const urls = new Map();
+  const loadUrls = async () => {
+    const paths = (p?.procedure_steps ?? []).filter((st) => st.photo_path && !urls.has(st.photo_path)).map((st) => st.photo_path);
+    if (paths.length) ((await sb.storage.from('maintenance').createSignedUrls(paths, 3600)).data ?? []).forEach((u, i) => urls.set(paths[i], u.signedUrl));
+  };
+  const reloadP = async () => { [p] = await q(sb.from('procedures').select('*, procedure_steps(*)').eq('procedure_id', p.procedure_id)); await loadUrls(); draw(); };
+  const stepRow = (st, i, list) => `<li data-sid="${st.step_id}">
+    <div class="step-row"><span class="step-n">${i + 1}.</span><textarea rows="1" data-text="${st.step_id}">${esc(st.text)}</textarea>
+      <span class="step-btns"><button type="button" class="icon" data-up="${st.step_id}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button type="button" class="icon" data-down="${st.step_id}" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
+      <label class="icon" title="Photo">📷<input type="file" accept="image/*" hidden data-photo="${st.step_id}"></label><button type="button" class="icon" data-del-step="${st.step_id}" aria-label="Delete step">✕</button></span></div>
+    ${st.photo_path ? `<div class="step-photo"><img src="${esc(urls.get(st.photo_path) ?? '')}" alt=""><button type="button" class="small" data-rm-photo="${st.step_id}">Remove photo</button></div>` : ''}</li>`;
+  const draw = () => {
+    const all = (p?.procedure_steps ?? []).filter((st) => st.active);
+    const shared = all.filter((st) => st.equipment_id == null).sort((a, b) => a.position - b.position || a.step_id - b.step_id);
+    const scope = p?.applies_to ?? 'pivots';
+    const systems = refs.equipment.filter((e) => (e.active || all.some((st) => st.equipment_id === e.equipment_id)) && procScopeTest(scope)(e)).sort(eqSort);
+    const extra = sys ? all.filter((st) => st.equipment_id === Number(sys)).sort((a, b) => a.position - b.position) : [];
+    const withExtras = new Set(all.filter((st) => st.equipment_id != null).map((st) => st.equipment_id));
+    dlg.innerHTML = `<form class="form proc-form">
+      <div class="dialog-head"><h3>${p ? 'Edit' : 'New'} procedure</h3></div>
+      <label>Name *<input name="name" required value="${esc(p?.name ?? '')}" placeholder="e.g. Pivot fall shutdown"></label>
+      <div class="row2">
+        <label>Kind<select name="kind">${PROC_KINDS.map(([k, l]) => `<option value="${k}" ${(p?.kind ?? 'shutdown') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label>Applies to<select name="applies_to">${PROC_SCOPE.map(([k, l]) => `<option value="${k}" ${scope === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      </div>
+      <label>Notes<textarea name="notes" rows="2">${esc(p?.notes ?? '')}</textarea></label>
+      <label class="check"><input type="checkbox" name="active" ${p?.active === false ? '' : 'checked'}> Active</label>
+      ${p ? `<div class="lines-head"><b>Steps for every system</b></div>
+        <ol class="step-list">${shared.map(stepRow).join('')}</ol>
+        <div class="row step-add"><input data-new="shared" placeholder="Add a step…"><button type="button" class="small" data-add="shared">Add</button></div>
+        <div class="lines-head"><b>Extra steps for one system</b><span class="muted small">Added after the shared steps, at the position you choose</span></div>
+        <label>System<select data-sys><option value="">Choose a system…</option>${systems.map((e) => `<option value="${e.equipment_id}" ${Number(sys) === e.equipment_id ? 'selected' : ''}>${esc(eqLabel(e))}${withExtras.has(e.equipment_id) ? ' ★' : ''}</option>`).join('')}</select></label>
+        ${sys ? `<ol class="step-list">${extra.map(stepRow).join('')}</ol>
+          <div class="row step-add"><input data-new="sys" placeholder="Add a step for this system…">
+            <select data-after><option value="end">at the end</option>${shared.map((st, i) => `<option value="${st.position}">after step ${i + 1}</option>`).join('')}</select>
+            <button type="button" class="small" data-add="sys">Add</button></div>` : ''}`
+        : '<p class="muted small">Save the name first, then add the steps.</p>'}
+      <div class="actions">${p ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}<span class="spacer"></span>
+        <button type="button" data-act="cancel">${p ? 'Done' : 'Cancel'}</button><button type="submit" class="primary">Save</button></div></form>`;
+    const form = $('form', dlg), el = form.elements;
+    const head = () => ({ name: el.name.value.trim(), kind: el.kind.value, applies_to: el.applies_to.value, notes: el.notes.value.trim() || null, active: el.active.checked });
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        if (p) { await q(sb.from('procedures').update(head()).eq('procedure_id', p.procedure_id)); toast('Saved'); await reloadP(); }
+        else { const [np] = await q(sb.from('procedures').insert(head()).select('*')); p = { ...np, procedure_steps: [] }; toast('Saved. Add the steps now.'); draw(); }
+      } catch { /* shown */ }
+    };
+    $('[data-act=cancel]', dlg).onclick = async () => {
+      if (p) { try { await q(sb.from('procedures').update(head()).eq('procedure_id', p.procedure_id)); } catch { /* shown */ } }
+      const procs = (await sb.from('procedures').select('*, procedure_steps(*)').order('name')).data ?? [];
+      openProcedures(procs, onDone);
+    };
+    const del = $('[data-act=del]', dlg);
+    if (del) del.onclick = async () => {
+      if (!confirm('Delete this procedure? Rounds already started with it are kept only if you make it inactive instead.')) return;
+      try { await q(sb.from('procedures').delete().eq('procedure_id', p.procedure_id)); dlg.close(); onDone?.(); }
+      catch { toast('It has rounds, so it can’t be deleted. Untick Active instead.', true); }
+    };
+    if (!p) return;
+    const sysSel = $('[data-sys]', dlg);
+    sysSel.onchange = () => { sys = sysSel.value; draw(); };
+    $$('[data-add]', dlg).forEach((b) => (b.onclick = async () => {
+      const isSys = b.dataset.add === 'sys';
+      const inp = $(`[data-new="${isSys ? 'sys' : 'shared'}"]`, dlg);
+      const text = inp.value.trim();
+      if (!text) return inp.focus();
+      const maxShared = Math.max(0, ...shared.map((st) => st.position));
+      const after = isSys ? $('[data-after]', dlg).value : 'end';
+      const position = isSys ? (after === 'end' ? maxShared + 5 + extra.length : Number(after) + 1 + extra.filter((x) => x.position > Number(after) && x.position < Number(after) + 10).length) : maxShared + 10;
+      try { await q(sb.from('procedure_steps').insert({ procedure_id: p.procedure_id, equipment_id: isSys ? Number(sys) : null, position, text })); await reloadP(); $(`[data-new="${isSys ? 'sys' : 'shared'}"]`, dlg)?.focus(); } catch { /* shown */ }
+    }));
+    $$('[data-new]', dlg).forEach((inp) => (inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $(`[data-add="${inp.dataset.new}"]`, dlg).click(); } }));
+    $$('[data-text]', dlg).forEach((ta) => (ta.onchange = async () => { try { await q(sb.from('procedure_steps').update({ text: ta.value.trim() }).eq('step_id', Number(ta.dataset.text))); } catch { /* shown */ } }));
+    $$('[data-del-step]', dlg).forEach((b) => (b.onclick = async () => {
+      if (!confirm('Delete this step?')) return;
+      try { await q(sb.from('procedure_steps').update({ active: false }).eq('step_id', Number(b.dataset.delStep))); await reloadP(); } catch { /* shown */ }
+    }));
+    const move = async (id, dir) => {
+      const st = all.find((x) => x.step_id === id);
+      const list = st.equipment_id == null ? shared : extra;
+      const i = list.indexOf(st), o = list[i + dir];
+      if (!o) return;
+      try {
+        await q(sb.from('procedure_steps').update({ position: o.position }).eq('step_id', st.step_id));
+        await q(sb.from('procedure_steps').update({ position: st.position === o.position ? st.position + dir : st.position }).eq('step_id', o.step_id));
+        await reloadP();
+      } catch { /* shown */ }
+    };
+    $$('[data-up]', dlg).forEach((b) => (b.onclick = () => move(Number(b.dataset.up), -1)));
+    $$('[data-down]', dlg).forEach((b) => (b.onclick = () => move(Number(b.dataset.down), 1)));
+    $$('[data-photo]', dlg).forEach((inp) => (inp.onchange = async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try {
+        const blob = await shrinkImage(f, 1600);
+        const path = `procedures/${p.procedure_id}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
+        const { error } = await sb.storage.from('maintenance').upload(path, blob, { contentType: blob.type || 'image/jpeg' });
+        if (error) throw error;
+        await q(sb.from('procedure_steps').update({ photo_path: path }).eq('step_id', Number(inp.dataset.photo)));
+        await reloadP();
+      } catch (err) { toast(`Upload failed: ${err.message ?? err}`, true); }
+    }));
+    $$('[data-rm-photo]', dlg).forEach((b) => (b.onclick = async () => {
+      const st = all.find((x) => x.step_id === Number(b.dataset.rmPhoto));
+      try { await sb.storage.from('maintenance').remove([st.photo_path]); await q(sb.from('procedure_steps').update({ photo_path: null }).eq('step_id', st.step_id)); await reloadP(); } catch { /* shown */ }
+    }));
+  };
+  await loadUrls();
+  draw();
+  dlg.classList.add('wide');
+  dlg.onclose = () => dlg.classList.remove('wide');
+  if (!dlg.open) dlg.showModal();
 }
 
 async function renderSetup(el) {

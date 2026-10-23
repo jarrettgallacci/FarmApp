@@ -20,6 +20,7 @@ begin
   delete from public.planting_details      where event_id in (select event_id from public.work_events where field_id = p_field);
   delete from public.work_events           where field_id = p_field;
   delete from public.maintenance_records   where field_id = p_field;
+  delete from public.equipment_fields      where field_id = p_field;   -- needs irrigation_procedures.sql
   delete from public.leases                where field_id = p_field;
   delete from public.field_lineage         where field_id = p_field or predecessor_id = p_field;
   delete from public.fields                where field_id = p_field;

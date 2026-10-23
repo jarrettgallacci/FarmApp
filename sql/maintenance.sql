@@ -2,8 +2,7 @@
 -- problem and invoice photos. Pivots, pumps, wells, mainlines and buildings are added as equipment
 -- (type Pivot, Pump, Well, Mainline, Building) so everything shares one list. Safe to re-run.
 
--- 1. Which field a pivot / pump / well serves (optional)
-alter table public.equipment add column if not exists field_id bigint references public.fields on delete set null;
+-- 1. (Fields a pivot / pump serves: see irrigation_procedures.sql)
 
 -- 2. Service intervals: "Engine oil & filter every 500 hrs", "Gearbox oil every 12 months"
 create table if not exists public.service_intervals (
@@ -92,7 +91,6 @@ begin
   delete from public.planting_details      where event_id in (select event_id from public.work_events where field_id = p_field);
   delete from public.work_events           where field_id = p_field;
   delete from public.maintenance_records   where field_id = p_field;
-  update public.equipment set field_id = null where field_id = p_field;
   delete from public.leases                where field_id = p_field;
   delete from public.field_lineage         where field_id = p_field or predecessor_id = p_field;
   delete from public.fields                where field_id = p_field;
