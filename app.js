@@ -289,6 +289,8 @@ const CRUD = {
       { key: 'serial_no', label: 'Serial number / PIN', listLabel: 'Serial / PIN', type: 'text', list: true },
       { key: 'unit_no', label: 'Equipment # (100s tractors & self-propelled, 200s pickups, 300s trucks & trailers, 400s construction, 500s implements, 600s other, 700s irrigation, 900s buildings)', listLabel: 'No.', type: 'text' },
       { key: 'engine_serial', label: 'Engine serial', type: 'text' },
+      { key: 'towers', label: 'Number of towers', listLabel: 'Towers', type: 'number', step: '1' },
+      { key: 'corner_arm', label: 'Has a corner machine', type: 'checkbox' },
       { key: 'hp', label: 'Horsepower (pumps)', type: 'number', step: '0.1' },
       { key: 'frame_size', label: 'Frame size (pumps)', type: 'text' },
       { key: 'meter_no', label: 'Meter number (pumps)', type: 'text' },
@@ -621,6 +623,69 @@ function turnoutCfs(turnoutId, lineMap) {
     .reduce((sum, f) => { const l = lineMap.get(f.field_id); return l?.is_on ? sum + Number(l.cfs || 0) : sum; }, 0);
 }
 
+// Irrigation season: once ended, water orders pause until a new season is started.
+let irrSeasonCache = null;
+async function irrigationSeason(force = false) {
+  if (irrSeasonCache && !force) return irrSeasonCache;
+  const res = await sb.from('irrigation_seasons').select('*').order('year', { ascending: false }).limit(1);
+  const s = res.error ? null : res.data[0] ?? null;
+  irrSeasonCache = { ready: !res.error, latest: s, ended: !!(s?.end_date && s.end_date <= localDate()) };
+  return irrSeasonCache;
+}
+// End the season: record the date, and save an all-off order so nothing shows as still running.
+async function endIrrigationSeason(onDone) {
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  const today = localDate();
+  dlg.innerHTML = `<form class="form"><div class="dialog-head"><h3>End irrigation season</h3></div>
+    <label>Water shut off on<input type="date" name="end" value="${today}" required></label>
+    <p class="muted small">Every field is marked off from that day, the dashboard stops asking for tomorrow's order, and water orders pause until you start next season. Orders already saved are kept.</p>
+    <label>Notes<textarea name="notes" rows="2"></textarea></label>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">End season</button></div></form>`;
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  $('form', dlg).onsubmit = async (e) => {
+    e.preventDefault();
+    const end = e.target.elements.end.value, notes = e.target.elements.notes.value.trim() || null;
+    const year = Number(end.slice(0, 4));
+    try {
+      const cur = (await q(sb.from('irrigation_seasons').select('*').eq('year', year)))[0];
+      if (cur) await q(sb.from('irrigation_seasons').update({ end_date: end, notes: notes ?? cur.notes }).eq('season_id', cur.season_id));
+      else await q(sb.from('irrigation_seasons').insert({ year, end_date: end, notes }));
+      // All-off order: on the shut-off day, or the day after if that day already has an order.
+      const last = (await q(sb.from('water_orders').select('order_id, order_date').neq('status', 'draft').lte('order_date', end).order('order_date', { ascending: false }).limit(1)))[0];
+      if (last) {
+        const offDate = last.order_date === end ? addDays(end, 1) : end;
+        const exists = (await q(sb.from('water_orders').select('order_id').eq('order_date', offDate)))[0];
+        if (!exists) {
+          const [lines, subs] = await Promise.all([
+            q(sb.from('water_order_lines').select('*').eq('order_id', last.order_id)),
+            q(sb.from('water_order_subunits').select('*').eq('order_id', last.order_id)),
+          ]);
+          const [o] = await q(sb.from('water_orders').insert({ order_date: offDate, status: 'submitted', submitted_at: new Date().toISOString(), notes: 'Irrigation season ended: all water off' }).select('order_id'));
+          if (lines.length) await q(sb.from('water_order_lines').insert(lines.map((l) => ({ order_id: o.order_id, field_id: l.field_id, turnout_id: l.turnout_id, is_on: false, cfs: 0 }))));
+          if (subs.length) await q(sb.from('water_order_subunits').insert(subs.map((x) => ({ order_id: o.order_id, subunit_field_id: x.subunit_field_id, watered: false }))));
+        }
+      }
+      await irrigationSeason(true);
+      dlg.close(); toast('Irrigation season ended'); onDone?.();
+    } catch { /* shown */ }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+async function startIrrigationSeason(onDone) {
+  const today = localDate(), year = Number(today.slice(0, 4));
+  try {
+    const cur = (await q(sb.from('irrigation_seasons').select('*').eq('year', year)))[0];
+    if (cur && cur.end_date && cur.end_date <= today) {
+      if (!confirm(`The ${year} season was already ended on ${fmtDay(cur.end_date)}. Reopen it?`)) return;
+      await q(sb.from('irrigation_seasons').update({ end_date: null }).eq('season_id', cur.season_id));
+    } else if (cur) await q(sb.from('irrigation_seasons').update({ start_date: cur.start_date ?? today, end_date: null }).eq('season_id', cur.season_id));
+    else await q(sb.from('irrigation_seasons').insert({ year, start_date: today }));
+    await irrigationSeason(true);
+    toast(`${year} irrigation season started`); onDone?.();
+  } catch { /* shown */ }
+}
+
 async function linesFor(orderId) {
   const [lines, subs] = await Promise.all([
     q(sb.from('water_order_lines').select('*').eq('order_id', orderId)),
@@ -667,8 +732,19 @@ async function renderOrder(el) {
         <button data-shift="-1" aria-label="Previous day">‹</button>
         <input type="date" id="order-date" value="${orderState.date}">
         <button data-shift="1" aria-label="Next day">›</button>
+        <button data-act="season" hidden></button>
       </div></div>
+    <div id="season-banner"></div>
     <div id="order-body"><p class="muted">Loading…</p></div>`;
+  irrigationSeason(true).then((ss) => {
+    if (!ss.ready) return;
+    const btn = $('[data-act=season]', el), ban = $('#season-banner', el);
+    if (!btn || !ban) return;
+    btn.hidden = false;
+    btn.textContent = ss.ended ? 'Start new season' : 'End irrigation season';
+    btn.onclick = () => (ss.ended ? startIrrigationSeason(() => renderOrder(el)) : endIrrigationSeason(() => renderOrder(el)));
+    if (ss.ended) ban.innerHTML = `<p class="notice">The ${ss.latest.year} irrigation season ended ${esc(fmtDay(ss.latest.end_date))}. Orders are paused; you can still look back at past orders or start a new season.</p>`;
+  });
   $('#order-date', el).onchange = (e) => { if (!okToLeaveOrder()) { e.target.value = orderState.date; return; } if (e.target.value) { orderState.date = e.target.value; renderOrder(el); } };
   $$('[data-shift]', el).forEach((b) => (b.onclick = () => {
     if (!okToLeaveOrder()) return;
@@ -1024,7 +1100,8 @@ async function renderHome(el) {
       + `<p class="muted small total-line">${onCount} field${onCount === 1 ? '' : 's'} · ${num(onCfs)} CFS total</p>`
     : '<p class="muted">Nothing is on.</p>';
 
-  const needsOrder = (!tmr || tmr.status === 'draft') && new Date().getHours() * 60 + new Date().getMinutes() >= 14 * 60 + 30;
+  const ss = await irrigationSeason(true);
+  const needsOrder = !ss.ended && (!tmr || tmr.status === 'draft') && new Date().getHours() * 60 + new Date().getMinutes() >= 14 * 60 + 30;
 
   el.innerHTML = `
     <div class="home-head">
@@ -1040,11 +1117,13 @@ async function renderHome(el) {
 
     <div class="dash-grid">
       <div>
-        <section class="card"><h3>Water changes today</h3>${changesHtml}</section>
-        <section class="card"><h3>Water on after today's changes</h3>${runningHtml}</section>
+        ${ss.ended ? `<section class="card"><h3>Irrigation season over</h3><p>Water shut off ${esc(fmtDay(ss.latest.end_date))}. Water orders are paused until next season.</p>
+          <div class="actions"><button data-act="start-season">Start ${new Date().getFullYear() > ss.latest.year ? new Date().getFullYear() + ' ' : ''}season</button></div></section>`
+        : `<section class="card"><h3>Water changes today</h3>${changesHtml}</section>
+        <section class="card"><h3>Water on after today's changes</h3>${runningHtml}</section>`}
       </div>
       <div>
-        <section class="card">
+        <section class="card" ${ss.ended ? 'hidden' : ''}>
           <h3>Tomorrow's order</h3>
           <p class="status-line">${tmrStatus}</p>
           <p class="muted small">${esc(fmtDay(tomorrow))} · due to the ditch riders around 2:30 PM today</p>
@@ -1055,6 +1134,7 @@ async function renderHome(el) {
     </div>`;
 
   $$('[data-act=tomorrow]', el).forEach((b) => (b.onclick = () => { orderState.date = tomorrow; show('order'); }));
+  $('[data-act=start-season]', el)?.addEventListener('click', () => startIrrigationSeason(() => renderHome(el)));
   drawSchedule($('#dash-sched', el), () => renderHome(el));
   $('[data-act=scan]', el).onclick = () => openScanner();
   $$('[data-wdone]', el).forEach((c) => (c.onchange = async () => {
@@ -3686,6 +3766,7 @@ function narrowTypeChoices(form, row) {
 const ENGINE_RE = /tractor|combine|swather|windrower|sprayer|pickup|truck|loader|forklift|scraper|blade|excavat|backhoe|skid/i;
 const IRRIG_RE = /pivot|solid ?set|handline|hand line|wheel ?line|pump|mainline|well/i;
 const TYPE_FIELDS = [
+  [/pivot/i, ['towers', 'corner_arm']],
   [/pump/i, ['hp', 'frame_size', 'meter_no', 'vfd']],
   [/planter|drill/i, ['planting_settings']],
   [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow|planter|drill|cultivat|corrugat|dammer|toolbar|bedder|bean cutter|header|digger|combine|swather|windrower|sprayer|implement/i, ['cost_per_acre']],
@@ -4199,7 +4280,7 @@ async function myOperator() {
 // Seasonal tasks are labelled by field; the machine is the small print.
 const sysKind = (e) => SYS_TYPES.find(([k]) => k === sysType(e))?.[1]?.replace(/s$/, '') ?? e?.type ?? '';
 const taskTitle = (e) => (e ? (eqFields(e).length ? eqFields(e).join(', ') : e.name) : '?');
-const taskSub = (e) => (e ? [sysKind(e), eqNum(e) != null ? `#${eqNum(e)}` : '', eqFields(e).length && !eqFields(e).every((f) => e.name.includes(f)) ? e.name : ''].filter(Boolean).join(' · ') : '');
+const taskSub = (e) => (e ? [sysKind(e), eqNum(e) != null ? `#${eqNum(e)}` : '', e.towers ? `${e.towers} towers${e.corner_arm ? ' + corner' : ''}` : '', eqFields(e).length && !eqFields(e).every((f) => e.name.includes(f)) ? e.name : ''].filter(Boolean).join(' · ') : '');
 const fieldRank = (e) => { const fs = (e?.equipment_fields ?? []).map((x) => fieldsInOrder().findIndex((f) => f.field_id === x.field_id)).filter((i) => i >= 0); return fs.length ? Math.min(...fs) : 1e6; };
 const taskSort = (a, b) => fieldRank(a) - fieldRank(b) || (SYS_TYPES.findIndex(([k]) => k === sysType(a)) - SYS_TYPES.findIndex(([k]) => k === sysType(b))) || eqSort(a, b);
 // Which pump station covers a pivot / solid set (shares a field with it), and what a station covers.
@@ -4938,7 +5019,7 @@ async function openEquipCard(id) {
   const engine = ENGINE_RE.test(eq.type ?? '');
   dlg.innerHTML = `<div class="form eq-card">
     <div class="dialog-head"><h3>${esc(eqNum(eq) != null ? `#${eqNum(eq)} ` : '')}${esc(eq.name)}</h3>
-      <p class="muted small">${esc([eq.type, eq.make, eq.model, eq.model_year, eqFields(eq).length ? 'field ' + eqFields(eq).join(', ') : ''].filter(Boolean).join(' · '))}</p></div>
+      <p class="muted small">${esc([eq.type, eq.make, eq.model, eq.model_year, eq.towers ? `${eq.towers} towers${eq.corner_arm ? ' + corner' : ''}` : '', eqFields(eq).length ? 'field ' + eqFields(eq).join(', ') : ''].filter(Boolean).join(' · '))}</p></div>
     <div class="eq-actions">
       <button type="button" class="primary" data-act="problem">Report a problem</button>
       <button type="button" data-act="service">Log service</button>
