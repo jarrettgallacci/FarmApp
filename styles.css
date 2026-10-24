@@ -722,7 +722,7 @@ dialog.stacked { z-index: 10; }
 /* Faint deer watermark behind everything */
 body::before {
   content: ""; position: fixed; z-index: -1; pointer-events: none;
-  right: -60px; bottom: -40px; width: min(560px, 70vw); aspect-ratio: 1;
+  left: 50%; top: 50%; transform: translate(-50%, -42%); width: min(520px, 72vw); aspect-ratio: 1;
   background: url("assets/mark.png") center / contain no-repeat;
   opacity: .06; filter: grayscale(.2);
 }
@@ -778,7 +778,7 @@ dialog h3 { margin-bottom: .8rem; }
   .brand-text b { font-size: .88rem; }
   main { padding-top: 16px; }
   .card { padding: 1rem; }
-  body::before { width: 80vw; right: -20vw; bottom: -10vw; }
+  body::before { width: 82vw; }
   dialog { padding: 1rem 1rem 0; }
 }
 /* Small toggles (dashboard Done ticks) */
