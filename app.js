@@ -2688,8 +2688,175 @@ async function openWorkForm(opts, onDone) {
       dlg.close(); toast('Deleted'); onDone?.();
     } catch { /* shown */ }
   };
+  if (!ev && !multi) voiceBox(dlg, (p) => {
+    const got = [];
+    if (p.planned != null || p.date) { status = p.planned ? 'planned' : 'done'; syncStatus(); }
+    if (p.operation && p.operation !== op()) { el.operation.value = p.operation; voiceMark(el.operation); sync(); }
+    if (p.operation) got.push(workLabel(p.operation));
+    if (p.field) { if (custom) { custom = false; $$('[data-ground]', dlg).forEach((x) => x.classList.toggle('on', x.dataset.ground === 'ours')); sync(); }
+      el.field_id.value = p.field.field_id; voiceMark(el.field_id); fieldChanged(); got.push(p.field.name); }
+    if (p.date) { el.performed_on.value = p.date; voiceMark(el.performed_on); fillCropYears(); got.push(p.planned ? `planned ${p.date}` : p.date); }
+    else if (p.planned) got.push('planned');
+    fillEquip();
+    const setEq = (sel, e) => { if (!e) return; if (![...sel.options].some((x) => Number(x.value) === e.equipment_id)) sel.add(new Option(e.name, e.equipment_id)); sel.value = e.equipment_id; voiceMark(sel); got.push(e.name); };
+    setEq(el.tractor_id, p.tractor); setEq(el.equipment_id, p.implement);
+    if (p.implement) { plateLabel(); showCost(); }
+    if (p.operator) { el.performed_by.value = p.operator.operator_id; voiceMark(el.performed_by); got.push(p.operator.name); }
+    if (p.acres) { el.acres.value = p.acres; el.acres.dataset.touched = '1'; voiceMark(el.acres); showCost(); got.push(`${p.acres} ac`); }
+    if (!el.notes.value.trim()) el.notes.value = p.raw;
+    return got;
+  }, opts.say);
   dlg.onclose = () => dlg.classList.remove('wide');
   if (!dlg.open) dlg.showModal();
+}
+
+// =====================================================================
+// Voice: say it, and the form fills in what it recognizes. Nothing saves on its own.
+// =====================================================================
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+const vNorm = (s) => ` ${String(s ?? '').toLowerCase()
+  .replace(/[“”"'’]/g, '').replace(/[-_/,;:!?()]/g, ' ').replace(/(?<!\d)\.|\.(?!\d)/g, ' ')
+  .replace(/\bnorth\b/g, 'n').replace(/\bsouth\b/g, 's').replace(/\beast\b/g, 'e').replace(/\bwest\b/g, 'w')
+  .replace(/\bnumber\b|\bunit\b|\bno\b(?=\s*\d)/g, '#').replace(/#\s+/g, '#')
+  .replace(/\s+/g, ' ').trim()} `;
+const vHas = (text, phrase) => { const p = vNorm(phrase).trim(); return p && new RegExp(`(^|\\s|#)${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s)`).test(text); };
+const VOICE_STOP = new Set(['seed', 'solid', 'pump', 'pivot', 'great', 'field', 'small', 'big', 'john', 'case', 'new', 'trailer', 'truck', 'pickup', 'shop']);
+const VOICE_OPS = [
+  ['tillage', /\b(dis[ck]|rip|plow|plough|till|chisel|harrow|roll(ed)? |pack|shred|work(ed)? (the )?ground|ground work)/],
+  ['planting', /\b(plant|drill(ed|ing)? |seed(ed|ing)? |sow)/],
+  ['cultivating', /\b(cultivat|corrugat|bed(ded|ding)? |hill|mark(ed|ing)? out)/],
+  ['harvest', /\b(harvest|combin|swath|windrow|cut(ting)? |dig|thresh|bale)/],
+];
+// Pull known names out of a sentence. Longest names win, so "173 Big W" beats "173 Big".
+function parseSpeech(raw) {
+  let t = vNorm(raw);
+  const out = { raw: String(raw).trim() };
+  const take = (phrase) => { const p = vNorm(phrase).trim(); t = t.replace(new RegExp(`(^|\\s|#)${p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s)`), ' '); };
+  // Equipment: unit number first ("#717", "unit 717"), then full names, then a distinctive first word ("ripper", "disk").
+  const eqs = refs.equipment.filter((e) => e.active);
+  const found = [];
+  for (const e of eqs) if (eqNum(e) != null && new RegExp(`#${eqNum(e)}(?=\\s)`).test(t)) { found.push(e); t = t.replace(`#${eqNum(e)}`, ' '); }
+  for (const e of [...eqs].sort((a, b) => String(b.name).length - String(a.name).length)) {
+    if (found.includes(e)) continue;
+    const names = [e.name, e.model, e.make && e.model ? `${e.make} ${e.model}` : null].filter(Boolean);
+    const hit = names.find((n) => vNorm(n).trim().length >= 3 && vHas(t, n));
+    if (hit) { found.push(e); take(hit); continue; }
+    const first = vNorm(e.name).trim().split(' ')[0];
+    if (first.length >= 4 && !/^\d+$/.test(first) && !VOICE_STOP.has(first) && eqs.filter((x) => vNorm(x.name).trim().split(' ')[0] === first).length === 1
+      && new RegExp(`(^|\\s)${first}\\w*(?=\\s)`).test(t)) { found.push(e); t = t.replace(new RegExp(`(^|\\s)${first}\\w*(?=\\s)`), ' '); }
+  }
+  out.equipment = found;
+  out.tractor = found.find(isTractor) ?? null;
+  out.implement = found.find((e) => !isTractor(e)) ?? null;
+  // Field
+  const fields = refs.fields.filter((f) => f.active).sort((a, b) => String(b.name).length - String(a.name).length);
+  const f = fields.find((x) => vHas(t, x.name) || vHas(t, `field ${x.name}`));
+  if (f) { out.field = f; take(f.name); }
+  // Operator: full name, then first name if only one person has it
+  const ops = refs.operators.filter((o) => o.active);
+  let o = ops.find((x) => vHas(t, x.name));
+  if (!o) { const firsts = ops.filter((x) => vHas(t, String(x.name).split(' ')[0])); if (firsts.length === 1) o = firsts[0]; }
+  if (o) { out.operator = o; take(vHas(t, o.name) ? o.name : String(o.name).split(' ')[0]); }
+  // Work type: words first, then what the implement is tagged for
+  out.operation = VOICE_OPS.find(([, re]) => re.test(t))?.[0] ?? null;
+  if (!out.operation && out.implement) out.operation = ['tillage', 'planting', 'cultivating', 'harvest'].find((op) => doesWork(out.implement, op)) ?? null;
+  if (out.operation && !refs.workTypes.some((w) => w.operation === out.operation)) out.operation = null;
+  // When
+  if (/\byesterday\b/.test(t)) out.date = addDays(localDate(), -1);
+  else if (/\btomorrow\b/.test(t)) { out.date = addDays(localDate(), 1); out.planned = true; }
+  else if (/\btoday\b|\bthis morning\b|\bthis afternoon\b/.test(t)) out.date = localDate();
+  if (/\b(plan|need to|needs to|going to|gonna|schedule|next week)\b/.test(t)) out.planned = true;
+  const ac = t.match(/(\d+(?:\.\d+)?)\s*acres?\b/); if (ac) out.acres = Number(ac[1]);
+  // Repairs
+  out.down = /\b(is down|went down|broke|broken|won t (run|start)|wont (run|start)|can t (run|use)|not running|dead)\b/.test(t);
+  out.service = /\b(service|oil change|change(d)? (the )?oil|grease(d)?|filters?)\b/.test(t);
+  out.rest = t.replace(/\s+/g, ' ').trim();
+  return out;
+}
+// Mark what voice filled so it's easy to check; the mark clears when the box is changed.
+function voiceMark(ctrl) { if (!ctrl) return; const box = ctrl.closest('label') ?? ctrl; box.classList.add('voice-filled'); ctrl.addEventListener('change', () => box.classList.remove('voice-filled'), { once: true }); }
+// The "Say it" box at the top of a form. apply(parsed) fills the form and returns the list of what it filled.
+function voiceBox(dlg, apply, startText) {
+  const head = $('.dialog-head', dlg);
+  if (!head) return;
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'voice-btn'; btn.innerHTML = '🎤 Say it';
+  head.append(btn);
+  const box = document.createElement('div');
+  box.className = 'voice-box'; box.hidden = true;
+  box.innerHTML = `<textarea rows="2" placeholder="${SpeechRec ? 'Listening… or type it' : 'Tap the 🎤 on your keyboard and say it'} — e.g. “Disked 173 Big W with the 8335 and the ripper, Juan, yesterday”"></textarea>
+    <div class="row"><button type="button" class="primary small" data-v="fill">Fill in form</button>${SpeechRec ? '<button type="button" class="small" data-v="mic">🎤 Listen again</button>' : ''}<span class="spacer"></span><button type="button" class="small ghost" data-v="close">Close</button></div>
+    <p class="voice-result small" hidden></p>`;
+  head.after(box);
+  const ta = $('textarea', box), res = $('.voice-result', box);
+  let rec = null;
+  const listen = () => {
+    if (!SpeechRec) { ta.focus(); return; }
+    try { rec?.abort(); } catch { /* ignore */ }
+    rec = new SpeechRec(); rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false;
+    const before = ta.value ? ta.value.trim() + ' ' : '';
+    rec.onresult = (e) => { ta.value = before + [...e.results].map((r) => r[0].transcript).join(''); };
+    rec.onstart = () => box.classList.add('listening');
+    rec.onend = () => { box.classList.remove('listening'); if (ta.value.trim()) fill(); };
+    rec.onerror = (e) => { box.classList.remove('listening'); if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { toast('Microphone blocked. Use the 🎤 on your keyboard instead.', true); ta.focus(); } };
+    try { rec.start(); } catch { ta.focus(); }
+  };
+  const fill = () => {
+    const text = ta.value.trim();
+    if (!text) return;
+    const filled = apply(parseSpeech(text));
+    res.hidden = false;
+    res.innerHTML = filled.length ? `Filled in: <b>${filled.map(esc).join(' · ')}</b>. Check the highlighted boxes, then Save.` : 'Didn’t recognize a field, machine or person. Try their names as they appear in the app.';
+  };
+  btn.onclick = () => { box.hidden = false; if (!ta.value) listen(); else ta.focus(); };
+  $('[data-v=fill]', box).onclick = fill;
+  $('[data-v=mic]', box)?.addEventListener('click', listen);
+  $('[data-v=close]', box).onclick = () => { try { rec?.abort(); } catch { /* ignore */ } box.hidden = true; };
+  dlg.addEventListener('close', () => { try { rec?.abort(); } catch { /* ignore */ } }, { once: true });
+  if (startText) { box.hidden = false; ta.value = startText; setTimeout(fill, 0); }
+}
+// Dictation button on note boxes (only where the browser can listen; otherwise the keyboard mic does this).
+function addDictation(root) {
+  if (!SpeechRec) return;
+  $$('textarea', root).forEach((ta) => {
+    if (ta.dataset.dict || ta.closest('.voice-box')) return;
+    ta.dataset.dict = '1';
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'icon dict-btn'; b.title = 'Dictate'; b.textContent = '🎤';
+    const wrap = document.createElement('span'); wrap.className = 'dict-wrap';
+    ta.replaceWith(wrap); wrap.append(ta, b);
+    b.onclick = () => {
+      const rec = new SpeechRec(); rec.lang = 'en-US'; rec.interimResults = true;
+      const before = ta.value ? ta.value.replace(/\s*$/, ' ') : '';
+      rec.onresult = (e) => { ta.value = before + [...e.results].map((r) => r[0].transcript).join(''); };
+      rec.onstart = () => b.classList.add('on'); rec.onend = () => { b.classList.remove('on'); ta.dispatchEvent(new Event('input', { bubbles: true })); };
+      try { rec.start(); } catch { ta.focus(); }
+    };
+  });
+}
+new MutationObserver((ms) => ms.forEach((m) => m.addedNodes.forEach((n) => { if (n.nodeType === 1 && n.closest?.('dialog')) addDictation(n); })))
+  .observe(document.body, { childList: true, subtree: true });
+// Siri / Shortcuts links: #say-work=<text> opens Log work, #say-job=<text> opens Report a problem.
+function voiceLink(kind) { return `${location.origin}${location.pathname}#say-${kind}=`; }
+function renderVoiceHelp(box) {
+  box.innerHTML = `<h3>Voice &amp; Siri</h3>
+    <p>Every <b>Log work</b> and <b>Report a problem</b> form has a <b>🎤 Say it</b> button. Say what happened in one sentence and it fills in the field, machines, person, work type and date it recognizes. It never saves on its own: check the highlighted boxes, then tap Save.</p>
+    <p class="muted small">Say names the way they appear in the app: “173 Big W”, “8335RT”, “unit 717”, “Juan”. Words like yesterday, tomorrow, “need to” (plans it), “40 acres”, and “is down” are understood.</p>
+    <h4>Siri on iPhone</h4>
+    <ol class="cal-steps-list">
+      <li>Open the <b>Shortcuts</b> app → <b>+</b> (new shortcut).</li>
+      <li>Add <b>Dictate Text</b>.</li>
+      <li>Add <b>URL Encode</b> (it uses the dictated text).</li>
+      <li>Add <b>Text</b>, paste the link below, then insert the <b>URL Encoded Text</b> variable right after the <code>=</code>.</li>
+      <li>Add <b>Open URLs</b>.</li>
+      <li>Name the shortcut what you'll say, e.g. <b>Log work</b>. Then “Hey Siri, log work.”</li>
+    </ol>
+    <div class="voice-links">
+      <label>Log work link<span class="row"><input readonly value="${esc(voiceLink('work'))}"><button type="button" class="small" data-copy="work">Copy</button></span></label>
+      <label>Report a problem link<span class="row"><input readonly value="${esc(voiceLink('job'))}"><button type="button" class="small" data-copy="job">Copy</button></span></label>
+    </div>
+    <p class="muted small">Make a second shortcut with the problem link and name it e.g. <b>Report a problem</b>. On Android, Google Assistant can open the same links through a Routine.</p>`;
+  $$('[data-copy]', box).forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(voiceLink(b.dataset.copy)); toast('Copied'); } catch { toast('Press and hold the link to copy it', true); } }));
 }
 
 // ---- Work tab: Records | Harvest
@@ -4143,6 +4310,19 @@ async function openJob(opts, onDone) {
       dlg.close(); toast('Deleted'); onDone?.();
     } catch { /* shown */ }
   };
+  if (!j) voiceBox(dlg, (p) => {
+    const got = [];
+    const e = p.equipment.find((x) => !isTractor(x) && eqCat(x) === 'irrigation') ?? p.equipment[0];
+    if (e) { pick.set(e.equipment_id); voiceMark(el.equipment_id); got.push(e.name); sync(); }
+    if (p.service) { el.kind.value = 'service'; voiceMark(el.kind); got.push('service'); sync(); }
+    if (p.down) { el.down.checked = true; got.push('down'); }
+    if (!el.title.value.trim()) {
+      const title = p.raw.replace(/^\s*(hey siri|siri)[,\s]*/i, '');
+      el.title.value = (title.charAt(0).toUpperCase() + title.slice(1)).slice(0, 120); voiceMark(el.title); got.push('what’s wrong');
+      if (title.length > 120) el.description.value ||= title;
+    }
+    return got;
+  }, opts.say);
   dlg.onclose = () => dlg.classList.remove('wide');
   if (!dlg.open) dlg.showModal();
 }
@@ -5128,6 +5308,7 @@ const TOOLS = [
   { id: 'gp-cal', title: 'Great Plains drill calibration', blurb: 'Grams from one seed tube over 0.1 acre → lb/acre', render: renderGpCal },
   { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Grams from one bin over a timed run → lb/acre at your speed', render: renderSsCal },
   { id: 'mono', title: 'Monosem sprockets', blurb: 'Seed plate + spacing → transmission sprockets', render: renderMonoCal },
+  { id: 'voice', title: 'Voice & Siri', blurb: 'Speak a record; set up Siri', render: renderVoiceHelp },
 ];
 
 function renderTools(el) {
@@ -5753,6 +5934,14 @@ async function startApp() {
 }
 // A QR label holds the app link + #eq=<id>; opening it (camera app or in-app scan) shows that machine's card.
 function openFromHash() {
+  const say = location.hash.match(/^#say-(work|job)=(.*)$/);
+  if (say) {
+    history.replaceState(null, '', location.pathname + location.search);
+    let text = say[2]; try { text = decodeURIComponent(text.replace(/\+/g, ' ')); } catch { /* keep as is */ }
+    if (say[1] === 'work') openWorkForm({ say: text }, () => show(currentView));
+    else openJob({ say: text }, () => show(currentView));
+    return;
+  }
   const m = location.hash.match(/eq=(\d+)/);
   if (!m) return;
   history.replaceState(null, '', location.pathname + location.search);

@@ -800,3 +800,22 @@ body::before { opacity: .045; }
 .filters label.check { flex-direction: row; align-items: center; gap: .55rem; flex: 1 1 100%; }
 .filters input[type=checkbox] { flex: none !important; width: 44px; height: 26px; }
 table.crud td { vertical-align: middle; }
+
+/* Voice */
+.dialog-head { align-items: center; }
+.voice-btn { margin-left: auto; flex: none; border-radius: 999px; padding: .4rem .9rem; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.voice-btn:hover { background: var(--accent); color: #fff; }
+.voice-box { display: flex; flex-direction: column; gap: .5rem; background: var(--accent-tint); border: 1px solid var(--accent-soft); border-radius: var(--radius); padding: .7rem .8rem; margin-bottom: .2rem; }
+.voice-box.listening textarea { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.voice-box.listening::before { content: "● Listening…"; color: var(--danger); font-size: .8rem; font-weight: 600; }
+.voice-result { margin: 0; }
+.voice-filled > select, .voice-filled > input, select.voice-filled, input.voice-filled { border-color: var(--green); background: var(--green-soft); }
+.dict-wrap { position: relative; display: block; }
+.dict-wrap textarea { padding-right: 2.6rem; }
+.dict-btn { position: absolute; right: 6px; bottom: 8px; border: 0; background: transparent; }
+.dict-btn.on { background: var(--danger); color: #fff; border-radius: 50%; }
+.voice-links { display: flex; flex-direction: column; gap: .6rem; margin: .6rem 0; }
+.voice-links label { display: flex; flex-direction: column; gap: .25rem; font-size: .88rem; color: var(--muted); }
+.voice-links .row input { flex: 1; min-width: 0; font-size: .85rem; }
+.cal-steps-list { padding-left: 1.2rem; display: flex; flex-direction: column; gap: .3rem; }
+@media (max-width: 700px) { .dialog-head:has(.voice-btn) { flex-direction: row; align-items: center; } }
