@@ -5809,6 +5809,7 @@ $('#account').onclick = async () => {
   dlg.showModal();
 };
 $$('nav [data-view]').forEach((b) => (b.onclick = () => show(b.dataset.view)));
+$('.brand').onclick = (e) => { e.preventDefault(); show('home'); };
 
 // Phones: list rows are cards; tapping anywhere on a row opens it (its Edit / Open button).
 const PHONE = window.matchMedia('(max-width: 700px)');

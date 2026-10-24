@@ -3,17 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Farm Records</title>
+  <title>Three Point Farms</title>
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <meta name="theme-color" content="#1f4d2b">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@600;700&display=swap">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-  <link rel="stylesheet" href="styles.css?v=202610231618">
+  <link rel="stylesheet" href="styles.css?v=202610232243">
 </head>
 <body>
   <div id="login" class="login" hidden>
     <form id="login-form" class="card form">
-      <h1>Farm Records</h1>
+      <img class="login-logo" src="assets/logo.png" alt="Three Point Farms">
+      <p class="login-sub">Farm records</p>
       <p id="config-warning" class="warning" hidden>
         The app isn't connected yet. Open <code>config.js</code> and paste in your Supabase URL and key.
       </p>
@@ -25,7 +29,10 @@
 
   <div id="app" hidden>
     <header class="topbar">
-      <h1>Farm Records</h1>
+      <a class="brand" href="#" data-home aria-label="Three Point Farms — home">
+        <img src="assets/mark.png" alt="">
+        <span class="brand-text"><b>Three Point</b><small>Farms</small></span>
+      </a>
       <nav>
         <button data-view="home">Home</button>
         <button data-view="order">Water order</button>
@@ -48,6 +55,6 @@
   <div id="toast" role="status" aria-live="polite"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-  <script type="module" src="app.js?v=202610231618"></script>
+  <script type="module" src="app.js?v=202610232243"></script>
 </body>
 </html>

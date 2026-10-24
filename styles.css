@@ -1,24 +1,25 @@
 [hidden] { display: none !important; }
 
-/* Light blue theme */
+/* Three Point Farms theme: field green, deer brown, warm paper */
 :root {
   color-scheme: light;
-  --bg: #f3f7fc;
+  --bg: #f5f4ef;
   --surface: #ffffff;
-  --text: #1a2b3d;
-  --muted: #627389;
-  --border: #dde6f1;
-  --accent: #2563a8;
-  --accent-hover: #1d4f88;
+  --text: #1d2a21;
+  --muted: #69706a;
+  --border: #e2e0d7;
+  --accent: #1f4d2b;
+  --accent-hover: #163a20;
   --accent-text: #ffffff;
-  --accent-soft: #e7f0fb;
-  --accent-tint: #f5f9ff;
-  --green: #1f7a4d;   --green-soft: #e3f4ea;
-  --amber: #9a6200;   --amber-soft: #fdf1d8;
-  --gray-soft: #eef2f6;
-  --danger: #c0392b;
+  --accent-soft: #e5eee5;
+  --accent-tint: #f3f6f1;
+  --brown: #7a5a3c;  --brown-soft: #f3ece3;
+  --green: #2f7a3d;   --green-soft: #e3f0e3;
+  --amber: #9a6200;   --amber-soft: #fbf0d9;
+  --gray-soft: #efeee8;
+  --danger: #b4372a;
   --radius: 12px;
-  --shadow: 0 1px 2px rgb(26 43 61 / .04), 0 2px 8px rgb(26 43 61 / .05);
+  --shadow: 0 1px 2px rgb(29 42 33 / .05), 0 2px 10px rgb(29 42 33 / .05);
 }
 
 * { box-sizing: border-box; }
@@ -74,13 +75,13 @@ input:focus, select:focus, textarea:focus, button:focus-visible {
 input[type=checkbox] {
   -webkit-appearance: none; appearance: none;
   flex: none; width: 44px; height: 26px; margin: 0; padding: 0;
-  border: 0; border-radius: 999px; background: #cdd8e5;
+  border: 0; border-radius: 999px; background: #d4d2c7;
   position: relative; cursor: pointer; transition: background .2s ease;
 }
 input[type=checkbox]::after {
   content: ""; position: absolute; top: 3px; left: 3px;
   width: 20px; height: 20px; border-radius: 50%; background: #fff;
-  box-shadow: 0 1px 3px rgb(26 43 61 / .25); transition: transform .2s ease;
+  box-shadow: 0 1px 3px rgb(29 42 33 / .25); transition: transform .2s ease;
 }
 input[type=checkbox]:checked { background: var(--accent); }
 input[type=checkbox]:checked::after { transform: translateX(18px); }
@@ -187,11 +188,11 @@ main { padding: 20px 16px 40px; max-width: 1180px; margin: 0 auto; }
 
 dialog {
   border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--surface); color: var(--text); box-shadow: 0 10px 40px rgb(26 43 61 / .18);
+  background: var(--surface); color: var(--text); box-shadow: 0 10px 40px rgb(29 42 33 / .18);
   width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
   padding: 1.2rem;
 }
-dialog::backdrop { background: rgb(26 43 61 / .3); }
+dialog::backdrop { background: rgb(29 42 33 / .3); }
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
@@ -353,7 +354,7 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 
 /* Farm map */
 .map-wrap { display: grid; gap: 1rem; grid-template-columns: 1fr; }
-#map { height: 62vh; min-height: 380px; border-radius: var(--radius); border: 1px solid var(--border); background: #dfe7ef; }
+#map { height: 62vh; min-height: 380px; border-radius: var(--radius); border: 1px solid var(--border); background: #e4e6dc; }
 @media (min-width: 900px) {
   .map-wrap { grid-template-columns: 1fr 320px; align-items: start; }
   #map { height: calc(100vh - 170px); }
@@ -381,7 +382,7 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .map-side label.small { display: flex; flex-direction: column; gap: .25rem; color: var(--muted); margin: .4rem 0; }
 .map-handle { border-radius: 50%; background: #fff; border: 2px solid #ffd400; box-shadow: 0 1px 4px rgb(0 0 0 / .45); }
 .map-handle.center { background: #ffd400; border-color: #fff; }
-.map-handle.end { background: #2563a8; border-color: #fff; }
+.map-handle.end { background: var(--accent); border-color: #fff; }
 .map-handle.mid { background: rgb(255 255 255 / .7); border-width: 1px; }
 
 /* Plan, isolation, contracts */
@@ -704,3 +705,98 @@ html:has(dialog[open]) { overflow: hidden; }
 .checklist .note-edit { margin-left: 3.45rem; }
 dialog.stacked { z-index: 10; }
 @media (max-width: 700px) { .dialog-head { flex-direction: column; gap: .15rem; } }
+
+/* ---------- Brand & polish ---------- */
+.brand { display: flex; align-items: center; gap: .55rem; text-decoration: none; color: var(--accent); margin-right: .4rem; flex: none; }
+.brand img { width: 42px; height: 42px; object-fit: contain; }
+.brand-text { display: flex; flex-direction: column; line-height: 1; font-family: "Montserrat", "Inter", sans-serif; }
+.brand-text b { font-size: .98rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.brand-text small { display: flex; align-items: center; gap: .35rem; font-size: .6rem; font-weight: 600; letter-spacing: .42em; text-transform: uppercase; color: var(--brown); margin-top: .22rem; }
+.brand-text small::before, .brand-text small::after { content: ""; height: 1px; flex: 1; background: currentColor; opacity: .55; }
+.topbar { box-shadow: 0 1px 0 var(--border), 0 4px 14px rgb(29 42 33 / .04); border-bottom: 0; padding-top: .6rem; padding-bottom: .6rem; }
+.topbar::after { content: ""; position: absolute; left: 0; right: 0; bottom: -3px; height: 3px; background: linear-gradient(90deg, var(--accent), #3c7a43 55%, var(--brown)); opacity: .9; }
+.topbar nav button { padding: .45rem .8rem; border-radius: 8px; }
+.topbar nav button.active { background: var(--accent); color: #fff; }
+.topbar nav button.active:hover { background: var(--accent-hover); color: #fff; }
+
+/* Faint deer watermark behind everything */
+body::before {
+  content: ""; position: fixed; z-index: -1; pointer-events: none;
+  right: -60px; bottom: -40px; width: min(560px, 70vw); aspect-ratio: 1;
+  background: url("assets/mark.png") center / contain no-repeat;
+  opacity: .06; filter: grayscale(.2);
+}
+#app, #login { position: relative; }
+
+/* Login */
+.login { background: radial-gradient(1200px 600px at 50% -10%, #e9efe6, var(--bg)); }
+.login .card { max-width: 380px; padding: 1.8rem 1.8rem 1.6rem; }
+.login-logo { width: 230px; max-width: 80%; display: block; margin: 0 auto .1rem; }
+.login-sub { text-align: center; margin: 0 0 .4rem; color: var(--muted); font-size: .82rem; letter-spacing: .14em; text-transform: uppercase; }
+
+/* Headings & rhythm */
+h2 { font-family: "Montserrat", "Inter", sans-serif; font-weight: 700; letter-spacing: -.01em; color: var(--text); }
+h3 { font-weight: 650; }
+.eyebrow { color: var(--brown); letter-spacing: .04em; }
+main { padding-top: 24px; }
+.section-head { margin-bottom: 1.1rem; }
+.card { padding: 1.15rem 1.25rem; }
+.card > h3:first-child, .card > .section-head:first-child { margin-top: 0; }
+.card > :last-child { margin-bottom: 0; }
+.card p { margin: .35rem 0; }
+.form > p { margin: 0; }
+.stat-value { color: var(--accent); }
+.subtabs { gap: .35rem; padding-bottom: .1rem; }
+.subtabs button { border-radius: 999px; padding: .4rem .9rem; background: var(--surface); }
+.subtabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+th { color: var(--muted); background: transparent; }
+tbody tr:hover { background: var(--accent-tint); }
+button.primary { box-shadow: 0 1px 2px rgb(31 77 43 / .25); }
+.badge.new, .badge.up { background: var(--green-soft); color: var(--green); }
+.chip, .crop-tag { background: var(--accent-soft); color: var(--accent); }
+dialog { padding: 1.3rem 1.4rem; }
+dialog h3 { margin-bottom: .8rem; }
+.dialog-head { margin-bottom: .8rem; }
+.dialog-head h3 { margin-bottom: 0; }
+.actions { margin-top: .8rem; }
+
+/* Seasonal checklist: our own step numbers, toggle beside them, nothing overlaps */
+.checklist { list-style: none; counter-reset: step; padding-left: 0; margin: .4rem 0 .2rem; gap: .2rem; }
+.checklist > li { counter-increment: step; position: relative; padding: .55rem .4rem .55rem 2.3rem; border-radius: 10px; }
+.checklist > li + li { border-top: 1px solid var(--border); border-radius: 0; }
+.checklist > li::before {
+  content: counter(step); position: absolute; left: .2rem; top: .6rem;
+  width: 1.55rem; height: 1.55rem; border-radius: 50%; display: grid; place-items: center;
+  background: var(--gray-soft); color: var(--muted); font-size: .76rem; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.checklist > li.done::before { background: var(--green-soft); color: var(--green); content: "✓"; }
+.checklist .check input[type=checkbox] { margin-top: 0; }
+.checklist .check span { padding-top: .15rem; }
+
+@media (max-width: 700px) {
+  .brand img { width: 36px; height: 36px; }
+  .brand-text b { font-size: .88rem; }
+  main { padding-top: 16px; }
+  .card { padding: 1rem; }
+  body::before { width: 80vw; right: -20vw; bottom: -10vw; }
+  dialog { padding: 1rem 1rem 0; }
+}
+/* Small toggles (dashboard Done ticks) */
+.done-tick input[type=checkbox] { width: 34px; height: 20px; }
+.done-tick input[type=checkbox]::after { width: 14px; height: 14px; }
+.done-tick input[type=checkbox]:checked { background: var(--green); }
+.done-tick input[type=checkbox]:checked::after { transform: translateX(14px); }
+/* Inline text actions read as links without heavy underlines */
+.step-tools .link, label.link, button.link { text-decoration: none; font-weight: 600; }
+.step-tools .link:hover, label.link:hover, button.link:hover { text-decoration: underline; }
+body::before { opacity: .045; }
+@media (max-width: 640px) {
+  .topbar { gap: .5rem; }
+  .topbar > .row { gap: .1rem; }
+  .topbar > .row button { padding: .35rem .55rem; font-size: .85rem; min-height: 34px; }
+  .brand-text b { font-size: .82rem; letter-spacing: .06em; }
+  .brand-text small { font-size: .55rem; }
+}
+.filters label.check { flex-direction: row; align-items: center; gap: .55rem; flex: 1 1 100%; }
+.filters input[type=checkbox] { flex: none !important; width: 44px; height: 26px; }
+table.crud td { vertical-align: middle; }
