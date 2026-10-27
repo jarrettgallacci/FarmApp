@@ -673,7 +673,7 @@ h4.overdue { color: var(--danger); }
   table.m-cards td:nth-child(2)::before, table.m-cards td:nth-child(3)::before { content: " · "; color: var(--muted); font-weight: 400; }
   table.m-cards td:nth-child(3) { color: var(--muted); font-size: .88rem; }
   table.m-cards td:empty { display: none; }
-  table.m-cards td:nth-child(1):empty + td::before, table.m-cards td:nth-child(2):empty + td::before { content: none; }
+  table.m-cards td:nth-child(1):empty + td::before, table.m-cards td:nth-child(1):empty + td:empty + td::before { content: none; }
   table.m-cards td div { font-size: .85rem; }
   table.m-cards td[colspan] { display: block; }
   table.m-cards td[colspan]::before { content: none; }
@@ -819,3 +819,60 @@ table.crud td { vertical-align: middle; }
 .voice-links .row input { flex: 1; min-width: 0; font-size: .85rem; }
 .cal-steps-list { padding-left: 1.2rem; display: flex; flex-direction: column; gap: .3rem; }
 @media (max-width: 700px) { .dialog-head:has(.voice-btn) { flex-direction: row; align-items: center; } }
+
+/* ---------- Navigation: top tabs on desktop, bottom bar on phones ---------- */
+.nav-ico { display: none; }
+.nav-more { display: none; }
+.m-only { display: none; }
+#map { isolation: isolate; } /* keep Leaflet's layers under the top and bottom bars */
+@media (max-width: 640px) {
+  .topbar nav {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; order: 0;
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
+    overflow: visible; flex-wrap: nowrap;
+    background: var(--surface); border-top: 1px solid var(--border);
+    box-shadow: 0 -4px 14px rgb(29 42 33 / .06);
+    padding: .25rem .25rem calc(.25rem + env(safe-area-inset-bottom));
+  }
+  .topbar nav button {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .15rem;
+    min-height: 54px; padding: .3rem .1rem; border-radius: 10px;
+    font-size: .7rem; font-weight: 600; line-height: 1.1; white-space: nowrap;
+    color: var(--muted); background: transparent;
+  }
+  .topbar nav button.active, .topbar nav button.active:hover { background: var(--accent-soft); color: var(--accent); }
+  .nav-ico { display: block; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .nav-more { display: flex; }
+  .nav-more .nav-ico circle { fill: currentColor; stroke: none; }
+  /* The other tabs: hidden until More is tapped, then a list above the bar */
+  .topbar nav .nav-extra { display: none; order: -1; grid-column: 1 / -1; }
+  .topbar nav.more-open .nav-extra {
+    display: block; text-align: left; min-height: 48px; padding: .7rem 1rem;
+    font-size: 1rem; font-weight: 500; color: var(--text); border-radius: 10px;
+  }
+  .topbar nav.more-open .nav-extra.active { color: var(--accent); font-weight: 600; }
+  /* The shadow doubles as the dimmed backdrop behind the open list */
+  .topbar nav.more-open { border-radius: 16px 16px 0 0; padding-top: .5rem; box-shadow: 0 0 0 100vmax rgb(29 42 33 / .35); }
+  main, main#view { padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
+  #toast { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .topbar { flex-wrap: nowrap; padding-bottom: .6rem; }
+
+  /* Phone list cards: words instead of bare values */
+  .m-only { display: inline; }
+  .d-only { display: none; }
+  table.m-cards td.m-hide { display: none; }
+}
+
+/* Repairs list: badges stay small tags; every row lines up whether or not it has a colored edge */
+.job-list .li-name { align-items: flex-start; }
+.job-list li { border-left: 4px solid transparent; padding-left: .6rem; }
+
+/* Phone page headers: title on its own line, then back/forward on the left and actions on the right */
+@media (max-width: 640px) {
+  .section-head:has(> .row [data-season], > .row [data-shift]) > h2 { flex: 1 1 100%; }
+  .section-head:has(> .row [data-season], > .row [data-shift]) > .row { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-end; }
+  .section-head > .row > [data-season="1"], .section-head > .row > [data-shift="1"] { margin-right: auto; }
+  .section-head > .row .season { min-width: 2.8rem; }
+  .section-head:has(> .row [data-season]) > .row { gap: .3rem; }
+  .section-head:has(> .row [data-season]) > .row button { padding-left: .65rem; padding-right: .65rem; }
+}

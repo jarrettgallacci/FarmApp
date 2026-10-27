@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@600;700&display=swap">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-  <link rel="stylesheet" href="styles.css?v=202610241146">
+  <link rel="stylesheet" href="styles.css?v=202610270558">
 </head>
 <body>
   <div id="login" class="login" hidden>
@@ -38,16 +38,17 @@
         <span class="brand-text"><b>Three Point</b><small>Farms</small></span>
       </a>
       <nav>
-        <button data-view="home">Home</button>
-        <button data-view="order">Water order</button>
-        <button data-view="fields">Fields</button>
-        <button data-view="crops">Crops</button>
-        <button data-view="map">Map</button>
-        <button data-view="chem">Chemical</button>
-        <button data-view="work">Work</button>
-        <button data-view="maint">Maintenance</button>
-        <button data-view="setup">Setup</button>
-        <button data-view="tools">Tools</button>
+        <button data-view="home"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h5v-6h4v6h5V9.5"/></svg><span>Home</span></button>
+        <button data-view="order"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3s6 6.6 6 11a6 6 0 0 1-12 0c0-4.4 6-11 6-11z"/></svg><span>Water order</span></button>
+        <button data-view="fields" class="nav-extra">Fields</button>
+        <button data-view="crops" class="nav-extra">Crops</button>
+        <button data-view="map" class="nav-extra">Map</button>
+        <button data-view="chem" class="nav-extra">Chemical</button>
+        <button data-view="work"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1"/><path d="m9 13 2 2 4-4"/></svg><span>Work</span></button>
+        <button data-view="maint"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.1L3.6 17.1a1.5 1.5 0 0 0 2.1 2.1l5.7-5.7a4 4 0 0 0 5.1-5.4l-2.5 2.5-2.1-.5-.5-2.1z"/></svg><span>Maintenance</span></button>
+        <button data-view="setup" class="nav-extra">Setup</button>
+        <button data-view="tools" class="nav-extra">Tools</button>
+        <button data-more class="nav-more" aria-expanded="false"><svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg><span>More</span></button>
       </nav>
       <span class="row"><button id="account" class="ghost">Account</button>
       <button id="signout" class="ghost">Sign out</button></span>
@@ -59,6 +60,6 @@
   <div id="toast" role="status" aria-live="polite"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-  <script type="module" src="app.js?v=202610241146"></script>
+  <script type="module" src="app.js?v=202610270558"></script>
 </body>
 </html>

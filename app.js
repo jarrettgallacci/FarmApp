@@ -175,9 +175,9 @@ const CRUD = {
     tabs: [{ key: 'active', label: 'Active fields', test: (r) => r.active }, { key: 'inactive', label: 'Inactive fields', test: (r) => !r.active }],
     columns: [
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
-      { key: 'farm_unit', label: 'Farm unit', type: 'text', list: true },
+      { key: 'farm_unit', label: 'Farm unit', type: 'text', list: true, mPre: 'Unit ' },
       { key: 'block', label: 'Block', type: 'text' },
-      { key: 'acres', label: 'Acres', type: 'number', step: '0.01', list: true },
+      { key: 'acres', label: 'Acres', type: 'number', step: '0.01', list: true, mPost: ' ac' },
       { key: 'tenure', label: 'Ground', list: true, form: false, compute: tenureOf },
       { key: 'turnout_id', label: 'Turnout', type: 'select', num: true, list: true,
         options: () => refs.turnouts.map((t) => [t.turnout_id, t.name]) },
@@ -345,7 +345,7 @@ const CRUD = {
       { key: 'name', label: 'Crop', type: 'text', required: true, list: true },
       { key: 'yield_unit', label: 'Usual yield unit', type: 'select', list: true,
         options: () => [['bu', 'Bushels (bu)'], ['ton', 'Tons'], ['cwt', 'Hundredweight (cwt)'], ['lb', 'Pounds (lb)']] },
-      { key: 'multi_year', label: 'Usually a multi-year stand', type: 'checkbox', default: false, list: true },
+      { key: 'multi_year', label: 'Usually a multi-year stand', type: 'checkbox', default: false, list: true, mOn: 'Multi-year' },
       { key: 'color', label: 'Map color', type: 'color', list: true,
         fallback: (row) => (row ? PALETTE[row.crop_id % PALETTE.length] : '#2563a8') },
       { key: 'active', label: 'Active (shows in the crop list)', type: 'checkbox', default: true, list: true },
@@ -390,6 +390,20 @@ function display(c, r) {
   return v ?? '';
 }
 
+// Phone cards run the first few cells together on one line, so bare values
+// ("Yes", "40", "120") get a word there to say what they are.
+function crudCell(c, r) {
+  const v = String(display(c, r));
+  if (c.type === 'checkbox') {
+    const m = c.key === 'active' ? (r.active ? 'Active' : 'Inactive') : (r[c.key] ? c.mOn ?? c.label : '');
+    return `<td${m ? '' : ' class="m-hide"'}><span class="d-only">${esc(v)}</span>${m ? `<span class="m-only">${esc(m)}</span>` : ''}</td>`;
+  }
+  if (v === '') return '<td></td>';
+  const pre = c.mPre ? `<span class="m-only">${esc(c.mPre)}</span>` : '';
+  const post = c.mPost ? `<span class="m-only">${esc(c.mPost)}</span>` : '';
+  return `<td>${pre}${esc(v)}${post}</td>`;
+}
+
 async function renderCrud(cfg, el) {
   let req = sb.from(cfg.table).select(cfg.select ?? '*');
   for (const col of [].concat(cfg.order)) req = req.order(col, { nullsFirst: false });
@@ -424,7 +438,7 @@ async function renderCrud(cfg, el) {
     $('tbody', el).innerHTML = shown.length ? shown.map((r) => `<tr>
         ${cols.map((c) => c.type === 'color'
           ? `<td><span class="swatch" style="background:${esc(r[c.key] || c.fallback(r))}"></span></td>`
-          : `<td>${esc(display(c, r))}</td>`).join('')}
+          : crudCell(c, r)).join('')}
         <td class="nowrap"><button class="small" data-edit="${r[cfg.pk]}">Edit</button>${cfg.rowAction ? ` <button class="small primary" data-row-act="${r[cfg.pk]}">${esc(cfg.rowAction.label)}</button>` : ''}</td></tr>`).join('')
       : `<tr><td colspan="${cols.length + 1}" class="muted">${pool.length ? 'Nothing matches.' : 'Nothing here yet.'}</td></tr>`;
     const count = $('[data-count]', el);
@@ -5915,6 +5929,8 @@ async function show(view) {
   orderState.dirty = false;
   currentView = view;
   $$('nav [data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  $('nav [data-more]').classList.toggle('active', !!$(`nav .nav-extra[data-view="${view}"]`));
+  closeMoreMenu();
   const el = $('#view');
   el.innerHTML = '<p class="muted">Loading…</p>';
   try {
@@ -5998,6 +6014,20 @@ $('#account').onclick = async () => {
   dlg.showModal();
 };
 $$('nav [data-view]').forEach((b) => (b.onclick = () => show(b.dataset.view)));
+// Phone bottom bar: More opens the rest of the tabs above it
+function closeMoreMenu() {
+  $('.topbar nav').classList.remove('more-open');
+  $('nav [data-more]').setAttribute('aria-expanded', 'false');
+}
+$('nav [data-more]').onclick = () => {
+  const open = $('.topbar nav').classList.toggle('more-open');
+  $('nav [data-more]').setAttribute('aria-expanded', String(open));
+};
+// A tap outside the open list only closes it; it doesn't also press whatever is underneath
+document.addEventListener('click', (e) => {
+  if (!$('.topbar nav').classList.contains('more-open') || e.target.closest('.topbar nav')) return;
+  e.preventDefault(); e.stopPropagation(); closeMoreMenu();
+}, true);
 $('.brand').onclick = (e) => { e.preventDefault(); show('home'); };
 
 // Phones: list rows are cards; tapping anywhere on a row opens it (its Edit / Open button).
