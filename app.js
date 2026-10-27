@@ -90,7 +90,7 @@ const EQ_SUBS = {
   implement: [['Tillage', 500, 519], ['Planting', 520, 539], ['Cultivation & bedding', 540, 559], ['Harvest', 560, 579], ['Application', 580, 599]],
   irrigation: [['Pivots', 700, 739], ['Solid sets', 740, 759], ['Pump stations', 760, 779], ['Mainlines & wells', 780, 799]],
 };
-const TYPE_BAND = [[/tractor|combine|swather|windrower|sprayer/i, 100], [/pickup/i, 200], [/truck|trailer/i, 300], [/loader|forklift|scraper|blade|excavat|backhoe|skid/i, 400],
+const TYPE_BAND = [[/tractor|combine|swather|windrower|sprayer/i, 100], [/pickup/i, 200], [/truck|trailer/i, 300], [/construction|loader|forklift|scraper|blade|excavat|backhoe|skid/i, 400],
   [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow/i, 500], [/planter|drill/i, 520], [/cultivat|corrugat|dammer|toolbar|bedder|marker/i, 540],
   [/bean cutter|header|digger/i, 560], [/pivot/i, 700], [/solid ?set|handline|hand line|wheel ?line/i, 740], [/pump/i, 760], [/well|mainline/i, 780],
   [/building|shop|shed|\bbin/i, 900]];
