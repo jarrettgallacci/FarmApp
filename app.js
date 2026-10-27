@@ -90,23 +90,17 @@ const EQ_SUBS = {
   implement: [['Tillage', 500, 519], ['Planting', 520, 539], ['Cultivation & bedding', 540, 559], ['Harvest', 560, 579], ['Application', 580, 599]],
   irrigation: [['Pivots', 700, 739], ['Solid sets', 740, 759], ['Pump stations', 760, 779], ['Mainlines & wells', 780, 799]],
 };
-const TYPE_BAND = [[/tractor|combine|swather|windrower|sprayer/i, 100], [/pickup/i, 200], [/truck|trailer/i, 300], [/loader|forklift|scraper|blade|excavat|backhoe|skid/i, 400],
+const TYPE_BAND = [[/tractor|combine|swather|windrower|sprayer/i, 100], [/pickup/i, 200], [/truck|trailer/i, 300], [/construction|loader|forklift|scraper|blade|excavat|backhoe|skid/i, 400],
   [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow/i, 500], [/planter|drill/i, 520], [/cultivat|corrugat|dammer|toolbar|bedder|marker/i, 540],
   [/bean cutter|header|digger/i, 560], [/pivot/i, 700], [/solid ?set|handline|hand line|wheel ?line/i, 740], [/pump/i, 760], [/well|mainline/i, 780],
   [/building|shop|shed|\bbin/i, 900]];
-const eqNum = (e) => (/^\d{3}$/.test(String(e?.unit_no ?? '').trim()) ? Number(e.unit_no) : null);
-const eqBandStart = (e) => { const n = eqNum(e); return n != null ? n : TYPE_BAND.find(([re]) => re.test(e?.type ?? ''))?.[1] ?? 600; };
+// Category comes from the equipment type alone; unit numbers are no longer used.
+const eqBandStart = (e) => TYPE_BAND.find(([re]) => re.test(e?.type ?? ''))?.[1] ?? 600;
 const eqCat = (e) => EQ_BANDS.find(([, , b]) => Math.floor(eqBandStart(e) / 100) * 100 === b)?.[0] ?? 'other';
 const eqSub = (e) => (EQ_SUBS[eqCat(e)] ?? []).find(([, lo, hi]) => eqBandStart(e) >= lo && eqBandStart(e) <= hi)?.[0] ?? null;
 const eqFields = (e) => (e?.equipment_fields ?? []).map((x) => fieldById(x.field_id)?.name).filter(Boolean);
-const eqLabel = (e) => `${eqNum(e) != null ? `#${eqNum(e)} ` : ''}${e.name}${eqCat(e) === 'irrigation' && eqFields(e).length ? ` · field ${eqFields(e).join(', ')}` : ''}`;
-const eqSort = (a, b) => (eqNum(a) ?? 1e4) - (eqNum(b) ?? 1e4) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
-function nextFreeNumber(start) {
-  const band = Object.values(EQ_SUBS).flat().find(([, lo]) => lo === start) ?? [null, start, Math.floor(start / 100) * 100 + 99];
-  const used = new Set(refs.equipment.map(eqNum).filter((n) => n != null));
-  for (let n = band[1]; n <= band[2]; n++) if (!used.has(n)) return n;
-  return null;
-}
+const eqLabel = (e) => `${e.name}${eqCat(e) === 'irrigation' && eqFields(e).length ? ` · field ${eqFields(e).join(', ')}` : ''}`;
+const eqSort = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
 // Category first, then the equipment in it. Returns HTML; wire with wireEquipPicker.
 function equipPickerHtml(name, cur, { required = true, label = 'Equipment' } = {}) {
   const e0 = refs.equipment.find((e) => e.equipment_id === cur);
@@ -274,12 +268,11 @@ const CRUD = {
     table: 'equipment', pk: 'equipment_id', title: 'Equipment', singular: 'equipment', order: 'name',
     allowDelete: true, refreshRefs: true,
     search: true,
-    filters: [{ key: 'cat', all: 'All categories', options: () => EQ_BANDS.map(([k, l, b]) => [k, `${b}s · ${l}`]), test: (r, v) => eqCat(r) === v },
+    filters: [{ key: 'cat', all: 'All categories', options: () => EQ_BANDS.map(([k, l]) => [k, l]), test: (r, v) => eqCat(r) === v },
       { key: 'work', all: 'All work', options: () => refs.workTypes.filter((w) => w.active).map((w) => [w.operation, workLabel(w.operation)]),
       test: (r, v) => (r.equipment_work_types ?? []).some((x) => x.operation === v) },
       { key: 'type', all: 'All types', options: () => typesInCategory(CRUD.equipment.state?.f?.cat).map((t) => [t, t]), test: (r, v) => (r.type ?? '').toLowerCase() === v.toLowerCase() }],
     columns: [
-      { key: 'num_list', label: 'No.', list: true, form: false, compute: (r) => (eqNum(r) != null ? `#${eqNum(r)}` : '') },
       { key: 'name', label: 'Name', type: 'text', required: true, list: true },
       { key: 'type', label: 'Type', listLabel: 'Type', type: 'select', list: true, required: true, options: () => equipTypeOptions() },
       { key: 'fields_list', label: 'Fields', list: true, form: false, compute: (r) => eqFields(r).join(', ') },
@@ -287,7 +280,6 @@ const CRUD = {
       { key: 'model', label: 'Model', type: 'text', list: true },
       { key: 'model_year', label: 'Model year', listLabel: 'Year', type: 'number', step: '1', list: true },
       { key: 'serial_no', label: 'Serial number / PIN', listLabel: 'Serial / PIN', type: 'text', list: true },
-      { key: 'unit_no', label: 'Equipment # (100s tractors & self-propelled, 200s pickups, 300s trucks & trailers, 400s construction, 500s implements, 600s other, 700s irrigation, 900s buildings)', listLabel: 'No.', type: 'text' },
       { key: 'engine_serial', label: 'Engine serial', type: 'text' },
       { key: 'towers', label: 'Number of towers', listLabel: 'Towers', type: 'number', step: '1' },
       { key: 'corner_arm', label: 'Has a corner machine', type: 'checkbox' },
@@ -310,7 +302,7 @@ const CRUD = {
     ],
     tabs: [{ key: 'active', label: 'Active', test: (r) => r.active }, { key: 'inactive', label: 'Sold / inactive', test: (r) => !r.active }],
     select: '*, equipment_photos(count), equipment_work_types(operation), equipment_fields(field_id)',
-    sorts: [['number', 'Equipment #', eqSort], ['name', 'Name', (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true })],
+    sorts: [['name', 'Name', eqSort],
       ['type', 'Type', (a, b) => String(a.type ?? '').localeCompare(String(b.type ?? ''))],
       ['checked', 'Not checked first', (a, b) => String(a.verified_on ?? '').localeCompare(String(b.verified_on ?? ''))]],
     reopenAfterCreate: 'Saved. You can add photos now.',
@@ -326,7 +318,7 @@ const CRUD = {
         else if (st.f.type) { st.f.type = ''; typeSel.value = ''; typeSel.dispatchEvent(new Event('change')); }
       });
     },
-    afterRender: (form, row) => { narrowTypeChoices(form, row); equipmentNumberHint(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row).then(() => syncType()); equipmentService(form, row); equipmentPhotos(form, row); const syncType = typeOnlyFields(form, row); },
+    afterRender: (form, row) => { narrowTypeChoices(form, row); equipmentWorkTags(form, row); equipmentFieldLinks(form, row).then(() => syncType()); equipmentService(form, row); equipmentPhotos(form, row); const syncType = typeOnlyFields(form, row); },
   },
   worktypes: {
     table: 'operation_types', pk: 'operation', title: 'Work types', singular: 'work type', order: ['sort_order', 'operation'],
@@ -2749,7 +2741,6 @@ function parseSpeech(raw) {
   // Equipment: unit number first ("#717", "unit 717"), then full names, then a distinctive first word ("ripper", "disk").
   const eqs = refs.equipment.filter((e) => e.active);
   const found = [];
-  for (const e of eqs) if (eqNum(e) != null && new RegExp(`#${eqNum(e)}(?=\\s)`).test(t)) { found.push(e); t = t.replace(`#${eqNum(e)}`, ' '); }
   for (const e of [...eqs].sort((a, b) => String(b.name).length - String(a.name).length)) {
     if (found.includes(e)) continue;
     const names = [e.name, e.model, e.make && e.model ? `${e.make} ${e.model}` : null].filter(Boolean);
@@ -3927,7 +3918,7 @@ function typesInCategory(cat) {
   const inUse = new Set(refs.equipment.filter((e) => !cat || eqCat(e) === cat).map((e) => (e.type ?? '').trim().toLowerCase()));
   return all.filter((t) => !cat || eqCat({ type: t }) === cat || inUse.has(t.toLowerCase()));
 }
-// Equipment types for the dropdown, in number-band order; any other type already in use is kept.
+// Equipment types for the dropdown, in category order; any other type already in use is kept.
 const EQ_TYPES = ['Tractor', 'Combine', 'Swather / windrower', 'Sprayer', 'Pickup', 'Truck', 'Trailer', 'Loader', 'Forklift', 'Scraper', 'Blade',
   'Disk', 'Disk ripper', 'Ripper', 'Plough', 'Rototiller', 'Packer', 'Skewtreader', 'Shredder', 'Planter', 'Drill',
   'Cultivator', 'Corrugator', 'Dammer-diker', 'Toolbar', 'Bean cutter', 'Other', 'Pivot', 'Solid set', 'Handline', 'Pump', 'Mainline', 'Well', 'Building'];
@@ -3973,22 +3964,6 @@ function typeOnlyFields(form, row) {
   typeIn?.addEventListener('input', sync); typeIn?.addEventListener('change', sync);
   sync();
   return sync;
-}
-// Suggest the next free number for the type typed in.
-function equipmentNumberHint(form, row) {
-  const inp = form.elements.unit_no, typeIn = form.elements.type;
-  if (!inp) return;
-  const hint = document.createElement('p'); hint.className = 'muted small form-hint';
-  inp.closest('label').after(hint);
-  const draw = () => {
-    if (eqNum(row) != null && String(inp.value).trim() === String(row.unit_no).trim()) { hint.textContent = ''; return; }
-    const start = TYPE_BAND.find(([re]) => re.test(typeIn?.value ?? ''))?.[1] ?? 600;
-    const n = nextFreeNumber(start);
-    const sub = Object.values(EQ_SUBS).flat().find(([, lo]) => lo === start)?.[0] ?? EQ_BANDS.find(([, , b]) => b === Math.floor(start / 100) * 100)?.[1];
-    hint.innerHTML = n ? `Next free ${esc(sub)} number: <button type="button" class="link">${n}</button>` : `The ${esc(sub)} range is full.`;
-    $('button', hint)?.addEventListener('click', () => { inp.value = n; draw(); });
-  };
-  typeIn?.addEventListener('input', draw); typeIn?.addEventListener('change', draw); inp.addEventListener('input', draw); draw();
 }
 
 // Fields a pivot / pump / well serves.
@@ -4474,7 +4449,7 @@ async function myOperator() {
 // Seasonal tasks are labelled by field; the machine is the small print.
 const sysKind = (e) => SYS_TYPES.find(([k]) => k === sysType(e))?.[1]?.replace(/s$/, '') ?? e?.type ?? '';
 const taskTitle = (e) => (e ? (eqFields(e).length ? eqFields(e).join(', ') : e.name) : '?');
-const taskSub = (e) => (e ? [sysKind(e), eqNum(e) != null ? `#${eqNum(e)}` : '', e.towers ? `${e.towers} towers${e.corner_arm ? ' + corner' : ''}` : '', eqFields(e).length && !eqFields(e).every((f) => e.name.includes(f)) ? e.name : ''].filter(Boolean).join(' · ') : '');
+const taskSub = (e) => (e ? [sysKind(e), e.towers ? `${e.towers} towers${e.corner_arm ? ' + corner' : ''}` : '', eqFields(e).length && !eqFields(e).every((f) => e.name.includes(f)) ? e.name : ''].filter(Boolean).join(' · ') : '');
 const fieldRank = (e) => { const fs = (e?.equipment_fields ?? []).map((x) => fieldsInOrder().findIndex((f) => f.field_id === x.field_id)).filter((i) => i >= 0); return fs.length ? Math.min(...fs) : 1e6; };
 const taskSort = (a, b) => fieldRank(a) - fieldRank(b) || (SYS_TYPES.findIndex(([k]) => k === sysType(a)) - SYS_TYPES.findIndex(([k]) => k === sysType(b))) || eqSort(a, b);
 // Which pump station covers a pivot / solid set (shares a field with it), and what a station covers.
@@ -4710,8 +4685,8 @@ function addCovered(station, onDone) {
       if (mode === 'new') {
         const name = el.name.value.trim();
         if (!name) return toast('Enter a name', true);
-        const kind = el.kind.value, band = kind === 'Pivot' ? 700 : 740;
-        const [ne] = await q(sb.from('equipment').insert({ name, type: kind, unit_no: String(nextFreeNumber(band) ?? ''), active: true }).select('equipment_id'));
+        const kind = el.kind.value;
+        const [ne] = await q(sb.from('equipment').insert({ name, type: kind, active: true }).select('equipment_id'));
         if (fids.length) await q(sb.from('equipment_fields').insert(fids.map((f) => ({ equipment_id: ne.equipment_id, field_id: f }))));
         else toast('This pump station has no fields, so link both to a field under Setup → Equipment', true);
       } else {
@@ -4730,7 +4705,7 @@ function addCovered(station, onDone) {
 
 // Add a pump station / pivot / solid set that isn't in the app yet, straight into a round.
 function newSystem(run, onDone) {
-  const kinds = [['Pump', 'Pump station', 760], ['Pivot', 'Pivot', 700], ['Solid set', 'Solid set', 740], ['Mainline', 'Mainline or well', 780]];
+  const kinds = [['Pump', 'Pump station'], ['Pivot', 'Pivot'], ['Solid set', 'Solid set'], ['Mainline', 'Mainline or well']];
   const dlg = $('#dialog');
   dlg.classList.add('wide');
   dlg.innerHTML = `<form class="form">
@@ -4746,7 +4721,7 @@ function newSystem(run, onDone) {
     e.preventDefault();
     const kind = kinds.find(([k]) => k === form.elements.kind.value);
     try {
-      const [eq] = await q(sb.from('equipment').insert({ name: form.elements.name.value.trim(), type: kind[0], unit_no: String(nextFreeNumber(kind[2]) ?? ''), active: true }).select('equipment_id'));
+      const [eq] = await q(sb.from('equipment').insert({ name: form.elements.name.value.trim(), type: kind[0], active: true }).select('equipment_id'));
       const fids = $$('.chips input:checked', dlg).map((c) => Number(c.value));
       if (fids.length) await q(sb.from('equipment_fields').insert(fids.map((f) => ({ equipment_id: eq.equipment_id, field_id: f }))));
       await q(sb.from('procedure_tasks').insert({ run_id: run.run_id, equipment_id: eq.equipment_id }));
@@ -5132,7 +5107,7 @@ function openQrLabels(rows) {
       const labels = [];
       for (const id of ids) {
         const eq = refs.equipment.find((x) => x.equipment_id === id);
-        labels.push(`<div class="lab"><div class="qr">${await qrSvg(equipLink(id))}</div><div class="num">${eqNum(eq) != null ? '#' + eqNum(eq) : ''}</div><div class="nm">${esc(eq.name)}</div></div>`);
+        labels.push(`<div class="lab"><div class="qr">${await qrSvg(equipLink(id))}</div><div class="nm">${esc(eq.name)}</div></div>`);
       }
       w.document.open();
       w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Equipment QR labels</title><style>
@@ -5140,8 +5115,7 @@ function openQrLabels(rows) {
         .grid { display: flex; flex-wrap: wrap; gap: .15in; }
         .lab { width: ${size}in; border: 1px dashed #bbb; padding: .08in; text-align: center; break-inside: avoid; }
         .qr svg { width: 100%; height: auto; display: block; }
-        .num { font-weight: 700; font-size: ${Math.max(10, size * 9)}pt; margin-top: .03in; }
-        .nm { font-size: ${Math.max(7, size * 4.5)}pt; line-height: 1.15; }
+        .nm { font-weight: 700; font-size: ${Math.max(8, size * 6)}pt; line-height: 1.15; margin-top: .03in; }
         @media print { .lab { border-color: #ddd; } .tip { display: none; } }
       </style></head><body><p class="tip" style="font-size:12px;color:#666">Print at 100% (no "fit to page"). Cut on the dashed lines.</p>
       <div class="grid">${labels.join('')}</div><script>setTimeout(() => print(), 400)<\/script></body></html>`);
@@ -5212,7 +5186,7 @@ async function openEquipCard(id) {
   const reopen = () => openEquipCard(id);
   const engine = ENGINE_RE.test(eq.type ?? '');
   dlg.innerHTML = `<div class="form eq-card">
-    <div class="dialog-head"><h3>${esc(eqNum(eq) != null ? `#${eqNum(eq)} ` : '')}${esc(eq.name)}</h3>
+    <div class="dialog-head"><h3>${esc(eq.name)}</h3>
       <p class="muted small">${esc([eq.type, eq.make, eq.model, eq.model_year, eq.towers ? `${eq.towers} towers${eq.corner_arm ? ' + corner' : ''}` : '', eqFields(eq).length ? 'field ' + eqFields(eq).join(', ') : ''].filter(Boolean).join(' · '))}</p></div>
     <div class="eq-actions">
       <button type="button" class="primary" data-act="problem">Report a problem</button>
