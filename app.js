@@ -1135,6 +1135,7 @@ async function renderHome(el) {
           <p class="muted small">${esc(fmtDay(tomorrow))} · due to the ditch riders around 2:30 PM today</p>
           <div class="actions"><button class="primary" data-act="tomorrow">Open tomorrow's order</button></div>
         </section>
+        <section class="card" id="dash-seasonal" hidden></section>
         <section class="card"><h3>Work schedule</h3><div id="dash-sched"><p class="muted small">Loading…</p></div></section>
       </div>
     </div>`;
@@ -1142,6 +1143,7 @@ async function renderHome(el) {
   $$('[data-act=tomorrow]', el).forEach((b) => (b.onclick = () => { orderState.date = tomorrow; show('order'); }));
   $('[data-act=start-season]', el)?.addEventListener('click', () => startIrrigationSeason(() => renderHome(el)));
   drawSchedule($('#dash-sched', el), () => renderHome(el));
+  drawSeasonalDash($('#dash-seasonal', el), () => renderHome(el));
   $('[data-act=scan]', el).onclick = () => openScanner();
   $$('[data-wdone]', el).forEach((c) => (c.onchange = async () => {
     const fid = Number(c.dataset.wdone);
@@ -1183,6 +1185,44 @@ async function drawSchedule(box, reload) {
     cev.chemical_event_products.sort((a, x) => a.position - x.position);
     openChemForm({ event: cev }, reload);
   }));
+}
+
+// ---- Dashboard: open seasonal-task rounds, with the systems still to do (in progress first).
+const DASH_TASKS = 6;   // systems listed per round before the rest fold under "Show all"
+async function drawSeasonalDash(box, reload) {
+  if (!box) return;
+  const yr = new Date().getFullYear();
+  const [procRes, runRes] = await Promise.all([
+    sb.from('procedures').select('*, procedure_steps(*)'),
+    sb.from('procedure_runs').select('*, procedure_tasks(*, procedure_checks(*))').gte('season', yr - 1).lte('season', yr + 1).order('started_on'),
+  ]);
+  if (procRes.error || runRes.error) return;
+  const open = (runRes.data ?? []).filter((r) => r.procedure_tasks.some((t) => t.status !== 'done'));
+  if (!open.length) { box.hidden = true; return; }
+  const skips = await loadSkips();
+  const procOf = (id) => procRes.data.find((p) => p.procedure_id === id);
+  const eqOf = (id) => refs.equipment.find((e) => e.equipment_id === id);
+  const opName = (id) => refs.operators.find((o) => o.operator_id === id)?.name;
+  const rank = { in_progress: 0, todo: 1 };
+  const row = (t, p) => { const e = eqOf(t.equipment_id), pr = taskProgress(t, p, skips);
+    return `<li><span class="li-name"><b>${esc(taskTitle(e))}</b> ${taskBadge(t)}<span class="muted small">${esc([sysKind(e), `${pr.done}/${pr.n} steps`, opName(t.assigned_to)].filter(Boolean).join(' · '))}</span></span>
+      <span class="li-value"><button class="small" data-dtask="${t.task_id}" data-proc="${p?.procedure_id}">Open</button></span></li>`; };
+  box.innerHTML = `<h3>Seasonal tasks</h3>${open.map((r) => {
+    const p = procOf(r.procedure_id), n = r.procedure_tasks.length;
+    const left = r.procedure_tasks.filter((t) => t.status !== 'done')
+      .sort((a, b) => rank[a.status] - rank[b.status] || taskSort(eqOf(a.equipment_id) ?? {}, eqOf(b.equipment_id) ?? {}));
+    const nProg = left.filter((t) => t.status === 'in_progress').length;
+    const shown = left.length > DASH_TASKS ? left.slice(0, DASH_TASKS - 1) : left, rest = left.slice(shown.length);
+    return `<div class="group dash-round">
+      <h4>${esc(p?.name ?? 'Procedure')}${r.due_on ? ` <span class="muted small${r.due_on < localDate() ? ' overdue' : ''}">due ${esc(fmtDay(r.due_on))}</span>` : ''}</h4>
+      <span class="progress"><span style="width:${n ? ((n - left.length) / n) * 100 : 0}%"></span></span>
+      <p class="small"><b>${left.length} of ${n} left</b>${nProg ? ` <span class="muted">· ${nProg} in progress</span>` : ''} <button class="link small" data-dround="${r.run_id}">View round</button></p>
+      <ul class="list">${shown.map((t) => row(t, p)).join('')}</ul>
+      ${rest.length ? `<details class="done-list"><summary>Show ${rest.length} more</summary><ul class="list">${rest.map((t) => row(t, p)).join('')}</ul></details>` : ''}
+    </div>`; }).join('')}`;
+  box.hidden = false;
+  $$('[data-dtask]', box).forEach((b) => (b.onclick = () => openTask(Number(b.dataset.dtask), procOf(Number(b.dataset.proc)), reload)));
+  $$('[data-dround]', box).forEach((b) => (b.onclick = () => openRound(open.find((r) => r.run_id === Number(b.dataset.dround)))));
 }
 
 // ---- 4-day forecast for the farm (Open-Meteo: free, no key). Cached 30 min per browser.
@@ -4440,7 +4480,7 @@ const TASK_STATUS = { todo: 'Not started', in_progress: 'In progress', done: 'Do
 const procScopeTest = (scope) => (e) => scope === 'all' ? true : scope === 'irrigation' ? ['pumps', 'pivots', 'solid_sets'].includes(sysType(e)) : sysType(e) === scope;
 // Step groups a procedure shows: one per system type it covers, plus "every system".
 const scopeTypes = (scope) => (scope === 'irrigation' ? ['pumps', 'pivots', 'solid_sets'] : scope === 'all' ? [] : [scope]);
-const seasonalState = { season: new Date().getFullYear(), run: null, mine: false };
+const seasonalState = { season: new Date().getFullYear(), run: null, mine: false, hideDone: (() => { try { return !!localStorage.getItem('seasonal-hide-done'); } catch { return false; } })() };
 let myEmail = null;
 async function myOperator() {
   if (myEmail == null) myEmail = ((await sb.auth.getUser()).data?.user?.email ?? '').toLowerCase();
@@ -4487,6 +4527,21 @@ const stepsFor = (steps, eqId) => {
     .sort((a, b) => a.position - b.position || (a.equipment_id == null ? -1 : 1) || a.step_id - b.step_id);
 };
 
+// Steps marked "Not on this system" don't count toward a checklist's progress.
+const loadSkips = async () => new Set(((await sb.from('procedure_step_notes').select('step_id, equipment_id').eq('skip', true)).data ?? []).map((x) => `${x.step_id}:${x.equipment_id}`));
+function taskProgress(t, p, skips) {
+  const eq = refs.equipment.find((e) => e.equipment_id === t.equipment_id);
+  const live = eq ? checklistFor(p, eq).items.filter((it) => !skips.has(`${it.step.step_id}:${it.noteEq}`)) : [];
+  const done = new Set((t.procedure_checks ?? []).map((c) => `${c.step_id}:${c.sub_id ?? 0}`));
+  return { done: live.filter((it) => done.has(it.key)).length, n: live.length };
+}
+const taskBadge = (t) => `<span class="badge ${t.status === 'done' ? 'new' : t.status === 'in_progress' ? 'down' : 'off'}">${TASK_STATUS[t.status]}</span>`;
+// Open a round's page under Maintenance → Seasonal tasks (from the dashboard).
+function openRound(run) {
+  seasonalState.season = run.season; seasonalState.run = run.run_id; maintState.view = 'tasks';
+  show('maint');
+}
+
 async function renderSeasonal(el) {
   const s = seasonalState;
   await loadRefs();
@@ -4498,18 +4553,13 @@ async function renderSeasonal(el) {
   const procs = procRes.data, runs = runRes.data ?? [];
   const me = await myOperator();
   const procOf = (id) => procs.find((p) => p.procedure_id === id);
-  const skips = new Set(((await sb.from('procedure_step_notes').select('step_id, equipment_id').eq('skip', true)).data ?? []).map((x) => `${x.step_id}:${x.equipment_id}`));
-  const progress = (t, p) => {
-    const eq = refs.equipment.find((e) => e.equipment_id === t.equipment_id);
-    const live = eq ? checklistFor(p, eq).items.filter((it) => !skips.has(`${it.step.step_id}:${it.noteEq}`)) : [];
-    const done = new Set((t.procedure_checks ?? []).map((c) => `${c.step_id}:${c.sub_id ?? 0}`));
-    return { done: live.filter((it) => done.has(it.key)).length, n: live.length };
-  };
+  const skips = await loadSkips();
+  const progress = (t, p) => taskProgress(t, p, skips);
   const run = s.run ? runs.find((r) => r.run_id === s.run) : null;
   const reload = () => renderSeasonal(el);
   if (run) {
     const p = procOf(run.procedure_id);
-    const tasks = [...run.procedure_tasks].filter((t) => !s.mine || (me && t.assigned_to === me.operator_id))
+    const tasks = [...run.procedure_tasks].filter((t) => (!s.mine || (me && t.assigned_to === me.operator_id)) && !(s.hideDone && t.status === 'done'))
       .sort((a, b) => taskSort(refs.equipment.find((e) => e.equipment_id === a.equipment_id) ?? {}, refs.equipment.find((e) => e.equipment_id === b.equipment_id) ?? {}));
     const nDone = run.procedure_tasks.filter((t) => t.status === 'done').length;
     el.innerHTML = `${maintTabs()}
@@ -4520,18 +4570,21 @@ async function renderSeasonal(el) {
         const dups = run.procedure_tasks.filter((x) => st.some((p) => coveredBy(p).some((c) => c.equipment_id === x.equipment_id)));
         return dups.length ? `<div class="notice"><b>${dups.length} pivot/solid set checklist(s) are duplicates</b> of sections on a pump station's checklist. <button class="small primary" data-act="merge">Merge them</button></div>` : ''; })()}
       <div class="progress"><span style="width:${run.procedure_tasks.length ? (nDone / run.procedure_tasks.length) * 100 : 0}%"></span></div>
-      <div class="filters"><label class="check"><input type="checkbox" data-mine ${s.mine ? 'checked' : ''} ${me ? '' : 'disabled'}> Only my tasks${me ? '' : ' <span class="muted small">(set your sign-in email under Setup → Operators)</span>'}</label></div>
+      <div class="filters"><label class="check"><input type="checkbox" data-mine ${s.mine ? 'checked' : ''} ${me ? '' : 'disabled'}> Only my tasks${me ? '' : ' <span class="muted small">(set your sign-in email under Setup → Operators)</span>'}</label>
+        <label class="check"><input type="checkbox" data-hide-done ${s.hideDone ? 'checked' : ''}> Hide completed${s.hideDone && nDone ? ` <span class="muted small">(${nDone} hidden)</span>` : ''}</label></div>
       <div class="card table-wrap"><table class="m-cards run-table"><thead><tr><th>Field</th><th>Assigned</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
       ${tasks.map((t) => { const e = refs.equipment.find((x) => x.equipment_id === t.equipment_id); const pr = progress(t, p); return `<tr>
         <td><b>${esc(taskTitle(e))}</b><div class="muted small">${esc(taskSub(e))}</div></td>
         <td><select data-assign="${t.task_id}"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === t.assigned_to).map((o) => `<option value="${o.operator_id}" ${o.operator_id === t.assigned_to ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></td>
-        <td>${pr.done}/${pr.n}</td><td><span class="badge ${t.status === 'done' ? 'new' : t.status === 'in_progress' ? 'down' : 'off'}">${TASK_STATUS[t.status]}</span>${t.completed_on ? ` <span class="muted small">${fmtDateY(t.completed_on)}</span>` : ''}</td>
+        <td>${pr.done}/${pr.n}</td><td>${taskBadge(t)}${t.completed_on ? ` <span class="muted small">${fmtDateY(t.completed_on)}</span>` : ''}</td>
         <td class="r"><button class="small" data-task="${t.task_id}">Open</button></td></tr>`; }).join('')}
       </tbody></table></div>
+      ${!tasks.length && run.procedure_tasks.length ? `<p class="muted">${s.hideDone ? 'Everything showing is done. Untick <b>Hide completed</b> to see it.' : 'Nothing assigned to you in this round.'}</p>` : ''}
       <div class="actions"><span class="spacer"></span><button class="danger small" data-act="del-run">Delete this round</button></div>`;
     wireMaintTabs(el);
     $('[data-act=back]', el).onclick = () => { s.run = null; reload(); };
     $('[data-mine]', el).onchange = (e) => { s.mine = e.target.checked; reload(); };
+    $('[data-hide-done]', el).onchange = (e) => { s.hideDone = e.target.checked; try { localStorage.setItem('seasonal-hide-done', s.hideDone ? '1' : ''); } catch { /* ignore */ } reload(); };
     $$('[data-assign]', el).forEach((sel) => (sel.onchange = async () => {
       try { await q(sb.from('procedure_tasks').update({ assigned_to: sel.value ? Number(sel.value) : null }).eq('task_id', Number(sel.dataset.assign))); toast('Assigned'); } catch { /* shown */ }
     }));

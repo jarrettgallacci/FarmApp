@@ -636,6 +636,9 @@ label.btn { display: flex; align-items: center; justify-content: center; border:
 .hours-row { align-items: flex-end; flex-wrap: wrap; margin-bottom: .6rem; }
 .hours-row label { display: flex; flex-direction: column; gap: .2rem; }
 h4.overdue { color: var(--danger); }
+.dash-round .overdue { color: var(--danger); }
+.dash-round + .dash-round { margin-top: 1rem; }
+.dash-round .progress { margin-top: 0; }
 .work-form .seg { margin-bottom: .3rem; }
 .custom-box { display: flex; flex-direction: column; gap: .5rem; border: 1px dashed var(--border); border-radius: var(--radius); padding: .6rem .7rem; }
 .gps-row { flex-wrap: wrap; }
