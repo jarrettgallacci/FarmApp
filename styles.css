@@ -10,6 +10,7 @@
   --border: #e2e0d7;
   --accent: #1f4d2b;
   --accent-hover: #163a20;
+  --accent-deep: #163a20;   /* sidebar */
   --accent-text: #ffffff;
   --accent-soft: #e5eee5;
   --accent-tint: #f3f6f1;
@@ -878,4 +879,45 @@ table.crud td { vertical-align: middle; }
   .section-head > .row .season { min-width: 2.8rem; }
   .section-head:has(> .row [data-season]) > .row { gap: .3rem; }
   .section-head:has(> .row [data-season]) > .row button { padding-left: .65rem; padding-right: .65rem; }
+}
+
+/* ---------- Desktop and tablet: tabs in a left sidebar (same layout as the GSP order tracker) ---------- */
+@media (min-width: 641px) {
+  #app:not([hidden]) { display: flex; align-items: flex-start; min-height: 100vh; }
+  #app > main { flex: 1; min-width: 0; }
+  .topbar {
+    position: sticky; top: 0; z-index: 5; flex: none;
+    width: 228px; height: 100vh; overflow-y: auto;
+    flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0;
+    padding: 0; background: var(--accent-deep); color: #fff;
+    border: 0; box-shadow: none;
+  }
+  .topbar::after { display: none; }
+  .brand { margin: 0; padding: 1.2rem 1.1rem 1.1rem; gap: .65rem; color: #fff; }
+  .brand img { width: 46px; height: 46px; padding: 4px; border-radius: 50%; background: #f5f4ef; box-sizing: border-box; }
+  .brand-text b { color: #fff; }
+  .brand-text small { color: #cdb89c; }
+  .topbar nav { flex: 1; flex-direction: column; flex-wrap: nowrap; gap: 0; padding: .4rem 0; }
+  .topbar nav button {
+    width: 100%; text-align: left; border: 0; border-left: 4px solid transparent; border-radius: 0;
+    padding: .62rem 1.1rem .62rem calc(1.1rem - 4px); min-height: 0;
+    color: rgb(255 255 255 / .78); background: transparent;
+    font-size: .8rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  }
+  .topbar nav button:hover { color: #fff; background: rgb(255 255 255 / .08); }
+  .topbar nav button.active, .topbar nav button.active:hover { color: #fff; background: rgb(255 255 255 / .12); border-left-color: #cdb89c; }
+  /* Setup and Tools sit apart from the day-to-day tabs */
+  .topbar nav [data-view="setup"] { margin-top: auto; border-top: 1px solid rgb(255 255 255 / .1); }
+  .topbar > .row {
+    flex-direction: column; align-items: flex-start; gap: .1rem;
+    padding: .8rem 1.1rem 1rem; border-top: 1px solid rgb(255 255 255 / .1);
+  }
+  .topbar > .row button {
+    border: 0; background: transparent; padding: .2rem 0; min-height: 0;
+    color: rgb(255 255 255 / .78); font-size: .75rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+  }
+  .topbar > .row button:hover { color: #fff; background: transparent; }
+  #map { height: calc(100vh - 110px); }
+  main, main#view { padding: 24px 32px 40px; }
+  body::before { left: calc(50% + 114px); } /* center the watermark on the content, not the whole window */
 }
