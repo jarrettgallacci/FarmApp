@@ -6089,3 +6089,27 @@ sb.auth.onAuthStateChange((_event, session) => {
     showLogin();
   }
 });
+
+// Phones (the home-screen app especially) can keep showing an old version for an hour or more
+// after a deploy. When the app opens or comes back to the front, ask the server which version
+// is current and reload onto it, but never while something is being typed or edited.
+const myVersion = new URL(import.meta.url).searchParams.get('v');
+let lastVersionCheck = 0;
+async function checkForUpdate() {
+  if (!myVersion || !navigator.onLine || Date.now() - lastVersionCheck < 5 * 60 * 1000) return;
+  lastVersionCheck = Date.now();
+  try {
+    const html = await (await fetch(`index.html?check=${Date.now()}`, { cache: 'no-store' })).text();
+    const live = html.match(/app\.js\?v=(\d+)/)?.[1];
+    if (!live || live === myVersion) return;
+    const busy = $('dialog[open]') || mapState.ed || (currentView === 'order' && orderState.dirty);
+    let tried = null;
+    try { tried = sessionStorage.getItem('reloaded-for'); } catch { /* private mode */ }
+    if (busy || tried === live) return; // try again next time, and never loop on the same version
+    try { sessionStorage.setItem('reloaded-for', live); } catch { /* private mode */ }
+    // A new address makes the phone fetch the page fresh instead of from its cache
+    location.replace(`${location.pathname}?v=${live}${location.hash}`);
+  } catch { /* offline or blocked: keep the version we have */ }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
+checkForUpdate();
