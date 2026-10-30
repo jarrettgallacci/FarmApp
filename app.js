@@ -101,6 +101,17 @@ const eqSub = (e) => (EQ_SUBS[eqCat(e)] ?? []).find(([, lo, hi]) => eqBandStart(
 const eqFields = (e) => (e?.equipment_fields ?? []).map((x) => fieldById(x.field_id)?.name).filter(Boolean);
 const eqLabel = (e) => `${e.name}${eqCat(e) === 'irrigation' && eqFields(e).length ? ` · field ${eqFields(e).join(', ')}` : ''}`;
 const eqSort = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
+// Submit handler that ignores a second tap while the first save is still running (stops double records).
+function guardSubmit(form, fn) {
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (form.dataset.busy) return;
+    form.dataset.busy = '1';
+    const btn = $('button[type=submit]', form);
+    if (btn) btn.disabled = true;
+    try { await fn(e); } finally { delete form.dataset.busy; if (btn) btn.disabled = false; }
+  };
+}
 // Category first, then the equipment in it. Returns HTML; wire with wireEquipPicker.
 function equipPickerHtml(name, cur, { required = true, label = 'Equipment' } = {}) {
   const e0 = refs.equipment.find((e) => e.equipment_id === cur);
@@ -504,8 +515,7 @@ function openForm(cfg, row, onDone) {
     onDone();
   };
 
-  form.onsubmit = async (e) => {
-    e.preventDefault();
+  guardSubmit(form, async (e) => {
     const data = readForm(cfg, form);
     cfg.beforeSave?.(data);
     try {
@@ -519,7 +529,7 @@ function openForm(cfg, row, onDone) {
       } else await q(sb.from(cfg.table).insert(data));
       await finish('Saved');
     } catch { /* error already shown */ }
-  };
+  });
   $('[data-act=cancel]', dlg).onclick = () => dlg.close();
   const del = $('[data-act=del]', dlg);
   if (del) del.onclick = async () => {
@@ -4730,8 +4740,7 @@ function addCovered(station, onDone) {
   $$('[data-mode]', dlg2).forEach((b) => (b.onclick = () => { mode = b.dataset.mode; $$('[data-mode]', dlg2).forEach((x) => x.classList.toggle('on', x === b)); $('[data-new]', dlg2).hidden = mode !== 'new'; $('[data-existing]', dlg2).hidden = mode !== 'existing'; }));
   const close = () => { dlg2.close(); dlg2.remove(); };
   $('[data-act=cancel]', dlg2).onclick = close;
-  $('form', dlg2).onsubmit = async (e) => {
-    e.preventDefault();
+  guardSubmit($('form', dlg2), async (e) => {
     const el = e.target.elements;
     try {
       const fids = (station.equipment_fields ?? []).map((x) => x.field_id);
@@ -4752,7 +4761,7 @@ function addCovered(station, onDone) {
       await loadRefs();
       close(); toast('Added'); onDone?.();
     } catch { /* shown */ }
-  };
+  });
   dlg2.showModal();
 }
 
@@ -4770,8 +4779,7 @@ function newSystem(run, onDone) {
     <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Add</button></div></form>`;
   const form = $('form', dlg);
   $('[data-act=cancel]', dlg).onclick = () => dlg.close();
-  form.onsubmit = async (e) => {
-    e.preventDefault();
+  guardSubmit(form, async (e) => {
     const kind = kinds.find(([k]) => k === form.elements.kind.value);
     try {
       const [eq] = await q(sb.from('equipment').insert({ name: form.elements.name.value.trim(), type: kind[0], active: true }).select('equipment_id'));
@@ -4782,7 +4790,7 @@ function newSystem(run, onDone) {
       await loadRefs();
       dlg.close(); toast('System added'); onDone?.();
     } catch { /* shown */ }
-  };
+  });
   dlg.onclose = () => dlg.classList.remove('wide');
   if (!dlg.open) dlg.showModal();
 }
@@ -5126,8 +5134,8 @@ const JSQR_LIB = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
 
 async function qrSvg(text, cell = 4) {
   const qrcode = await loadScript(QR_LIB, 'qrcode');
-  const qr = qrcode(0, 'M'); qr.addData(text); qr.make();
-  return qr.createSvgTag({ cellSize: cell, margin: 2, scalable: true });
+  const qr = qrcode(0, 'Q'); qr.addData(text); qr.make();   // Q = still scans with ~25% of the label scuffed
+  return qr.createSvgTag({ cellSize: cell, margin: 4, scalable: true });
 }
 
 function openQrLabels(rows) {
