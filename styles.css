@@ -933,5 +933,6 @@ table.crud td { vertical-align: middle; }
 .filters .search { flex: 1 1 240px; margin-bottom: 0; }
 .subtabs button.active .muted { color: rgb(255 255 255 / .75); } /* tab counts stay readable on the dark pill */
 
-/* Setup and Fields lists grow with the page instead of scrolling inside their own box */
-.crud-wrap { max-height: none; overflow-y: visible; }
+/* Phones: Setup and Fields lists grow with the page instead of scrolling inside their own box.
+   Desktop keeps the box so the column header row stays pinned. */
+@media (max-width: 700px) { .crud-wrap { max-height: none; overflow-y: visible; } }
