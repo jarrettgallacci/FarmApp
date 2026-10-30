@@ -4252,7 +4252,7 @@ async function openJob(opts, onDone) {
   let j = null;
   if (opts.jobId) [j] = await q(sb.from('maint_jobs').select('*').eq('job_id', opts.jobId));
   const v = j ?? { kind: opts.kind ?? 'repair', status: opts.status ?? 'open', equipment_id: opts.equipmentId ?? null, interval_id: opts.intervalId ?? null,
-    title: opts.title ?? '', reported_on: localDate(), completed_on: opts.status === 'done' ? localDate() : null, down: false };
+    title: opts.title ?? '', description: opts.description ?? null, reported_on: localDate(), completed_on: opts.status === 'done' ? localDate() : null, down: false };
   const ivs = (await sb.from('service_intervals').select('*').eq('active', true)).data ?? [];
   // Whoever is signed in is the reporter on a new record; an existing record keeps its reporter.
   const me = await myOperator();
@@ -4315,7 +4315,8 @@ async function openJob(opts, onDone) {
   sync();
   if (j) jobPhotos($('#job-photos', dlg), j);
   else $('#job-photos', dlg).innerHTML = '<p class="muted small">Save first, then add photos of the problem or the invoice.</p>';
-  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  const leave = () => (opts.back ? opts.back() : dlg.close());
+  $('[data-act=cancel]', dlg).onclick = leave;
   form.onsubmit = async (e) => {
     e.preventDefault();
     const val = (k) => String(el[k].value).trim();
@@ -4324,7 +4325,7 @@ async function openJob(opts, onDone) {
     const row = {
       equipment_id: Number(val('equipment_id')), kind: val('kind'), interval_id: val('kind') === 'service' ? n('interval_id') : null,
       title: val('title'), description: val('description') || null, down: isDone ? false : el.down.checked, status: val('status'),
-      ...(j ? {} : { reported_by: me?.operator_id ?? null, reported_by_email: myEmail || null }), reported_on: val('reported_on') || localDate(), completed_on: isDone ? val('completed_on') || localDate() : null,
+      ...(j ? {} : { reported_by: me?.operator_id ?? null, reported_by_email: myEmail || null, ...(opts.link ?? {}) }), reported_on: val('reported_on') || localDate(), completed_on: isDone ? val('completed_on') || localDate() : null,
       done_by: isDone ? val('done_by') || null : null, hours_at: isDone ? n('hours_at') : null, cost: isDone ? n('cost') : null,
       vendor: isDone ? val('vendor') || null : null, invoice_no: isDone ? val('invoice_no') || null : null, notes: val('notes') || null,
       updated_at: new Date().toISOString(),
@@ -4346,7 +4347,7 @@ async function openJob(opts, onDone) {
         await loadRefs();
       }
       toast('Saved'); onDone?.();
-      if (!j) openJob({ jobId: id }, onDone); else dlg.close();
+      if (!j) openJob({ jobId: id, back: opts.back }, onDone); else leave();
     } catch { btn.disabled = false; }
   };
   const del = $('[data-act=del]', dlg);
@@ -4356,7 +4357,7 @@ async function openJob(opts, onDone) {
       const ph = await q(sb.from('maint_photos').select('path').eq('job_id', j.job_id));
       if (ph.length) await sb.storage.from('maintenance').remove(ph.map((p) => p.path));
       await q(sb.from('maint_jobs').delete().eq('job_id', j.job_id));
-      dlg.close(); toast('Deleted'); onDone?.();
+      leave(); toast('Deleted'); onDone?.();
     } catch { /* shown */ }
   };
   if (!j) voiceBox(dlg, (p) => {
@@ -4529,18 +4530,36 @@ function checklistFor(proc, eq) {
     if (!stationFor(eq)) secs.push({ sys: eq, type: 'pumps', label: 'Pump' });
     secs.push({ sys: eq, type: t, label: sysKind(eq) });
   } else secs.push({ sys: eq, type: t, label: '' });
-  const items = [];
+  const items = [], out = [];
   secs.forEach((sec, i) => {
     const mine = steps.filter((st) => (st.equipment_id == null && st.system_type === sec.type)
       || (st.equipment_id == null && st.system_type == null && i === 0)
       || (st.equipment_id === sec.sys.equipment_id && (st.system_type ?? sysType(sec.sys)) === sec.type)
       || (st.equipment_id === sec.sys.equipment_id && st.system_type == null && sec.type === sysType(sec.sys) && sysType(sec.sys) == null))
       .sort((a, b) => a.position - b.position || (a.equipment_id == null ? -1 : 1) || a.step_id - b.step_id);
-    sec.items = mine.map((st) => { const sub = sec.sys.equipment_id === eq.equipment_id ? 0 : sec.sys.equipment_id; return { step: st, sec, sub, noteEq: sec.sys.equipment_id, key: `${st.step_id}:${sub}` }; });
-    items.push(...sec.items);
+    const sub = sec.sys.equipment_id === eq.equipment_id ? 0 : sec.sys.equipment_id;
+    const item = (st, sc, tower = 0) => ({ step: st, sec: sc, sub, tower, noteEq: sec.sys.equipment_id, key: checkKey(st.step_id, sub, tower) });
+    // Steps marked "each tower" repeat once per tower (and the corner arm) of a pivot, in their own sections.
+    const nT = sec.type === 'pivots' ? towerCount(sec.sys) : 0;
+    const tw = nT ? mine.filter((st) => st.per_tower) : [];
+    sec.items = mine.filter((st) => !tw.includes(st)).map((st) => item(st, sec));
+    out.push(sec); items.push(...sec.items);
+    if (!tw.length) return;
+    if (!sec.label || sec.label === 'Pivot') sec.label = 'Center pivot';
+    for (let k = 1; k <= nT; k++) {
+      const ts = { sys: sec.sys, type: sec.type, tower: k, label: `${sec.label === 'Center pivot' ? '' : sec.label + ' · '}${towerName(sec.sys, k)}` };
+      ts.items = tw.map((st) => item(st, ts, k));
+      out.push(ts); items.push(...ts.items);
+    }
   });
-  return { secs, items };
+  return { secs: out, items };
 }
+// A pivot's drive units: its towers, plus the corner arm as one more.
+const towerCount = (e) => (Number(e?.towers) || 0) + (Number(e?.towers) && e?.corner_arm ? 1 : 0);
+const towerName = (e, k) => (k > (Number(e?.towers) || 0) ? 'Corner' : `Tower ${k}`);
+// A tick is per step, per pivot section (sub) and per tower (0 = not a tower step).
+const checkKey = (step, sub, tower) => (tower ? `${step}:${sub}:${tower}` : `${step}:${sub}`);
+const ckKey = (c) => checkKey(c.step_id, c.sub_id ?? 0, c.tower ?? 0);
 const stepsFor = (steps, eqId) => {
   const t = sysType(refs.equipment.find((e) => e.equipment_id === eqId));
   return steps.filter((st) => st.active && (st.equipment_id === eqId || (st.equipment_id == null && (!st.system_type || st.system_type === t))))
@@ -4552,7 +4571,7 @@ const loadSkips = async () => new Set(((await sb.from('procedure_step_notes').se
 function taskProgress(t, p, skips) {
   const eq = refs.equipment.find((e) => e.equipment_id === t.equipment_id);
   const live = eq ? checklistFor(p, eq).items.filter((it) => !skips.has(`${it.step.step_id}:${it.noteEq}`)) : [];
-  const done = new Set((t.procedure_checks ?? []).map((c) => `${c.step_id}:${c.sub_id ?? 0}`));
+  const done = new Set((t.procedure_checks ?? []).map(ckKey));
   return { done: live.filter((it) => done.has(it.key)).length, n: live.length };
 }
 const taskBadge = (t) => `<span class="badge ${t.status === 'done' ? 'new' : t.status === 'in_progress' ? 'down' : 'off'}">${TASK_STATUS[t.status]}</span>`;
@@ -4749,14 +4768,15 @@ async function mergeCoveredTasks(runId) {
   for (const st of run.procedure_tasks.filter((x) => sysType(eqOf(x.equipment_id)) === 'pumps')) {
     const station = eqOf(st.equipment_id);
     const items = checklistFor(proc, station).items;
-    const have = new Set(st.procedure_checks.map((c) => `${c.step_id}:${c.sub_id ?? 0}`));
+    const have = new Set(st.procedure_checks.map(ckKey));
     for (const c of coveredBy(station)) {
       const dup = run.procedure_tasks.find((x) => x.equipment_id === c.equipment_id && x.task_id !== st.task_id);
       if (!dup) continue;
       const moves = [];
       for (const ck of dup.procedure_checks) {
-        const it = items.find((i) => i.step.step_id === ck.step_id && i.sub === c.equipment_id) ?? items.find((i) => i.step.step_id === ck.step_id && i.sub === 0);
-        if (it && !have.has(it.key)) { have.add(it.key); moves.push({ task_id: st.task_id, step_id: ck.step_id, sub_id: it.sub, done_at: ck.done_at, done_by_name: ck.done_by_name }); }
+        const tw = ck.tower ?? 0;
+        const it = items.find((i) => i.step.step_id === ck.step_id && i.sub === c.equipment_id && i.tower === tw) ?? items.find((i) => i.step.step_id === ck.step_id && i.sub === 0 && i.tower === tw);
+        if (it && !have.has(it.key)) { have.add(it.key); moves.push({ task_id: st.task_id, step_id: ck.step_id, sub_id: it.sub, ...(tw ? { tower: tw } : {}), done_at: ck.done_at, done_by_name: ck.done_by_name }); }
       }
       if (moves.length) await q(sb.from('procedure_checks').insert(moves));
       if (dup.notes && !st.notes) await q(sb.from('procedure_tasks').update({ notes: dup.notes }).eq('task_id', st.task_id));
@@ -4764,7 +4784,7 @@ async function mergeCoveredTasks(runId) {
       merged++;
     }
     // Status of the station after the merge
-    const after = (await q(sb.from('procedure_checks').select('step_id, sub_id').eq('task_id', st.task_id))).map((c) => `${c.step_id}:${c.sub_id ?? 0}`);
+    const after = (await q(sb.from('procedure_checks').select('*').eq('task_id', st.task_id))).map(ckKey);
     const skipRows = (await sb.from('procedure_step_notes').select('step_id, equipment_id').eq('skip', true)).data ?? [];
     const live = items.filter((i) => !skipRows.some((s2) => s2.step_id === i.step.step_id && s2.equipment_id === i.noteEq));
     const n = live.filter((i) => after.includes(i.key)).length;
@@ -4854,10 +4874,10 @@ async function openTask(taskId, proc, onDone) {
   const [t] = await q(sb.from('procedure_tasks').select('*, procedure_checks(*)').eq('task_id', taskId));
   const eq = refs.equipment.find((e) => e.equipment_id === t.equipment_id);
   const me = await myOperator();
-  const checks = new Map(t.procedure_checks.map((c) => [`${c.step_id}:${c.sub_id ?? 0}`, c]));
+  const checks = new Map(t.procedure_checks.map((c) => [ckKey(c), c]));
   const dlg = $('#dialog');
   dlg.classList.add('wide');
-  let cl = { secs: [], items: [] }, notes = new Map(), urls = new Map(), editing = null, photos = [];
+  let cl = { secs: [], items: [] }, notes = new Map(), urls = new Map(), editing = null, photos = [], jobs = [];
   const nk = (it) => `${it.step.step_id}:${it.noteEq}`;
   const load = async () => {
     [proc] = await q(sb.from('procedures').select('*, procedure_steps(*)').eq('procedure_id', proc.procedure_id));
@@ -4866,6 +4886,9 @@ async function openTask(taskId, proc, onDone) {
     const stepIds = [...new Set(cl.items.map((it) => it.step.step_id))];
     notes = new Map(stepIds.length ? ((await sb.from('procedure_step_notes').select('*').in('equipment_id', eqIds).in('step_id', stepIds)).data ?? []).map((n) => [`${n.step_id}:${n.equipment_id}`, n]) : []);
     photos = stepIds.length ? ((await sb.from('procedure_step_photos').select('*').in('equipment_id', eqIds).in('step_id', stepIds).order('taken_at')).data ?? []) : [];
+    // Photos taken on a round belong to it; older ones (no round) show every time.
+    photos = photos.filter((ph) => ph.task_id == null || ph.task_id === t.task_id);
+    jobs = (await sb.from('maint_jobs').select('job_id, equipment_id, title, status, kind, step_id, tower').eq('task_id', t.task_id).order('job_id')).data ?? [];
     const paths = [...cl.items.map((it) => it.step.photo_path), ...[...notes.values()].map((n) => n.photo_path), ...photos.map((ph) => ph.path)].filter((x) => x && !urls.has(x));
     if (paths.length) ((await sb.storage.from('maintenance').createSignedUrls(paths, 3600)).data ?? []).forEach((u, i) => urls.set(paths[i], u.signedUrl));
   };
@@ -4887,10 +4910,14 @@ async function openTask(taskId, proc, onDone) {
   };
   const tick = async (it, on) => {
     if (on) {
-      const row = { task_id: t.task_id, step_id: it.step.step_id, sub_id: it.sub, done_by_name: me?.name ?? myEmail ?? null };
+      const row = { task_id: t.task_id, step_id: it.step.step_id, sub_id: it.sub, ...(it.tower ? { tower: it.tower } : {}), done_by_name: me?.name ?? myEmail ?? null };
       await q(sb.from('procedure_checks').insert(row));
       checks.set(it.key, { ...row, done_at: new Date().toISOString() });
-    } else { await q(sb.from('procedure_checks').delete().eq('task_id', t.task_id).eq('step_id', it.step.step_id).eq('sub_id', it.sub)); checks.delete(it.key); }
+    } else {
+      let d = sb.from('procedure_checks').delete().eq('task_id', t.task_id).eq('step_id', it.step.step_id).eq('sub_id', it.sub);
+      if ('tower' in (t.procedure_checks[0] ?? {}) || it.tower) d = d.eq('tower', it.tower);   // tower column exists once procedures_towers.sql is run
+      await q(d); checks.delete(it.key);
+    }
   };
   const itemRow = (it) => {
     const st = it.step, c = checks.get(it.key), n = notes.get(nk(it)), k = it.key;
@@ -4898,13 +4925,16 @@ async function openTask(taskId, proc, onDone) {
       <label class="check"><input type="checkbox" data-step="${k}" ${c ? 'checked' : ''}><span>${esc(st.text)}${st.equipment_id ? ' <span class="badge up">This system</span>' : ''}</span></label>
       ${st.photo_path ? `<a href="${esc(urls.get(st.photo_path) ?? '#')}" target="_blank" rel="noopener"><img class="step-img" src="${esc(urls.get(st.photo_path) ?? '')}" alt=""></a>` : ''}
       ${n?.note ? `<p class="step-note">⚠ ${esc(n.note)}</p>` : ''}
-      ${(() => { const ps = photos.filter((ph) => ph.step_id === st.step_id && ph.equipment_id === it.noteEq); const legacy = n?.photo_path;
+      ${(() => { const js = jobs.filter((j) => j.step_id === st.step_id && j.equipment_id === it.noteEq && (j.tower ?? 0) === it.tower);
+        return js.length ? `<div class="step-jobs">${js.map((j) => `<button type="button" class="link small" data-sjob="${j.job_id}">🔧 ${esc(j.title)} · ${esc(jobStatusName(j.status))}</button>`).join('')}</div>` : ''; })()}
+      ${(() => { const ps = photos.filter((ph) => ph.step_id === st.step_id && ph.equipment_id === it.noteEq && (ph.tower ?? 0) === it.tower); const legacy = it.tower ? null : n?.photo_path;
         return ps.length || legacy ? `<div class="step-photos">${legacy ? `<a href="${esc(urls.get(legacy) ?? '#')}" target="_blank" rel="noopener"><img src="${esc(urls.get(legacy) ?? '')}" alt=""></a>` : ''}${ps.map((ph) => `<span class="sp"><a href="${esc(urls.get(ph.path) ?? '#')}" target="_blank" rel="noopener"><img src="${esc(urls.get(ph.path) ?? '')}" alt=""></a><button type="button" class="icon" data-rm-ph="${ph.photo_id}" aria-label="Delete photo">✕</button></span>`).join('')}</div>` : ''; })()}
       ${editing === k ? `<div class="note-edit"><input data-note-in value="${esc(n?.note ?? '')}" placeholder="Note for this system only"><button type="button" class="small primary" data-note-save="${k}">Save</button></div>` : ''}
       <div class="step-tools">
         ${c ? `<span class="muted small">✓ ${esc(c.done_by_name ?? '')} ${new Date(c.done_at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>` : ''}
         <button type="button" class="link small" data-note="${k}">${n?.note ? 'Edit note' : 'Note'}</button>
         <label class="link small">+ Photos<input type="file" accept="image/*" multiple hidden data-photo="${k}"></label>
+        <button type="button" class="link small" data-repair="${k}">🔧 Repair</button>
         ${st.equipment_id ? `<button type="button" class="link small" data-del-own="${k}">Delete step</button>` : `<button type="button" class="link small" data-skip="${k}">Not on this system</button>`}
       </div></li>`;
   };
@@ -4912,7 +4942,7 @@ async function openTask(taskId, proc, onDone) {
     const lv = live(), skipped = cl.items.filter((it) => notes.get(nk(it))?.skip);
     const many = cl.secs.length > 1;
     // "Add a step" choices: which section, and for whom.
-    const secOpts = cl.secs.map((sc, i) => `<option value="${i}">${esc(sc.label || 'This checklist')}</option>`).join('');
+    const secOpts = cl.secs.map((sc, i) => (sc.tower ? '' : `<option value="${i}">${esc(sc.label || 'This checklist')}</option>`)).join('');
     dlg.innerHTML = `<div class="form task-form">
       <div class="dialog-head"><h3>${esc(taskTitle(eq))}</h3><p class="muted small">${esc(taskSub(eq))} · ${esc(proc?.name ?? '')}${proc?.notes ? ` · ${esc(proc.notes)}` : ''}</p></div>
       <p><b>${lv.filter((it) => checks.has(it.key)).length}</b> of ${lv.length} steps done</p>
@@ -4961,7 +4991,7 @@ async function openTask(taskId, proc, onDone) {
           const path = `procedures/${proc.procedure_id}/sys-${it.noteEq}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
           const { error } = await sb.storage.from('maintenance').upload(path, blob, { contentType: blob.type || 'image/jpeg' });
           if (error) { toast(`Upload failed: ${error.message}`, true); return; }
-          await q(sb.from('procedure_step_photos').insert({ step_id: it.step.step_id, equipment_id: it.noteEq, path }));
+          await q(sb.from('procedure_step_photos').insert({ step_id: it.step.step_id, equipment_id: it.noteEq, path, task_id: t.task_id, tower: it.tower }));
         }
         toast(files.length > 1 ? `${files.length} photos added` : 'Photo added');
       });
@@ -4997,6 +5027,13 @@ async function openTask(taskId, proc, onDone) {
       dlg.close(); onDone?.();
     };
     $('[data-act=problem]', dlg).onclick = () => openJob({ equipmentId: t.equipment_id }, onDone);
+    // Log a repair from a step (e.g. Tower 3 gearbox changed): linked to this round, step and tower; back to the checklist after.
+    const back = () => openTask(taskId, proc, onDone);
+    $$('[data-repair]', dlg).forEach((b) => (b.onclick = () => { const it = itOf(b.dataset.repair);
+      const where = [it.sub ? taskTitle(it.sec.sys) : '', it.tower ? towerName(it.sec.sys, it.tower) : ''].filter(Boolean).join(' · ');
+      openJob({ equipmentId: it.noteEq, status: 'done', title: where ? `${where}: ` : '', description: `${proc?.name ?? 'Seasonal task'}: ${it.step.text}`,
+        link: { task_id: t.task_id, step_id: it.step.step_id, tower: it.tower }, back }, null); }));
+    $$('[data-sjob]', dlg).forEach((b) => (b.onclick = () => openJob({ jobId: Number(b.dataset.sjob), back }, null)));
     $('[data-act=add-covered]', dlg)?.addEventListener('click', () => addCovered(eq, async () => {
       await mergeCoveredTasks(t.run_id);
       openTask(taskId, proc, onDone);
@@ -5048,6 +5085,8 @@ async function editProcedure(procId, onDone) {
       <span class="step-btns"><button type="button" class="icon" data-up="${st.step_id}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button type="button" class="icon" data-down="${st.step_id}" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
       <label class="icon" title="Photo">📷<input type="file" accept="image/*" hidden data-photo="${st.step_id}"></label><button type="button" class="icon" data-del-step="${st.step_id}" aria-label="Delete step">✕</button></span></div>
     ${st.photo_path ? `<div class="step-photo"><img src="${esc(urls.get(st.photo_path) ?? '')}" alt=""><button type="button" class="small" data-rm-photo="${st.step_id}">Remove photo</button></div>` : ''}
+    ${'per_tower' in st && (st.system_type === 'pivots' || sysType(refs.equipment.find((e) => e.equipment_id === st.equipment_id)) === 'pivots')
+      ? `<label class="check small per-tower"><input type="checkbox" data-pertower="${st.step_id}" ${st.per_tower ? 'checked' : ''}> Repeat for each tower</label>` : ''}
     ${withNote ? `<label class="step-note-in">Note for this system only<input data-note="${st.step_id}" value="${esc(sysNotes.get(st.step_id) ?? '')}" placeholder="e.g. wooden plugs, no valves"></label>` : ''}</li>`;
   const draw = () => {
     const all = (p?.procedure_steps ?? []).filter((st) => st.active);
@@ -5153,6 +5192,7 @@ async function editProcedure(procId, onDone) {
       try { await q(sb.from('procedure_steps').insert(row)); await reloadP(); $(`[data-new="${key}"]`, dlg)?.focus(); } catch { /* shown */ }
     }));
     $$('[data-new]', dlg).forEach((inp) => (inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $(`[data-add="${inp.dataset.new}"]`, dlg).click(); } }));
+    $$('[data-pertower]', dlg).forEach((c) => (c.onchange = async () => { try { await q(sb.from('procedure_steps').update({ per_tower: c.checked }).eq('step_id', Number(c.dataset.pertower))); await reloadP(); } catch { /* shown */ } }));
     $$('[data-text]', dlg).forEach((ta) => (ta.onchange = async () => { try { await q(sb.from('procedure_steps').update({ text: ta.value.trim() }).eq('step_id', Number(ta.dataset.text))); } catch { /* shown */ } }));
     $$('[data-note]', dlg).forEach((inp) => (inp.onchange = async () => {
       const sid = Number(inp.dataset.note), note = inp.value.trim();
