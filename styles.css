@@ -921,3 +921,14 @@ table.crud td { vertical-align: middle; }
   main, main#view { padding: 24px 32px 40px; }
   body::before { left: calc(50% + 114px); } /* center the watermark on the content, not the whole window */
 }
+
+/* Sub-tab rows: on phones they wrap instead of scrolling, so every tab is in view */
+@media (max-width: 700px) {
+  .subtabs { flex-wrap: wrap; overflow-x: visible; margin-left: 0; margin-right: 0; padding: 0; gap: .35rem; }
+  .subtabs button { flex: none; white-space: normal; padding: .35rem .8rem; min-height: 36px; font-size: .88rem; }
+}
+
+/* Search boxes take the room the filter row has, not a fixed 320px */
+.search { max-width: none; }
+.filters .search { flex: 1 1 240px; margin-bottom: 0; }
+.subtabs button.active .muted { color: rgb(255 255 255 / .75); } /* tab counts stay readable on the dark pill */
