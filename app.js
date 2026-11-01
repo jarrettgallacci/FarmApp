@@ -4991,7 +4991,8 @@ async function openTask(taskId, proc, onDone) {
           const path = `procedures/${proc.procedure_id}/sys-${it.noteEq}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.jpg`;
           const { error } = await sb.storage.from('maintenance').upload(path, blob, { contentType: blob.type || 'image/jpeg' });
           if (error) { toast(`Upload failed: ${error.message}`, true); return; }
-          await q(sb.from('procedure_step_photos').insert({ step_id: it.step.step_id, equipment_id: it.noteEq, path, task_id: t.task_id, tower: it.tower }));
+          // Instruction photos (e.g. shutdown SOP) stay with the system every year; record photos belong to this round.
+          await q(sb.from('procedure_step_photos').insert({ step_id: it.step.step_id, equipment_id: it.noteEq, path, task_id: proc?.photos_per_round ? t.task_id : null, tower: it.tower }));
         }
         toast(files.length > 1 ? `${files.length} photos added` : 'Photo added');
       });
@@ -5108,6 +5109,8 @@ async function editProcedure(procId, onDone) {
       </div>
       <label>Notes<textarea name="notes" rows="2">${esc(p?.notes ?? '')}</textarea></label>
       <label class="check"><input type="checkbox" name="active" ${p?.active === false ? '' : 'checked'}> Active</label>
+      ${p && 'photos_per_round' in p ? `<label class="check"><input type="checkbox" name="photos_per_round" ${p.photos_per_round ? 'checked' : ''}> Photos taken on the checklist are records for that year only</label>
+        <p class="muted small">Leave off when checklist photos show how to do the job (like shutdown steps): they then show every year. Turn on to document issues found that round.</p>` : ''}
       ${autoOk ? `<div class="auto-box">
         <label class="check"><input type="checkbox" name="auto_on" ${p?.auto_month ? 'checked' : ''}> Start a round on its own every year</label>
         <div data-auto ${p?.auto_month ? '' : 'hidden'}>
@@ -5145,7 +5148,7 @@ async function editProcedure(procId, onDone) {
       if ((p?.auto_last_season ?? 0) < yr && autoStartOn(a, yr) < localDate() && !(p?.auto_month && autoStartOn(p, yr) < localDate())) a.auto_last_season = yr;
       return a;
     };
-    const head = () => ({ name: el.name.value.trim(), kind: el.kind.value, applies_to: el.applies_to.value, notes: el.notes.value.trim() || null, active: el.active.checked, ...auto() });
+    const head = () => ({ name: el.name.value.trim(), kind: el.kind.value, applies_to: el.applies_to.value, notes: el.notes.value.trim() || null, active: el.active.checked, ...(el.photos_per_round ? { photos_per_round: el.photos_per_round.checked } : {}), ...auto() });
     if (autoOk) {
       const showNext = () => { $('[data-auto]', dlg).hidden = !el.auto_on.checked; const a = auto(); const yr = new Date().getFullYear(), last = a.auto_last_season ?? p?.auto_last_season ?? 0;
         $('[data-auto-next]', dlg).textContent = a.auto_month ? `Next round starts ${fmtDay(autoStartOn(a, last >= yr ? yr + 1 : yr))}, ${last >= yr ? yr + 1 : yr}.` : ''; };

@@ -13,7 +13,9 @@ do $$ begin
   alter table public.procedure_checks add primary key (task_id, step_id, sub_id, tower);
 end $$;
 
--- Photos taken on a round belong to that round (and tower); older photos keep task_id null.
+-- Photos taken on the checklist: instructions (shown every year, task_id null) unless the procedure says
+-- they're records for that round (photos_per_round, e.g. yearly pivot maintenance).
+alter table public.procedures add column if not exists photos_per_round boolean not null default false;
 alter table public.procedure_step_photos add column if not exists task_id bigint references public.procedure_tasks on delete cascade;
 alter table public.procedure_step_photos add column if not exists tower smallint not null default 0;
 
