@@ -941,3 +941,52 @@ table.crud td { vertical-align: middle; }
 .auto-box [data-auto][hidden] { display: none; }
 .step-jobs { display: flex; flex-direction: column; align-items: flex-start; gap: .15rem; margin: .3rem 0 0 3.45rem; }
 .per-tower { margin: .2rem 0 0 2rem; font-size: .85rem; }
+
+/* ======================================================================
+   Trial theme: "Field Green". On while <html> has data-theme="field".
+   To go back to the previous colors, delete that attribute in index.html.
+   Yellow is only ever a fill under dark text or a mark on dark green:
+   yellow on white or cream is 1.8:1, too faint to read.
+   ====================================================================== */
+html[data-theme="field"] {
+  --accent: #24502f;         /* header green: links, selected tabs, headings */
+  --accent-hover: #1b3d24;
+  --accent-deep: #14291c;    /* sidebar and phone bottom bar */
+  --accent-soft: #e2ece3;
+  --accent-tint: #f2f6f2;
+  --action: #f2b705;         /* buttons that do something (Save, Add, Log work) */
+  --action-hover: #dca700;
+  --action-text: #111;
+  --highlight: #f2b705;      /* "you are here" mark in the sidebar and bottom bar */
+}
+html[data-theme="field"] button.primary,
+html[data-theme="field"] .primary-link {
+  background: var(--action); border-color: #c99700; color: var(--action-text) !important; font-weight: 600;
+  box-shadow: 0 1px 2px rgb(17 17 17 / .2);
+}
+html[data-theme="field"] button.primary:hover,
+html[data-theme="field"] .primary-link:hover { background: var(--action-hover); border-color: #b88a00; }
+
+@media (min-width: 641px) {
+  html[data-theme="field"] .topbar nav button.active,
+  html[data-theme="field"] .topbar nav button.active:hover { border-left-color: var(--highlight); color: #fff; }
+  html[data-theme="field"] .brand-text small { color: var(--highlight); }
+}
+
+@media (max-width: 640px) {
+  /* Top bar in header green, white text, yellow rule underneath */
+  html[data-theme="field"] .topbar { background: var(--accent); box-shadow: none; }
+  html[data-theme="field"] .topbar::after { background: var(--highlight); opacity: 1; }
+  html[data-theme="field"] .brand-text b { color: #fff; }
+  html[data-theme="field"] .brand-text small { color: var(--highlight); }
+  html[data-theme="field"] .brand img { padding: 3px; border-radius: 50%; background: #f5f4ef; box-sizing: border-box; }
+  html[data-theme="field"] .topbar > .row button { color: rgb(255 255 255 / .85); }
+  html[data-theme="field"] .topbar > .row button:hover { color: #fff; background: transparent; }
+  /* Bottom bar matches the desktop sidebar */
+  html[data-theme="field"] .topbar nav { background: var(--accent-deep); border-top-color: var(--accent-deep); }
+  html[data-theme="field"] .topbar nav button { color: rgb(255 255 255 / .72); }
+  html[data-theme="field"] .topbar nav button.active,
+  html[data-theme="field"] .topbar nav button.active:hover { background: rgb(255 255 255 / .1); color: var(--highlight); }
+  html[data-theme="field"] .topbar nav.more-open .nav-extra { color: #fff; }
+  html[data-theme="field"] .topbar nav.more-open .nav-extra.active { color: var(--highlight); }
+}
