@@ -1173,13 +1173,13 @@ async function drawSchedule(box, reload) {
   const today = localDate(), until = addDays(today, 14);
   const [wRes, cRes] = await Promise.all([
     sb.from('work_events').select('*').eq('status', 'planned').lte('performed_on', until).order('performed_on'),
-    sb.from('chemical_events').select('event_id, field_id, applied_on, method, chemical_event_products(chemical_id)').eq('status', 'planned').lte('applied_on', until).order('applied_on'),
+    sb.from('chemical_events').select('*, chemical_event_products(chemical_id)').eq('status', 'planned').lte('applied_on', until).order('applied_on'),
   ]);
   const items = [
     ...(wRes.data ?? []).map((w) => ({ date: w.performed_on, kind: 'work', id: w.event_id, field: w.field_id, where: workWhere(w), custom: !!w.customer_id,
       what: `${workLabel(w.operation)}${w.harvest_stage ? ' · ' + stageName(w.harvest_stage) : ''}`, sub: [equipName(w.tractor_id), equipName(w.equipment_id)].filter(Boolean).join(' + ') })),
-    ...(cRes.data ?? []).map((c) => ({ date: c.applied_on, kind: 'chem', id: c.event_id, field: c.field_id,
-      what: methodName(c.method), sub: c.chemical_event_products.map((l) => chemById(l.chemical_id)?.name).filter(Boolean).join(', ') })),
+    ...(cRes.data ?? []).map((c) => ({ date: c.applied_on, kind: 'chem', id: c.event_id, field: c.field_id, run: chemRunBtn(c), running: isRunning(c),
+      what: methodName(c.method), sub: [chemRunInfo(c), c.chemical_event_products.map((l) => chemById(l.chemical_id)?.name).filter(Boolean).join(', ')].filter(Boolean).join(' · ') })),
   ].sort((a, b) => a.date.localeCompare(b.date) || fieldName(a.field).localeCompare(fieldName(b.field), undefined, { numeric: true }));
   if (wRes.error && cRes.error) { box.innerHTML = '<p class="muted small">Planned work shows here once work_plan.sql is run.</p>'; return; }
   if (!items.length) { box.innerHTML = '<p class="muted">Nothing planned for the next two weeks. Plan work from a field on the map, or from the Work tab.</p>'; return; }
@@ -1187,8 +1187,9 @@ async function drawSchedule(box, reload) {
   const groups = [];
   items.forEach((it) => { const k = it.date < today ? 'Overdue' : it.date; const g = groups.find((x) => x.k === k); if (g) g.items.push(it); else groups.push({ k, label: day(it.date), items: [it] }); });
   box.innerHTML = groups.map((g) => `<div class="group"><h4 class="${g.k === 'Overdue' ? 'overdue' : ''}">${esc(g.label)}</h4><ul class="list">${g.items.map((it) => `<li>
-    <span class="li-name"><b>${esc(it.where ?? fieldName(it.field))}</b> ${esc(it.what)}${it.kind === 'chem' ? ' <span class="badge up">Chem</span>' : ''}${it.custom ? ' <span class="badge up">Custom</span>' : ''}${it.sub ? `<span class="muted small">${esc(it.sub)}${g.k === 'Overdue' ? ' · ' + esc(fmtDay(it.date)) : ''}</span>` : ''}</span>
-    <span class="li-value"><button class="small" data-sched="${it.kind}:${it.id}">Open</button></span></li>`).join('')}</ul></div>`).join('');
+    <span class="li-name"><b>${esc(it.where ?? fieldName(it.field))}</b> ${esc(it.what)}${it.kind === 'chem' ? ` <span class="badge up">${it.running ? 'Running' : 'Chem'}</span>` : ''}${it.custom ? ' <span class="badge up">Custom</span>' : ''}${it.sub ? `<span class="muted small">${esc(it.sub)}${g.k === 'Overdue' ? ' · ' + esc(fmtDay(it.date)) : ''}</span>` : ''}</span>
+    <span class="li-value">${it.run ?? ''}<button class="small" data-sched="${it.kind}:${it.id}">Open</button></span></li>`).join('')}</ul></div>`).join('');
+  wireChemRun(box, (id) => cRes.data.find((c) => c.event_id === Number(id)), reload);
   $$('[data-sched]', box).forEach((b) => (b.onclick = async () => {
     const [kind, id] = b.dataset.sched.split(':');
     if (kind === 'work') return openWorkForm({ eventId: Number(id) }, reload);
@@ -3198,6 +3199,158 @@ async function weatherNow(fieldId) {
   return { temp_f: Math.round(c.temperature_2m), wind_mph: Math.round(c.wind_speed_10m), gust_mph: Math.round(c.wind_gusts_10m), wind_dir: compass(c.wind_direction_10m) };
 }
 
+// Weather at a past time (hourly weather-service values for that hour), or right now if the time is recent.
+async function weatherAt(fieldId, iso) {
+  if (Math.abs(Date.now() - new Date(iso)) < 20 * 60000) return weatherNow(fieldId);
+  const pt = fieldPoint(fieldById(fieldId)) ?? [FARM_LON, FARM_LAT];
+  const local = toLocalInput(iso), day = local.slice(0, 10);
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${pt[1].toFixed(4)}&longitude=${pt[0].toFixed(4)}` +
+    `&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m&start_date=${day}&end_date=${day}` +
+    '&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FLos_Angeles';
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('weather ' + res.status);
+  const h = (await res.json()).hourly;
+  let i = h.time.findIndex((t) => t.startsWith(local.slice(0, 13)));
+  if (i < 0) throw new Error('no weather for that hour');
+  if (new Date(iso).getMinutes() >= 30 && i + 1 < h.time.length) i++;
+  return { temp_f: Math.round(h.temperature_2m[i]), wind_mph: Math.round(h.wind_speed_10m[i]), gust_mph: Math.round(h.wind_gusts_10m[i]), wind_dir: compass(h.wind_direction_10m[i]) };
+}
+
+// ---- Start / stop a single planned chemical record (loads have their own queue view).
+// A chemigation record with a run time ends on its own at start + run time: the app asks to confirm the stop time.
+const isRunning = (e) => !!e.started_at && !e.stopped_at && e.status !== 'done';
+const plannedEnd = (e) => (e.method === 'chemigation' && e.started_at && Number(e.runtime_hr) > 0
+  ? new Date(new Date(e.started_at).getTime() + Number(e.runtime_hr) * 3600000).toISOString() : null);
+const hrsText = (h) => { const m = Math.round(h * 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`; };
+
+// A split tank mix (KWS) is one run: its records start and stop together.
+async function chemGroup(e) {
+  if (!('split_of' in e)) return [e];
+  const root = e.split_of ?? e.event_id;
+  return q(sb.from('chemical_events').select('*').or(`event_id.eq.${root},split_of.eq.${root}`));
+}
+
+async function startChemRun(e) {
+  const group = await chemGroup(e);
+  const patch = { started_at: new Date().toISOString(), applied_on: localDate() };
+  try { Object.assign(patch, await weatherNow(e.field_id), { weather_source: 'auto' }); }
+  catch { toast('Started. Weather couldn\'t load - add it when you stop or edit the record.', true); }
+  await q(sb.from('chemical_events').update(patch).in('event_id', group.map((g) => g.event_id)));
+  const end = plannedEnd({ ...e, ...patch });
+  if (patch.weather_source) toast(end ? `Started. It ends on its own at ${clock(end)}; you'll be asked to confirm.` : 'Started');
+}
+
+async function stopChemRun(e, at = new Date().toISOString()) {
+  const group = await chemGroup(e);
+  const patch = { stopped_at: at, status: 'done' };
+  if (e.method === 'chemigation' && e.started_at) patch.runtime_hr = Math.round((new Date(at) - new Date(e.started_at)) / 36000) / 100;
+  try {
+    const w = await weatherAt(e.field_id, at);
+    if (e.wind_mph == null) Object.assign(patch, w, { weather_source: 'auto' });
+    else {
+      const lo = Math.min(Number(e.wind_mph), w.wind_mph), hi = Math.max(Number(e.wind_mph_max ?? e.wind_mph), w.wind_mph);
+      Object.assign(patch, { wind_mph: lo, wind_mph_max: hi > lo ? hi : null, gust_mph: Math.max(Number(e.gust_mph ?? 0), w.gust_mph) });
+    }
+  } catch { /* keep start-time weather */ }
+  await q(sb.from('chemical_events').update(patch).in('event_id', group.map((g) => g.event_id)));
+  rotationCache.at = 0;
+}
+
+// Status text and buttons for a planned record in a list (Chemical tab, Home schedule).
+function chemRunInfo(e) {
+  if (!isRunning(e)) return '';
+  const end = plannedEnd(e);
+  return `Started ${clock(e.started_at)}${end ? ` · ends ${clock(end)}` : ''}`;
+}
+function chemRunBtn(e) {
+  if (e.status !== 'planned' || e.load_id) return '';
+  return isRunning(e) ? `<button class="small danger" data-cstop="${e.event_id}">Stop</button> `
+    : `<button class="small primary" data-cstart="${e.event_id}">Start</button> `;
+}
+function wireChemRun(box, rowById, reload) {
+  $$('[data-cstart]', box).forEach((b) => (b.onclick = async (ev) => {
+    ev.stopPropagation();
+    const e = rowById(b.dataset.cstart);
+    if (e.applied_on > localDate() && !confirm(`This is planned for ${fmtDay(e.applied_on)}. Start it today?`)) return;
+    b.disabled = true; b.textContent = '…';
+    try { await startChemRun(e); } catch { /* shown */ }
+    reload();
+  }));
+  $$('[data-cstop]', box).forEach((b) => (b.onclick = (ev) => { ev.stopPropagation(); openChemFinish(rowById(b.dataset.cstop), false, reload); }));
+}
+
+// Confirm the stop time. auto = the planned run time is up; otherwise a Stop tap (defaults to now).
+const finishSnooze = new Map();
+async function openChemFinish(e, auto, onDone) {
+  const group = await chemGroup(e).catch(() => [e]);
+  const end = plannedEnd(e);
+  const def = auto && end ? end : new Date().toISOString();
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  dlg.innerHTML = `<form class="form chem-finish">
+    <div class="dialog-head"><h3>${auto ? 'Chemigation run time is up' : 'Stop and finish'}</h3></div>
+    <p><b>${esc(fieldName(e.field_id))}</b> · ${esc(methodName(e.method))}${group.length > 1 ? ` <span class="muted small">(${group.length} split records, all finish together)</span>` : ''}</p>
+    <p class="muted small">Started ${esc(fmtDay(toLocalInput(e.started_at).slice(0, 10)))} ${esc(clock(e.started_at))}${end ? ` · planned run time ${esc(hrsText(Number(e.runtime_hr)))}, so it ended at ${esc(clock(end))}` : ''}.</p>
+    ${auto ? '<p>Confirm the time it actually stopped. Change it if the run was cut short or ran long.</p>' : ''}
+    <label>Stop time<input type="datetime-local" name="stop" required value="${esc(toLocalInput(def))}"></label>
+    <p class="small" id="fin-run"></p>
+    <div class="actions">
+      <button type="button" data-act="edit">Edit record</button><span class="spacer"></span>
+      <button type="button" data-act="later">${auto ? 'Still running' : 'Cancel'}</button>
+      <button type="submit" class="primary">${auto ? 'Confirm and finish' : 'Stop and finish'}</button>
+    </div></form>`;
+  const form = $('form', dlg), inp = form.elements.stop, info = $('#fin-run', dlg);
+  const stopIso = () => (inp.value ? new Date(inp.value).toISOString() : null);
+  const sync = () => {
+    const s = stopIso();
+    if (!s) { info.textContent = ''; return; }
+    const hrs = (new Date(s) - new Date(e.started_at)) / 3600000;
+    if (hrs <= 0) { info.innerHTML = '<b>The stop time is before the start.</b>'; return; }
+    const off = Number(e.runtime_hr) > 0 && Math.abs(hrs - Number(e.runtime_hr)) / Number(e.runtime_hr) > 0.05;
+    info.innerHTML = `Actual run time <b>${esc(hrsText(hrs))}</b>${Number(e.runtime_hr) > 0 ? ` (planned ${esc(hrsText(Number(e.runtime_hr)))})` : ''}.` +
+      (off ? ' <span class="muted">Product rates stay as planned. If less (or more) went on, fix the rates with Edit record.</span>' : '');
+  };
+  inp.oninput = sync; sync();
+  dlg.onclose = null;
+  $('[data-act=later]', dlg).onclick = () => { if (auto) finishSnooze.set(e.event_id, Date.now() + 30 * 60000); dlg.close(); };
+  $('[data-act=edit]', dlg).onclick = async () => {
+    if (auto) finishSnooze.set(e.event_id, Date.now() + 30 * 60000);
+    const [cev] = await q(sb.from('chemical_events').select('*, chemical_event_products(*), crop_years(crop_id, variety)').eq('event_id', e.event_id));
+    cev.chemical_event_products.sort((a, x) => a.position - x.position);
+    openChemForm({ event: cev }, onDone);
+  };
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const s = stopIso();
+    if (!s || new Date(s) <= new Date(e.started_at)) return toast('The stop time has to be after the start', true);
+    if (new Date(s) > Date.now() + 60000) return toast('The stop time can\'t be in the future', true);
+    const btn = $('[type=submit]', form); btn.disabled = true;
+    try { await stopChemRun(e, s); } catch { btn.disabled = false; return; }
+    finishSnooze.delete(e.event_id);
+    dlg.close(); toast('Finished'); onDone?.();
+    setTimeout(checkChemRuns, 500);
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+// Runs from app open, every minute while open, and when the app comes back to the front.
+let chemRunChecking = false;
+async function checkChemRuns() {
+  if (chemRunChecking || !started || document.visibilityState !== 'visible') return;
+  if ($('dialog[open]') || mapState.ed || (currentView === 'order' && orderState.dirty)) return;
+  chemRunChecking = true;
+  try {
+    const { data, error } = await sb.from('chemical_events').select('*').eq('method', 'chemigation').eq('status', 'planned')
+      .not('started_at', 'is', null).is('stopped_at', null).not('runtime_hr', 'is', null).order('started_at');
+    if (error) return;
+    const now = Date.now();
+    const due = (data ?? []).find((e) => !e.split_of && plannedEnd(e) && new Date(plannedEnd(e)) <= now && !(finishSnooze.get(e.event_id) > now));
+    if (due && !$('dialog[open]')) await openChemFinish(due, true, () => show(currentView));
+  } finally { chemRunChecking = false; }
+}
+setInterval(checkChemRuns, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkChemRuns(); });
+
 async function renderChem(el) {
   const s = chemState;
   const rows = await q(sb.from('chemical_events')
@@ -3242,7 +3395,7 @@ async function renderChem(el) {
     ${shown.length ? `<div class="card table-wrap"><table class="chem-table">
       <thead><tr><th>Date</th><th>Field</th><th class="c-crop">Crop</th><th>Method</th><th>Products</th><th class="c-by">Applied by</th><th></th></tr></thead>
       <tbody>${shown.map((r) => `<tr class="${r.status === 'planned' ? 'is-planned' : ''}">
-        <td class="nowrap">${esc(fmtDate(r.applied_on))}${r.status === 'planned' ? ' <span class="badge down">Plan</span>' : ''}</td>
+        <td class="nowrap">${esc(fmtDate(r.applied_on))}${isRunning(r) ? ' <span class="badge up">Running</span>' : r.status === 'planned' ? ' <span class="badge down">Plan</span>' : ''}${chemRunInfo(r) ? `<div class="muted small">${esc(chemRunInfo(r))}</div>` : ''}</td>
         <td class="nowrap"><b>${esc(fieldName(r.field_id))}</b></td>
         <td class="c-crop">${esc(eventCrop(r))}</td>
         <td>${esc(methodName(r.method))}${r.sprayer_id ? ` <span class="muted small">· ${esc(equipName(r.sprayer_id))}</span>` : ''}${carrierText(r) ? `<div class="muted small">${esc(carrierText(r))}</div>` : ''}${wxText(r) ? `<div class="muted small">${esc(wxText(r))}</div>` : ''}</td>
@@ -3251,7 +3404,7 @@ async function renderChem(el) {
           return `<span class="prod"><span class="type-dot t-${esc(c?.type ?? 'other')}"></span>${esc(c?.name ?? '?')} <span class="muted">${esc(rateText(l))}</span></span>`;
         }).join('')}</div></td>
         <td class="c-by">${esc(operatorName(r.performed_by))}</td>
-        <td class="r"><button class="small" data-edit="${r.event_id}">Edit</button></td></tr>`).join('')}
+        <td class="r nowrap">${chemRunBtn(r)}<button class="small" data-edit="${r.event_id}">Edit</button></td></tr>`).join('')}
       </tbody></table></div>` : `<div class="empty">No chemical records${rows.length ? ' match these filters' : ` for ${s.season}`}.</div>`}`;
 
   const reload = () => renderChem(el);
@@ -3260,6 +3413,7 @@ async function renderChem(el) {
   $('[data-act=load]', el).onclick = () => openChemForm({ fieldIds: [], asLoad: true }, reload);
   $$('[data-load]', el).forEach((b) => (b.onclick = () => openLoad(Number(b.dataset.load), reload)));
   $$('[data-edit]', el).forEach((b) => (b.onclick = () => openChemForm({ event: rows.find((r) => r.event_id === Number(b.dataset.edit)) }, reload)));
+  wireChemRun(el, (id) => rows.find((r) => r.event_id === Number(id)), reload);
   $$('[data-f]', el).forEach((inp) => {
     const apply = () => { s[inp.dataset.f] = inp.value; reload().then(() => { const x = $(`[data-f="${inp.dataset.f}"]`, el); if (x?.type === 'search') { x.focus(); x.setSelectionRange(x.value.length, x.value.length); } }); };
     if (inp.type === 'search') { let t; inp.oninput = () => { clearTimeout(t); t = setTimeout(apply, 300); }; } else inp.onchange = apply;
@@ -3615,26 +3769,12 @@ async function openLoad(loadId, onChange) {
   const busy = (b) => { b.disabled = true; b.textContent = '…'; };
   $$('[data-start]', dlg).forEach((b) => (b.onclick = async () => {
     busy(b);
-    const e = evById(b.dataset.start);
-    const patch = { started_at: new Date().toISOString(), applied_on: localDate() };
-    try { Object.assign(patch, await weatherNow(e.field_id), { weather_source: 'auto' }); }
-    catch { toast('Started. Weather couldn\'t load - add it when you stop or edit the record.', true); }
-    try { await q(sb.from('chemical_events').update(patch).eq('event_id', e.event_id)); } catch { /* shown */ }
+    try { await startChemRun(evById(b.dataset.start)); } catch { /* shown */ }
     reopen();
   }));
   $$('[data-stop]', dlg).forEach((b) => (b.onclick = async () => {
     busy(b);
-    const e = evById(b.dataset.stop);
-    const patch = { stopped_at: new Date().toISOString(), status: 'done' };
-    try {
-      const w = await weatherNow(e.field_id);
-      if (e.wind_mph == null) Object.assign(patch, w, { weather_source: 'auto' });
-      else {
-        const lo = Math.min(Number(e.wind_mph), w.wind_mph), hi = Math.max(Number(e.wind_mph_max ?? e.wind_mph), w.wind_mph);
-        Object.assign(patch, { wind_mph: lo, wind_mph_max: hi > lo ? hi : null, gust_mph: Math.max(Number(e.gust_mph ?? 0), w.gust_mph) });
-      }
-    } catch { /* keep start-time weather */ }
-    try { await q(sb.from('chemical_events').update(patch).eq('event_id', e.event_id)); rotationCache.at = 0; } catch { /* shown */ }
+    try { await stopChemRun(evById(b.dataset.stop)); } catch { /* shown */ }
     reopen();
   }));
   $$('[data-done]', dlg).forEach((b) => (b.onclick = async () => {
@@ -5515,7 +5655,7 @@ const TOOLS = [
   { id: 'gp-cal', title: 'Great Plains drill calibration', blurb: 'Grams from one seed tube over 0.1 acre → lb/acre', render: renderGpCal },
   { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Grams from one bin over a timed run → lb/acre at your speed', render: renderSsCal },
   { id: 'mono', title: 'Monosem sprockets', blurb: 'Seed plate + spacing → transmission sprockets', render: renderMonoCal },
-  { id: 'chemigator', title: 'Chemigator load', blurb: 'Products, rates and injection → total product, water and fills', render: renderChemigator },
+  { id: 'chemigator', title: 'Chemigator calculator', blurb: 'Products, rates and injection → total product, water and fills; save it as a planned record', render: renderChemigator },
   { id: 'voice', title: 'Voice & Siri', blurb: 'Speak a record; set up Siri', render: renderVoiceHelp },
 ];
 
@@ -5764,7 +5904,7 @@ function renderChemigator(box) {
 
   const draw = () => {
     box.innerHTML = `
-      <h3>Chemigator load</h3>
+      <h3>Chemigator calculator</h3>
       <div class="cal-grid">
         <div class="cal-inputs">
           <div class="row2">
@@ -5862,7 +6002,7 @@ function renderChemigator(box) {
         ${fills > 1 ? '<span class="muted small">Each fill:</span>' : ''}
         <ul class="cg-list"><li>Water <b>${r1(water / fills)} gal</b></li>${prods.map((p) => `<li>${esc(p.name)} <b>${amt(p.amount / fills, p.unit)}</b></li>`).join('')}</ul>
         <span class="muted small">${r1(total / fills)} gal of solution per fill · ${r2(ac / hrs)} acres per hour</span></div>` : ''}
-      <button type="button" class="primary" data-act="record" ${st.field ? '' : 'disabled'}>Make chemical record</button>
+      <button type="button" class="primary" data-act="record" ${st.field ? '' : 'disabled'}>Make planned record</button>
       ${st.field ? '' : '<span class="muted small">Pick a field to make a record.</span>'}`;
     const rec = $('[data-act=record]', out);
     if (rec) rec.onclick = () => {
@@ -6300,6 +6440,7 @@ async function startApp() {
   try { await loadRefs(); } catch { return; }
   await show(currentView);
   openFromHash();
+  checkChemRuns();
 }
 // A QR label holds the app link + #eq=<id>; opening it (camera app or in-app scan) shows that machine's card.
 function openFromHash() {
