@@ -990,3 +990,80 @@ html[data-theme="field"] .primary-link:hover { background: var(--action-hover); 
   html[data-theme="field"] .topbar nav.more-open .nav-extra { color: #fff; }
   html[data-theme="field"] .topbar nav.more-open .nav-extra.active { color: var(--highlight); }
 }
+
+/* ======================================================================
+   Trial layout: "GSP style", modeled on the GSP order tracker.
+   On while <html> has data-style="gsp". Delete that attribute in
+   index.html to go back. Colors come from the Field Green theme above.
+   ====================================================================== */
+html[data-style="gsp"] { --bg: #f6f7f4; --radius: 6px; --shadow: none; }
+
+/* Page title band: full-width header green, big uppercase title */
+html[data-style="gsp"] #view > .section-head:first-child,
+html[data-style="gsp"] #view > .home-head:first-child,
+html[data-style="gsp"] #view > .subtabs:first-child,
+html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) {
+  color: #fff; margin-bottom: 1.25rem; padding: 26px 0 22px; align-items: flex-end;
+  border-image: conic-gradient(var(--accent) 0 0) fill 0 // 0 100vmax; /* full-width green behind it */
+}
+html[data-style="gsp"] #view > .section-head:first-child,
+html[data-style="gsp"] #view > .home-head:first-child,
+html[data-style="gsp"] #view > .subtabs:first-child { margin-top: -24px; }
+/* Pages with sub-tabs: the tabs sit at the top of the band, the title under them */
+html[data-style="gsp"] #view > .subtabs:first-child { margin-bottom: 0; padding: 20px 0 6px; }
+html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) { padding-top: 10px; }
+html[data-style="gsp"] #view > .subtabs:first-child button {
+  background: transparent; border-color: rgb(255 255 255 / .35); color: rgb(255 255 255 / .85);
+}
+html[data-style="gsp"] #view > .subtabs:first-child button:hover { border-color: #fff; color: #fff; }
+html[data-style="gsp"] #view > .subtabs:first-child button.active { background: #fff; border-color: #fff; color: var(--accent); }
+html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) h2,
+html[data-style="gsp"] #view > .section-head:first-child h2,
+html[data-style="gsp"] #view > .home-head:first-child h2 {
+  color: #fff; font-family: "Montserrat", "Inter", sans-serif; font-weight: 800;
+  text-transform: uppercase; letter-spacing: .03em; font-size: 1.75rem;
+}
+html[data-style="gsp"] #view > .home-head:first-child .eyebrow { color: rgb(255 255 255 / .75); }
+html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) :is(input, select),
+html[data-style="gsp"] #view > .section-head:first-child :is(input, select),
+html[data-style="gsp"] #view > .home-head:first-child :is(input, select) { color: var(--text); }
+html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) button:not(.primary),
+html[data-style="gsp"] #view > .section-head:first-child button:not(.primary),
+html[data-style="gsp"] #view > .home-head:first-child button:not(.primary) {
+  background: transparent; border-color: rgb(255 255 255 / .45); color: #fff;
+}
+html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) button:not(.primary):hover,
+html[data-style="gsp"] #view > .section-head:first-child button:not(.primary):hover,
+html[data-style="gsp"] #view > .home-head:first-child button:not(.primary):hover {
+  background: rgb(255 255 255 / .12); border-color: #fff;
+}
+html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) .muted,
+html[data-style="gsp"] #view > .section-head:first-child .muted { color: rgb(255 255 255 / .75); }
+
+/* Loud action buttons: uppercase, heavy, hard shadow. Small ones stay quiet. */
+html[data-style="gsp"] button.primary:not(.small),
+html[data-style="gsp"] .primary-link {
+  text-transform: uppercase; letter-spacing: .08em; font-weight: 800; border-radius: 4px;
+  box-shadow: 3px 3px 0 var(--accent-deep);
+}
+html[data-style="gsp"] button.primary:not(.small):active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--accent-deep); }
+
+/* Plain cards and tables: flat borders, green rule under table headers, striped rows */
+html[data-style="gsp"] .card, html[data-style="gsp"] .stat { box-shadow: none; }
+html[data-style="gsp"] th { border-bottom: 2px solid var(--accent); }
+html[data-style="gsp"] table.crud tbody tr:nth-child(odd) { background: #f3f5f1; }
+html[data-style="gsp"] .stat-value { font-weight: 800; }
+
+@media (max-width: 640px) {
+  html[data-style="gsp"] #view > .section-head:first-child,
+  html[data-style="gsp"] #view > .home-head:first-child,
+  html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) { padding: 18px 0 16px; }
+  html[data-style="gsp"] #view > .section-head:first-child,
+  html[data-style="gsp"] #view > .home-head:first-child,
+  html[data-style="gsp"] #view > .subtabs:first-child { margin-top: -16px; }
+  html[data-style="gsp"] #view > .subtabs:first-child { padding: 14px 12px 4px; }
+  html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) { padding-top: 8px; }
+  html[data-style="gsp"] :is(#view > .subtabs:first-child + .section-head, #setup-body > .section-head:first-child) h2,
+  html[data-style="gsp"] #view > .section-head:first-child h2,
+  html[data-style="gsp"] #view > .home-head:first-child h2 { font-size: 1.3rem; }
+}
