@@ -5656,6 +5656,7 @@ const TOOLS = [
   { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Grams from one bin over a timed run → lb/acre at your speed', render: renderSsCal },
   { id: 'mono', title: 'Monosem sprockets', blurb: 'Seed plate + spacing → transmission sprockets', render: renderMonoCal },
   { id: 'chemigator', title: 'Chemigator calculator', blurb: 'Products, rates and injection → total product, water and fills; save it as a planned record', render: renderChemigator },
+  { id: 'reports', title: 'Reports', blurb: 'Pick fields, dates and sections → one PDF', render: renderReports },
   { id: 'voice', title: 'Voice & Siri', blurb: 'Speak a record; set up Siri', render: renderVoiceHelp },
 ];
 
@@ -5665,6 +5666,450 @@ function renderTools(el) {
     <div class="card tool-card" id="tool-box"></div>`;
   $$('[data-tool]', el).forEach((b) => (b.onclick = () => { toolOpen = b.dataset.tool; renderTools(el); }));
   (TOOLS.find((t) => t.id === toolOpen) ?? TOOLS[0]).render($('#tool-box', el));
+}
+
+// =====================================================================
+// Reports: pick fields, a date range and sections → one PDF.
+// Built in the browser with jsPDF + AutoTable; nothing is sent anywhere.
+// =====================================================================
+const JSPDF_LIB = 'https://cdn.jsdelivr.net/npm/jspdf@4.2.1/dist/jspdf.umd.min.js';
+const AUTOTABLE_LIB = 'https://cdn.jsdelivr.net/npm/jspdf-autotable@5.0.9/dist/jspdf.plugin.autotable.min.js';
+const REPORT_SECTIONS = [
+  ['summary', 'Field summary', 'Acres, farm unit, turnout and ditch rider, deeded or leased, sub-fields, irrigation equipment'],
+  ['crops', 'Crop history', 'Crop, variety, planting, acres, stand years, contract and yield for each season'],
+  ['chem', 'Chemical applications', 'Date, products with EPA numbers and rates, amount used, method, applicator, weather'],
+  ['chemTotals', 'Chemical totals by product', 'Amount of each product used on the field over the period'],
+  ['work', 'Field work', 'Tillage, planting, cultivation, harvest and other work, with cost per acre'],
+  ['harvest', 'Harvest & yield', 'Harvest entries: stage, yield, acres, moisture, tickets'],
+  ['water', 'Water orders', 'When water was ordered on and off, and at what flow'],
+  ['irrigation', 'Irrigation equipment & seasonal tasks', 'Seasonal checklist progress and repairs on the pivots, pumps and solid sets tied to the field'],
+];
+const reportState = (() => {
+  const y = new Date().getFullYear();
+  const def = { fields: [], from: `${y}-01-01`, to: localDate(), sections: ['summary', 'crops', 'chem', 'work', 'harvest'], planned: false,
+    pesticidesOnly: false, allCropYears: false, perPage: true, q: '' };
+  try { return { ...def, ...JSON.parse(localStorage.getItem('report-opts') || '{}'), q: '' }; } catch { return def; }
+})();
+const saveReportState = () => { try { localStorage.setItem('report-opts', JSON.stringify({ ...reportState, q: '' })); } catch { /* storage unavailable */ } };
+
+// Supabase returns at most 1,000 rows a request; page through for long histories.
+async function fetchAll(build) {
+  const out = [];
+  for (let i = 0; ; i += 1000) {
+    const rows = await q(build().range(i, i + 999));
+    out.push(...rows);
+    if (rows.length < 1000) return out;
+  }
+}
+const chunk = (arr, n) => Array.from({ length: Math.ceil(arr.length / n) }, (_, i) => arr.slice(i * n, i * n + n));
+
+function renderReports(box) {
+  const s = reportState;
+  const y = new Date().getFullYear();
+  const presets = [['This year', `${y}-01-01`, localDate()], ['Last year', `${y - 1}-01-01`, `${y - 1}-12-31`],
+    ['Last 3 years', `${y - 2}-01-01`, localDate()], ['Last 7 years', `${y - 6}-01-01`, localDate()], ['All records', '2000-01-01', localDate()]];
+  const all = fieldsInOrder();
+  const units = [...new Set(all.filter((f) => f.active).map((f) => f.farm_unit).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const draw = () => {
+    const term = s.q.trim().toLowerCase();
+    const sel = new Set(s.fields);
+    const shown = all.filter((f) => (f.active || sel.has(f.field_id)) && (!term || `${f.name} ${f.farm_unit ?? ''} ${f.block ?? ''}`.toLowerCase().includes(term)));
+    box.innerHTML = `<h3>Field report (PDF)</h3>
+      <p class="muted small">Pick fields, a date range and what to include. Each field starts on its own page. The PDF is made on this device.</p>
+      <div class="report-grid">
+        <div>
+          <h4>Fields <span class="muted small" data-count>${sel.size} selected</span></h4>
+          <div class="row wrap"><input type="search" data-rq placeholder="Search fields…" value="${esc(s.q)}">
+            <button type="button" class="small" data-fsel="all">All</button><button type="button" class="small" data-fsel="none">None</button></div>
+          ${units.length ? `<div class="chips">${units.map((u) => `<button type="button" class="small" data-unit="${esc(u)}">Unit ${esc(u)}</button>`).join('')}</div>` : ''}
+          <div class="report-fields">${shown.map((f) => `<label class="check${f.parent_field_id ? ' sub' : ''}"><input type="checkbox" data-rf="${f.field_id}" ${sel.has(f.field_id) ? 'checked' : ''}>
+            ${esc(f.name)} <span class="muted small">${[f.acres != null && num(f.acres, 0) + ' ac', f.farm_unit && 'unit ' + f.farm_unit, !f.active && 'retired'].filter(Boolean).map(esc).join(' · ')}</span></label>`).join('') || '<p class="muted small">No fields match.</p>'}</div>
+        </div>
+        <div>
+          <h4>Dates</h4>
+          <div class="chips">${presets.map(([t, a, b]) => `<button type="button" class="small${s.from === a && s.to === b ? ' active' : ''}" data-from="${a}" data-to="${b}">${t}</button>`).join('')}</div>
+          <div class="row wrap"><label>From<input type="date" data-rd="from" value="${esc(s.from)}"></label><label>To<input type="date" data-rd="to" value="${esc(s.to)}"></label></div>
+          <h4>Include</h4>
+          <div class="report-sections">${REPORT_SECTIONS.map(([k, t, d]) => `<label class="check"><input type="checkbox" data-rs="${k}" ${s.sections.includes(k) ? 'checked' : ''}>
+            <span><b>${esc(t)}</b><br><span class="muted small">${esc(d)}</span></span></label>`).join('')}</div>
+          <h4>Options</h4>
+          <label class="check"><input type="checkbox" data-ro="planned" ${s.planned ? 'checked' : ''}> Include planned (not yet done) records</label>
+          <label class="check"><input type="checkbox" data-ro="pesticidesOnly" ${s.pesticidesOnly ? 'checked' : ''}> Chemical: pesticides only (leave out fertilizer, adjuvants, amendments)</label>
+          <label class="check"><input type="checkbox" data-ro="allCropYears" ${s.allCropYears ? 'checked' : ''}> Crop history: every year on record, not just the date range</label>
+          <label class="check"><input type="checkbox" data-ro="perPage" ${s.perPage ? 'checked' : ''}> Start each field on a new page</label>
+        </div>
+      </div>
+      <div class="actions"><span class="muted small" data-rmsg></span><span class="spacer"></span><button type="button" class="primary" data-act="pdf">Make PDF</button></div>`;
+    const setCount = () => { $('[data-count]', box).textContent = `${s.fields.length} selected`; };
+    const toggle = (id, on) => { s.fields = s.fields.filter((x) => x !== id); if (on) s.fields.push(id); };
+    $('[data-rq]', box).oninput = (e) => { s.q = e.target.value; const pos = e.target.selectionStart; draw(); const x = $('[data-rq]', box); x.focus(); x.setSelectionRange(pos, pos); };
+    $$('[data-rf]', box).forEach((c) => (c.onchange = () => { toggle(Number(c.dataset.rf), c.checked); setCount(); saveReportState(); }));
+    $$('[data-fsel]', box).forEach((b) => (b.onclick = () => {
+      shown.forEach((f) => toggle(f.field_id, b.dataset.fsel === 'all'));
+      saveReportState(); draw();
+    }));
+    $$('[data-unit]', box).forEach((b) => (b.onclick = () => {
+      const inUnit = all.filter((f) => f.active && f.farm_unit === b.dataset.unit);
+      const allOn = inUnit.every((f) => s.fields.includes(f.field_id));
+      inUnit.forEach((f) => toggle(f.field_id, !allOn));
+      saveReportState(); draw();
+    }));
+    $$('[data-from]', box).forEach((b) => (b.onclick = () => { s.from = b.dataset.from; s.to = b.dataset.to; saveReportState(); draw(); }));
+    $$('[data-rd]', box).forEach((i) => (i.onchange = () => { s[i.dataset.rd] = i.value; saveReportState(); draw(); }));
+    $$('[data-rs]', box).forEach((c) => (c.onchange = () => {
+      s.sections = REPORT_SECTIONS.map(([k]) => k).filter((k) => (k === c.dataset.rs ? c.checked : s.sections.includes(k))); saveReportState();
+    }));
+    $$('[data-ro]', box).forEach((c) => (c.onchange = () => { s[c.dataset.ro] = c.checked; saveReportState(); }));
+    $('[data-act=pdf]', box).onclick = async (e) => {
+      const msg = $('[data-rmsg]', box);
+      if (!s.fields.length) return toast('Pick at least one field', true);
+      if (!s.sections.length) return toast('Pick at least one section', true);
+      if (!s.from || !s.to || s.from > s.to) return toast('Check the dates: From must be on or before To', true);
+      e.target.disabled = true; msg.textContent = 'Gathering records…';
+      try {
+        const data = await loadReportData(s);
+        msg.textContent = 'Building PDF…';
+        await buildReportPdf(s, data);
+        msg.textContent = 'Done.';
+      } catch (err) {
+        console.error(err);
+        msg.textContent = '';
+        toast(`The report couldn't be made: ${err.message ?? err}`, true);
+      } finally { e.target.disabled = false; }
+    };
+  };
+  draw();
+}
+
+// Everything the report needs, for the chosen fields (and their sub-fields) and dates.
+async function loadReportData(s) {
+  const want = (k) => s.sections.includes(k);
+  const picked = fieldsInOrder().filter((f) => s.fields.includes(f.field_id));
+  // A parent field's section also covers its sub-fields that weren't picked on their own.
+  const idsOf = (f) => [f.field_id, ...refs.fields.filter((h) => h.parent_field_id === f.field_id && !s.fields.includes(h.field_id)).map((h) => h.field_id)];
+  const ids = [...new Set(picked.flatMap(idsOf))];
+  const y0 = Number(s.from.slice(0, 4)), y1 = Number(s.to.slice(0, 4));
+  const d = { picked, idsOf, chem: [], crops: [], work: [], harvest: [], water: [], tasks: [], jobs: [] };
+  const byIds = (table, sel, col = 'field_id', list = ids) => Promise.all(chunk(list, 100).map((part) =>
+    fetchAll(() => sb.from(table).select(sel).in(col, part)))).then((r) => r.flat());
+  const jobs = [];
+  if (want('chem') || want('chemTotals')) jobs.push((async () => {
+    const parts = await Promise.all(chunk(ids, 100).map((part) => fetchAll(() => sb.from('chemical_events')
+      .select('*, chemical_event_products(*), crop_years(crop_id, variety)').in('field_id', part)
+      .gte('applied_on', s.from).lte('applied_on', s.to).order('applied_on').order('event_id'))));
+    d.chem = parts.flat().filter((r) => s.planned || r.status !== 'planned');
+    d.chem.forEach((r) => r.chemical_event_products.sort((a, b) => a.position - b.position));
+    d.chem.sort((a, b) => a.applied_on.localeCompare(b.applied_on) || a.event_id - b.event_id);
+  })());
+  if (want('crops') || want('harvest') || want('summary')) jobs.push((async () => {
+    d.crops = await byIds('crop_year_summary', '*');
+  })());
+  if (want('work')) jobs.push((async () => {
+    const parts = await Promise.all(chunk(ids, 100).map((part) => fetchAll(() => sb.from('work_events').select('*').in('field_id', part)
+      .lte('performed_on', s.to).order('performed_on').order('event_id'))));
+    d.work = parts.flat().filter((r) => (r.end_date ?? r.performed_on) >= s.from && (s.planned || r.status !== 'planned'));
+  })());
+  if (want('water')) jobs.push((async () => {
+    const orders = await fetchAll(() => sb.from('water_orders').select('order_id, order_date, status').gte('order_date', s.from).lte('order_date', s.to).order('order_date'));
+    if (!orders.length) return;
+    const lines = (await Promise.all(chunk(orders.map((o) => o.order_id), 100).map((part) =>
+      fetchAll(() => sb.from('water_order_lines').select('*').in('order_id', part).in('field_id', ids))))).flat();
+    const od = new Map(orders.map((o) => [o.order_id, o]));
+    d.water = lines.map((l) => ({ ...l, order_date: od.get(l.order_id)?.order_date, order_status: od.get(l.order_id)?.status }))
+      .sort((a, b) => a.order_date.localeCompare(b.order_date));
+  })());
+  if (want('irrigation') || want('summary')) {
+    const eqIds = refs.equipment.filter((e) => (e.equipment_fields ?? []).some((x) => ids.includes(x.field_id))).map((e) => e.equipment_id);
+    d.eqIds = eqIds;
+    if (want('irrigation') && eqIds.length) jobs.push((async () => {
+      const [tasks, mj] = await Promise.all([
+        byIds('procedure_tasks', 'task_id, equipment_id, status, completed_on, notes, procedure_runs(season, started_on, due_on, procedures(name)), procedure_checks(count)', 'equipment_id', eqIds),
+        byIds('maint_jobs', '*', 'equipment_id', eqIds),
+      ]);
+      d.tasks = tasks.filter((t) => t.procedure_runs && t.procedure_runs.season >= y0 && t.procedure_runs.season <= y1);
+      d.jobs = mj.filter((j) => (j.reported_on <= s.to && (j.completed_on ?? s.to) >= s.from) || (j.completed_on && j.completed_on >= s.from && j.completed_on <= s.to));
+    })());
+  }
+  await Promise.all(jobs);
+  if (want('harvest') && d.crops.length) {
+    const hr = await byIds('harvest_records', '*', 'crop_year_id', d.crops.map((c) => c.crop_year_id));
+    d.harvest = hr.filter((h) => h.harvested_on >= s.from && h.harvested_on <= s.to);
+  }
+  return d;
+}
+
+// Standard PDF fonts only cover Western characters; swap the few others the app uses.
+const pdfText = (v) => String(v ?? '').replace(/→/g, '->').replace(/↔/g, '<->').replace(/[✓✔]/g, 'x').replace(/[≥]/g, '>=').replace(/[≤]/g, '<=')
+  .replace(/[^\x00-\xFF–—‘’“”•…€]/g, '');
+const fmtDateYr = (iso) => (iso ? new Date(iso + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '');
+const amtFmt = (n) => Number(n).toLocaleString(undefined, { maximumFractionDigits: n < 10 ? 2 : n < 1000 ? 1 : 0 });
+
+// Total product for one line when it's a per-acre rate; null when it can't be worked out.
+function lineTotal(l, acres) {
+  if (l.rate == null || l.rate_basis !== 'acre' || !(Number(acres) > 0) || !l.rate_unit || l.rate_unit === '%') return null;
+  return { amount: Number(l.rate) * Number(acres), unit: l.rate_unit };
+}
+const chemAcres = (r) => r.acres_treated ?? fieldById(r.field_id)?.acres ?? null;
+// "3,200 fl oz (25 gal)": add the bigger unit when it reads easier.
+function amountText(amount, unit) {
+  const big = { 'fl oz': [128, 'gal'], pt: [8, 'gal'], qt: [4, 'gal'], oz: [16, 'lb'] }[unit];
+  return `${amtFmt(amount)} ${unit}${big && amount >= big[0] ? ` (${amtFmt(amount / big[0])} ${big[1]})` : ''}`;
+}
+const fieldTitle = (f) => (/^field\b/i.test(f.name) ? f.name : `Field ${f.name}`);
+
+async function reportLogo() {
+  try {
+    const blob = await (await fetch('assets/mark.png')).blob();
+    return await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => res(null); fr.readAsDataURL(blob); });
+  } catch { return null; }
+}
+
+async function buildReportPdf(s, d) {
+  await loadScript(JSPDF_LIB, 'jspdf');
+  await loadScript(AUTOTABLE_LIB, 'autoTable');
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight(), M = 36;
+  const GREEN = [36, 80, 47], GREY = [110, 110, 110];
+  const want = (k) => s.sections.includes(k);
+  const range = `${fmtDateYr(s.from)} – ${fmtDateYr(s.to)}`;
+  const me = await myOperator().catch(() => null);
+  const who = me?.name ?? myEmail ?? '';
+  const pageField = []; // page number → field name, for the footer
+  let y = M;
+
+  const text = (t, x, yy, o = {}) => doc.text(pdfText(t), x, yy, o);
+  const ensure = (h) => { if (y + h > H - M - 20) { doc.addPage(); y = M; } };
+  const h1 = (t, sub) => {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(...GREEN); text(t, M, y + 14);
+    y += 22;
+    if (sub) { doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); doc.setTextColor(...GREY); const ls = doc.splitTextToSize(pdfText(sub), W - 2 * M); doc.text(ls, M, y + 8); y += ls.length * 12 + 4; }
+    doc.setDrawColor(...GREEN); doc.setLineWidth(1); doc.line(M, y, W - M, y); y += 12;
+  };
+  const h2 = (t) => {
+    ensure(48);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(...GREEN); text(t, M, y + 10); y += 16;
+  };
+  const note = (t) => {
+    doc.setFont('helvetica', 'italic'); doc.setFontSize(9); doc.setTextColor(...GREY);
+    const ls = doc.splitTextToSize(pdfText(t), W - 2 * M); ensure(ls.length * 11); doc.text(ls, M, y + 8); y += ls.length * 11 + 6;
+  };
+  const table = (head, body, opts = {}) => {
+    doc.autoTable({
+      head: [head.map(pdfText)], body: body.map((r) => r.map((c) => (typeof c === 'object' && c !== null ? { ...c, content: pdfText(c.content) } : pdfText(c)))),
+      startY: y, margin: { left: M, right: M, bottom: M + 14 }, theme: 'grid',
+      styles: { font: 'helvetica', fontSize: 8, cellPadding: 3, overflow: 'linebreak', valign: 'top', lineColor: [210, 210, 210], lineWidth: 0.4, textColor: [30, 30, 30] },
+      headStyles: { fillColor: GREEN, textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [246, 248, 245] },
+      ...opts,
+    });
+    y = doc.lastAutoTable.finalY + 14;
+  };
+  const kv = (pairs) => table(['', ''], pairs.filter(([, v]) => v !== '' && v != null), {
+    showHead: 'never', theme: 'plain', tableWidth: 420, styles: { fontSize: 9, cellPadding: 2 }, columnStyles: { 0: { fontStyle: 'bold', cellWidth: 120, textColor: GREY } } });
+
+  // ---- Cover page
+  const logo = await reportLogo();
+  if (logo) doc.addImage(logo, 'PNG', M, y, 34, 34);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(22); doc.setTextColor(...GREEN); text('Three Point Farms', M + (logo ? 44 : 0), y + 16);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(12); doc.setTextColor(...GREY); text('Field report', M + (logo ? 44 : 0), y + 32);
+  y += 52;
+  kv([['Dates', range], ['Fields', `${d.picked.length} (${amtFmt(d.picked.reduce((a, f) => a + Number(f.acres ?? 0), 0))} acres)`],
+    ['Sections', REPORT_SECTIONS.filter(([k]) => want(k)).map(([, t]) => t).join(', ')],
+    ['Options', [s.planned ? 'includes planned records' : 'done records only', want('chem') && s.pesticidesOnly ? 'pesticides only' : '',
+      want('crops') && s.allCropYears ? 'crop history: all years' : ''].filter(Boolean).join('; ')],
+    ['Made', `${new Date().toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}${who ? ' by ' + who : ''}`]]);
+  const cropIn = (f, yr) => d.crops.filter((c) => d.idsOf(f).includes(c.field_id) && c.season <= yr && (c.season === yr || (c.multi_year && (c.end_season == null || c.end_season >= yr))));
+  const yEnd = Number(s.to.slice(0, 4));
+  table(['Field', 'Farm unit', 'Block', 'Acres', `Crop ${yEnd}`, 'Chemical records', 'Work records'], d.picked.map((f) => {
+    const ids = d.idsOf(f);
+    return [f.name, f.farm_unit ?? '', f.block ?? '', f.acres != null ? num(f.acres, 1) : '', cropIn(f, yEnd).map((c) => cropName(c.crop_id)).join(', '),
+      want('chem') || want('chemTotals') ? String(d.chem.filter((r) => ids.includes(r.field_id)).length) : '—',
+      want('work') ? String(d.work.filter((r) => ids.includes(r.field_id)).length) : '—'];
+  }), { columnStyles: { 3: { halign: 'right' }, 5: { halign: 'right' }, 6: { halign: 'right' } } });
+  pageField[doc.getNumberOfPages()] = 'Summary';
+
+  // ---- One section per field
+  d.picked.forEach((f, i) => {
+    if (s.perPage || i === 0) { doc.addPage(); y = M; } else { ensure(120); y += 10; }
+    const startPage = doc.getNumberOfPages();
+    const ids = d.idsOf(f);
+    let subs = false; // set per table: only when a row is on a sub-field
+    const anySub = (rows, key = 'field_id') => (subs = rows.some((r) => r[key] !== f.field_id));
+    const subName = (id) => (id === f.field_id ? '' : fieldName(id));
+    h1(fieldTitle(f), [f.acres != null && `${num(f.acres, 1)} acres`, f.farm_unit && `Farm unit ${f.farm_unit}`, f.block && `Block ${f.block}`, tenureOf(f), !f.active && 'Retired'].filter(Boolean).join('  ·  '));
+
+    if (want('summary')) {
+      h2('Field summary');
+      const t = refs.turnouts.find((x) => x.turnout_id === f.turnout_id);
+      const rider = t && refs.riders.find((r) => r.rider_id === t.rider_id);
+      const parent = f.parent_field_id ? fieldById(f.parent_field_id) : null;
+      const leases = refs.leases.filter((l) => [f.field_id, f.parent_field_id].includes(l.field_id) && l.start_date <= s.to && (!l.end_date || l.end_date >= s.from));
+      const eq = refs.equipment.filter((e) => (e.equipment_fields ?? []).some((x) => ids.includes(x.field_id)));
+      kv([['Acres', f.acres != null ? num(f.acres, 1) : ''], ['Farm unit / block', [f.farm_unit, f.block].filter(Boolean).join(' / ')],
+        ['Part of', parent?.name ?? ''], ['Sub-fields', refs.fields.filter((h) => h.parent_field_id === f.field_id).map((h) => `${h.name}${h.acres != null ? ` (${num(h.acres, 0)} ac)` : ''}`).join(', ')],
+        ['Turnout', t ? `${t.name}${rider ? ` · ditch rider ${rider.name}` : ''}` : ''], ['Flow rate', f.flow_rate_cfs != null ? `${Number(f.flow_rate_cfs)} cfs` : ''],
+        ['Tenure today', tenureOf(f)],
+        ['Agreements in period', leases.map((l) => `${{ partnership: 'Partnership', leased_out: 'Leased out' }[l.agreement_type] ?? 'Leased'} – ${l.lessor ?? ''} (${fmtDateYr(l.start_date)} to ${l.end_date ? fmtDateYr(l.end_date) : 'ongoing'})`).join('; ')],
+        ['Irrigation equipment', eq.map((e) => `${e.name}${e.type ? ` (${e.type})` : ''}`).join(', ')],
+        ['Notes', f.notes ?? '']]);
+    }
+
+    if (want('crops')) {
+      h2('Crop history');
+      const y0 = Number(s.from.slice(0, 4)), y1 = Number(s.to.slice(0, 4));
+      const rows = d.crops.filter((c) => ids.includes(c.field_id) && (s.allCropYears ||
+        (c.season <= y1 && (c.multi_year ? (c.end_season ?? 9999) : c.season) >= y0)))
+        .filter((c) => s.planned || c.status !== 'planned')
+        .sort((a, b) => b.season - a.season || a.sequence - b.sequence);
+      anySub(rows);
+      if (!rows.length) note('No crops recorded for these years.');
+      else table([...(subs ? ['Sub-field'] : []), 'Season', 'Crop', 'Variety', 'Planted', 'Acres', 'Grown by / status', 'Contract', 'Yield', 'Notes'], rows.map((c) => [
+        ...(subs ? [subName(c.field_id)] : []),
+        `${seasonSpan(c)}${c.multi_year && c.end_season == null ? ' (still in)' : ''}${c.sequence > 1 ? ` ${SEQ[c.sequence] ?? ''}` : ''}`,
+        cropName(c.crop_id), c.variety ?? '', fmtDateYr(c.planting_date), c.acres != null ? num(c.acres, 1) : '',
+        [c.grown_by ? `Grown by ${c.grown_by}` : '', c.status === 'planned' ? 'Planned' : '', leasedOutIn(c.field_id, c.season) ? 'Leased out' : ''].filter(Boolean).join(', '),
+        [c.contract_company, c.contract_number].filter(Boolean).join(' #'),
+        c.total_yield != null ? `${amtFmt(Number(c.total_yield))} ${c.yield_unit ?? ''}` : '',
+        c.notes ?? '']), { columnStyles: { [subs ? 5 : 4]: { halign: 'right' }, [subs ? 9 : 8]: { cellWidth: 150 } } });
+    }
+
+    const chems = d.chem.filter((r) => ids.includes(r.field_id)).map((r) => ({
+      ...r, lines: r.chemical_event_products.filter((l) => !s.pesticidesOnly || isPesticide(chemById(l.chemical_id))) }))
+      .filter((r) => !s.pesticidesOnly || r.lines.length);
+    if (want('chem')) {
+      h2('Chemical applications');
+      anySub(chems);
+      if (!chems.length) note('No chemical applications recorded in this period.');
+      else {
+        table([...(subs ? ['Sub-field'] : []), 'Date', 'Crop', 'Method / equipment', 'Products (EPA reg. no.) · rate · amount', 'Acres', 'Applied by', 'Weather / times', 'Notes'],
+          chems.map((r) => {
+            const acres = chemAcres(r);
+            return [...(subs ? [subName(r.field_id)] : []),
+              `${fmtDateYr(r.applied_on)}${r.status === 'planned' ? '\nPLANNED' : ''}`,
+              eventCrop(r),
+              [methodName(r.method), r.sprayer_id ? equipName(r.sprayer_id) : '', carrierText(r)].filter(Boolean).join('\n'),
+              r.lines.map((l) => {
+                const c = chemById(l.chemical_id); const tot = lineTotal(l, acres);
+                return `${c?.name ?? '?'}${c?.epa_reg_no ? ` (${c.epa_reg_no})` : ''}${c?.restricted_use ? ' RUP' : ''} · ${rateText(l)}${tot ? ` · ${amountText(tot.amount, tot.unit)}` : ''}`;
+              }).join('\n') || 'No products',
+              acres != null ? num(acres, 1) : '',
+              operatorName(r.performed_by) || r.applied_by_names || '',
+              [wxText(r), r.gust_mph != null ? `gusts ${Number(r.gust_mph)} mph` : ''].filter(Boolean).join('\n'),
+              r.notes ?? ''];
+          }), { columnStyles: { [subs ? 1 : 0]: { cellWidth: 62 }, [subs ? 4 : 3]: { cellWidth: 250 }, [subs ? 5 : 4]: { halign: 'right', cellWidth: 36 }, [subs ? 7 : 6]: { cellWidth: 100 } } });
+        if (chems.some((r) => r.lines.some((l) => l.rate_basis !== 'acre' && l.rate != null))) note('Amounts are worked out only for per-acre rates (rate × acres treated). Rates per tank, per 100 gal or % of volume show the rate only.');
+      }
+    }
+    if (want('chemTotals')) {
+      h2('Chemical totals by product');
+      const tot = new Map();
+      chems.filter((r) => r.status !== 'planned').forEach((r) => r.lines.forEach((l) => {
+        const c = chemById(l.chemical_id); const t = lineTotal(l, chemAcres(r));
+        const key = `${l.chemical_id}|${t?.unit ?? ''}`;
+        const e = tot.get(key) ?? { c, unit: t?.unit ?? '', amount: 0, apps: 0, acres: 0, unknown: 0 };
+        e.apps += 1; e.acres += Number(chemAcres(r) ?? 0);
+        if (t) e.amount += t.amount; else e.unknown += 1;
+        tot.set(key, e);
+      }));
+      const rows = [...tot.values()].sort((a, b) => String(a.c?.name).localeCompare(String(b.c?.name)));
+      if (!rows.length) note('Nothing applied in this period.');
+      else table(['Product', 'Type', 'EPA reg. no.', 'Applications', 'Acres treated', 'Total amount', 'Not totalled'], rows.map((e) => [
+        e.c?.name ?? '?', CHEM_TYPES.find(([k]) => k === e.c?.type)?.[1] ?? '', e.c?.epa_reg_no ?? '', String(e.apps), amtFmt(e.acres),
+        e.amount ? amountText(e.amount, e.unit) : '', e.unknown ? `${e.unknown} (not a per-acre rate)` : '']),
+      { columnStyles: { 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' } } });
+    }
+
+    if (want('work')) {
+      h2('Field work');
+      const rows = d.work.filter((r) => ids.includes(r.field_id));
+      anySub(rows);
+      if (!rows.length) note('No field work recorded in this period.');
+      else table([...(subs ? ['Sub-field'] : []), 'Date', 'Work', 'Equipment', 'Crop', 'Acres', 'Operator', 'Hours', '$/acre', 'Total $', 'Notes'], rows.map((r) => [
+        ...(subs ? [subName(r.field_id)] : []),
+        `${fmtDateYr(r.performed_on)}${r.end_date && r.end_date !== r.performed_on ? " – " + fmtDateYr(r.end_date) : ""}${r.status === 'planned' ? '\nPLANNED' : ''}`,
+        `${workLabel(r.operation)}${r.harvest_stage ? ` – ${stageName(r.harvest_stage)}` : ''}${r.pattern ? `\n${r.pattern}` : ''}`,
+        [r.tractor_id ? equipName(r.tractor_id) : '', r.equipment_id ? equipName(r.equipment_id) : ''].filter(Boolean).join(' + '),
+        cyName(d.crops.find((c) => c.crop_year_id === r.crop_year_id)), r.acres != null ? num(r.acres, 1) : '', operatorName(r.performed_by),
+        r.hours != null ? num(r.hours, 1) : '', r.cost_per_acre != null ? money(r.cost_per_acre) : '', r.cost_total != null ? money(r.cost_total) : '', r.notes ?? '']),
+      { columnStyles: Object.fromEntries([4, 6, 7, 8].map((c) => [c + (subs ? 1 : 0), { halign: 'right' }])) });
+    }
+
+    if (want('harvest')) {
+      h2('Harvest & yield');
+      const cys = d.crops.filter((c) => ids.includes(c.field_id));
+      const rows = d.harvest.filter((h) => cys.some((c) => c.crop_year_id === h.crop_year_id)).sort((a, b) => a.harvested_on.localeCompare(b.harvested_on));
+      if (!rows.length) note('No harvest records in this period.');
+      else table(['Date', 'Crop', 'Stage', 'Yield', 'Acres', 'Moisture', 'Ticket', 'Notes'], rows.map((h) => [
+        fmtDateYr(h.harvested_on), cyName(cys.find((c) => c.crop_year_id === h.crop_year_id)), stageName(h.stage) || h.stage || '',
+        h.yield != null ? `${amtFmt(Number(h.yield))} ${h.unit ?? ''}` : '', h.acres_harvested != null ? num(h.acres_harvested, 1) : '',
+        h.moisture_pct != null ? `${Number(h.moisture_pct)}%` : '', h.ticket_no ?? '', h.notes ?? '']),
+      { columnStyles: { 3: { halign: 'right' }, 4: { halign: 'right' }, 5: { halign: 'right' } } });
+    }
+
+    if (want('water')) {
+      h2('Water orders');
+      // Collapse day-by-day orders into runs: on at X cfs from A to B, then off, and so on.
+      const runs = [];
+      for (const id of ids) {
+        let cur = null;
+        for (const l of d.water.filter((w) => w.field_id === id)) {
+          const k = `${l.is_on}|${l.is_on ? Number(l.cfs ?? 0) : ''}`;
+          if (cur && cur.k === k) { cur.to = l.order_date; cur.days += 1; } else { cur = { id, k, on: l.is_on, cfs: l.cfs, from: l.order_date, to: l.order_date, days: 1 }; runs.push(cur); }
+        }
+      }
+      anySub(runs, 'id');
+      if (!runs.length) note('No water orders for this field in this period. Orders are placed on the main field, not on split halves.');
+      else table([...(subs ? ['Sub-field'] : []), 'From', 'Through', 'Water', 'Flow (cfs)', 'Order days'], runs.map((r) => [
+        ...(subs ? [subName(r.id)] : []), fmtDateYr(r.from), fmtDateYr(r.to), r.on ? 'On' : 'Off', r.on && r.cfs != null ? Number(r.cfs).toString() : '', String(r.days)]),
+      { tableWidth: 460, columnStyles: { [subs ? 4 : 3]: { halign: 'right' }, [subs ? 5 : 4]: { halign: 'right' } } });
+    }
+
+    if (want('irrigation')) {
+      h2('Irrigation equipment & seasonal tasks');
+      const eq = refs.equipment.filter((e) => (e.equipment_fields ?? []).some((x) => ids.includes(x.field_id)));
+      if (!eq.length) note('No pivots, pumps or solid sets are tied to this field.');
+      else {
+        const eqIds = eq.map((e) => e.equipment_id);
+        const tasks = d.tasks.filter((t) => eqIds.includes(t.equipment_id))
+          .sort((a, b) => b.procedure_runs.season - a.procedure_runs.season || equipName(a.equipment_id).localeCompare(equipName(b.equipment_id)));
+        if (tasks.length) { ensure(40); doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(60, 60, 60); text('Seasonal checklists', M, y + 8); y += 13; }
+        if (tasks.length) table(['Season', 'Checklist', 'Equipment', 'Status', 'Completed', 'Steps checked', 'Notes'], tasks.map((t) => [
+          String(t.procedure_runs.season), t.procedure_runs.procedures?.name ?? '', equipName(t.equipment_id), jobStatusName(t.status) || t.status || 'Open',
+          fmtDateYr(t.completed_on), String(t.procedure_checks?.[0]?.count ?? 0), t.notes ?? '']), { columnStyles: { 5: { halign: 'right' } } });
+        else note(`No seasonal checklists for ${eq.map((e) => e.name).join(', ')} in these seasons.`);
+        const jobs = d.jobs.filter((j) => eqIds.includes(j.equipment_id)).sort((a, b) => a.reported_on.localeCompare(b.reported_on));
+        const h3 = (t) => { ensure(40); doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(60, 60, 60); text(t, M, y + 8); y += 13; };
+        if (jobs.length) h3('Repairs and service');
+        if (jobs.length) table(['Reported', 'Equipment', 'Type', 'Problem / work', 'Status', 'Completed', 'Done by', 'Cost', 'Notes'], jobs.map((j) => [
+          fmtDateYr(j.reported_on), equipName(j.equipment_id), j.kind === 'service' ? 'Service' : 'Repair', `${j.title}${j.down ? ' (DOWN)' : ''}${j.description ? `\n${j.description}` : ''}`,
+          jobStatusName(j.status), fmtDateYr(j.completed_on), j.done_by ?? j.vendor ?? '', j.cost != null ? money(j.cost) : '', j.notes ?? '']),
+        { columnStyles: { 3: { cellWidth: 190 }, 7: { halign: 'right' } } });
+        else note('No repairs or service on this equipment in this period.');
+      }
+    }
+    for (let p = startPage; p <= doc.getNumberOfPages(); p++) pageField[p] = pageField[p] ? `${pageField[p]}, ${f.name}` : fieldTitle(f);
+  });
+
+  // ---- Footer on every page
+  const n = doc.getNumberOfPages();
+  const made = localDate();
+  for (let p = 1; p <= n; p++) {
+    doc.setPage(p);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...GREY);
+    text(`Three Point Farms · Field report · ${range}${pageField[p] ? ' · ' + pageField[p] : ''}`, M, H - 20);
+    text(`Made ${made} · Page ${p} of ${n}`, W - M, H - 20, { align: 'right' });
+  }
+  const name = d.picked.length === 1 ? fieldTitle(d.picked[0]) : `${d.picked.length} fields`;
+  const file = `Field report - ${name} - ${s.from} to ${s.to}.pdf`.replace(/[\\/:*?"<>|]/g, '-');
+  // iPhone home-screen apps can't download; share the file instead when that's the only way out.
+  const blob = doc.output('blob');
+  const standalone = window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone;
+  const pdfFile = typeof File === 'function' ? new File([blob], file, { type: 'application/pdf' }) : null;
+  if (standalone && pdfFile && navigator.canShare?.({ files: [pdfFile] })) {
+    try { await navigator.share({ files: [pdfFile], title: file }); return; } catch (e) { if (e?.name === 'AbortError') return; }
+  }
+  doc.save(file);
 }
 
 const norm = (v) => String(v ?? '').trim().toLowerCase();
