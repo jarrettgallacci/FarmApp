@@ -294,6 +294,7 @@ const CRUD = {
       { key: 'engine_serial', label: 'Engine serial', type: 'text' },
       { key: 'towers', label: 'Number of towers', listLabel: 'Towers', type: 'number', step: '1' },
       { key: 'corner_arm', label: 'Has a corner machine', type: 'checkbox' },
+      { key: 'full_lap_hr', label: 'Lap time at 100% speed (hours)', type: 'number', step: 'any' },
       { key: 'hp', label: 'Horsepower (pumps)', type: 'number', step: '0.1' },
       { key: 'frame_size', label: 'Frame size (pumps)', type: 'text' },
       { key: 'meter_no', label: 'Meter number (pumps)', type: 'text' },
@@ -3989,7 +3990,7 @@ function narrowTypeChoices(form, row) {
 const ENGINE_RE = /tractor|combine|swather|windrower|sprayer|pickup|truck|loader|forklift|scraper|blade|excavat|backhoe|skid/i;
 const IRRIG_RE = /pivot|solid ?set|handline|hand line|wheel ?line|pump|mainline|well/i;
 const TYPE_FIELDS = [
-  [/pivot/i, ['towers', 'corner_arm']],
+  [/pivot/i, ['towers', 'corner_arm', 'full_lap_hr']],
   [/pump/i, ['hp', 'frame_size', 'meter_no', 'vfd']],
   [/planter|drill/i, ['planting_settings']],
   [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow|planter|drill|cultivat|corrugat|dammer|toolbar|bedder|bean cutter|header|digger|combine|swather|windrower|sprayer|implement/i, ['cost_per_acre']],
@@ -5719,8 +5720,10 @@ const CG_UNITS = [['fl oz', 'fl oz', 'liq', 1 / 128], ['oz', 'oz (wt)', 'dry', 1
   ['gal', 'gal', 'liq', 1], ['lb', 'lb', 'dry', 1]];
 const cgUnit = (u) => CG_UNITS.find((x) => x[0] === u) ?? CG_UNITS[0];
 function renderChemigator(box) {
-  let st = { field: '', acres: '', gph: '', hours: '', tank: 500, lines: [{ name: '', rate: '', unit: 'fl oz' }] };
+  let st = { field: '', acres: '', gph: '20', hours: '', lap: '', pct: '100', minMix: 60, tank: 500, lines: [{ name: '', rate: '', unit: 'fl oz' }] };
   try { st = { ...st, ...JSON.parse(localStorage.getItem('cg-load') || '{}') }; } catch { /* storage unavailable */ }
+  // The field's pivot (one pivot per pivot field) holds the lap time at 100% speed.
+  const pivotFor = (fid) => refs.equipment.find((e) => e.active !== false && /pivot/i.test(e.type ?? '') && (e.equipment_fields ?? []).some((x) => x.field_id === Number(fid)));
   if (!Array.isArray(st.lines) || !st.lines.length) st.lines = [{ name: '', rate: '', unit: 'fl oz' }];
   const save = () => { try { localStorage.setItem('cg-load', JSON.stringify(st)); } catch { /* ignore */ } };
   const chems = refs.chemicals.filter((c) => c.active !== false);
@@ -5755,11 +5758,18 @@ function renderChemigator(box) {
           <datalist id="cg-chems">${chems.map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>
           <button type="button" class="small" data-act="add">+ Add product</button>
           <div class="row2">
+            <label>Lap at 100% speed (hours)<input type="number" inputmode="decimal" step="any" min="0" data-k="lap" value="${esc(st.lap)}"></label>
+            <label>Pivot speed (%)<input type="number" inputmode="decimal" step="any" min="1" max="100" data-k="pct" value="${esc(st.pct)}"></label>
+          </div>
+          <div class="muted small" id="cg-lap"></div>
+          <div class="row2">
             <label>Injection rate (gal/hr)<input type="number" inputmode="decimal" step="any" min="0" data-k="gph" value="${esc(st.gph)}"></label>
             <label>Application time (hours)<input type="number" inputmode="decimal" step="any" min="0" data-k="hours" value="${esc(st.hours)}"></label>
           </div>
-          <details class="cal-adv"><summary>Chemigator tank</summary>
-            <label>Usable tank size (gal)<input type="number" inputmode="decimal" step="any" min="1" data-k="tank" value="${esc(st.tank)}"></label>
+          <div id="cg-speed"></div>
+          <details class="cal-adv"><summary>Minimum mix and tank size</summary>
+            <div class="row2"><label>Mix at least (gal)<input type="number" inputmode="decimal" step="any" min="0" data-k="minMix" value="${esc(st.minMix)}"></label>
+            <label>Usable tank size (gal)<input type="number" inputmode="decimal" step="any" min="1" data-k="tank" value="${esc(st.tank)}"></label></div>
           </details>
           <button type="button" class="ghost small" data-act="clear">Clear</button>
         </div>
@@ -5770,7 +5780,34 @@ function renderChemigator(box) {
   };
 
   const calc = () => {
-    const ac = Number(st.acres), gph = Number(st.gph), hrs = Number(st.hours), tank = Number(st.tank) || 500;
+    const ac = Number(st.acres), gph = Number(st.gph), tank = Number(st.tank) || 500;
+    const lap = Number(st.lap), pct = Math.min(100, Number(st.pct)), minMix = Number(st.minMix) || 0;
+    // With a lap time, the application time is one lap at the set speed (speed % = percent timer).
+    const fromLap = lap > 0 && pct > 0;
+    const hrs = fromLap ? lap * 100 / pct : Number(st.hours);
+    const hrsIn = $('[data-k=hours]', box);
+    hrsIn.readOnly = fromLap;
+    if (fromLap) { st.hours = String(Math.round(hrs * 100) / 100); if (document.activeElement !== hrsIn) hrsIn.value = st.hours; }
+    const piv = pivotFor(st.field);
+    const saved = piv?.full_lap_hr != null ? Number(piv.full_lap_hr) : null;
+    $('#cg-lap', box).innerHTML = !st.field ? ''
+      : !piv ? 'No pivot is linked to this field in Setup → Equipment. Enter the time directly.'
+      : `${esc(piv.name)}: ${saved != null ? `saved lap ${r2(saved)} hr at 100%.` : 'no lap time saved yet.'}${lap > 0 && lap !== saved ? ` <button type="button" class="small" data-act="save-lap">Save ${r2(lap)} hr to ${esc(piv.name)}</button>` : ''}`;
+    const sl = $('[data-act=save-lap]', box);
+    if (sl) sl.onclick = async () => {
+      sl.disabled = true;
+      const r = await sb.from('equipment').update({ full_lap_hr: lap }).eq('equipment_id', piv.equipment_id);
+      if (r.error) { toast(/full_lap_hr/.test(r.error.message ?? '') ? 'Run pivot_lap_time.sql in Supabase first' : r.error.message, true); sl.disabled = false; return; }
+      piv.full_lap_hr = lap; toast('Lap time saved'); calc();
+    };
+    // Fastest speed that still uses at least the minimum mix at this injection rate.
+    const maxPct = lap > 0 && gph > 0 && minMix > 0 ? Math.min(100, Math.floor((lap * gph / minMix) * 100)) : null;
+    $('#cg-speed', box).innerHTML = maxPct == null ? '' : `<div class="cal-stat ${pct > maxPct ? 'warn' : 'ok'}"><span class="stat-label">Pivot speed for at least ${r1(minMix)} gal of mix</span>
+      <span>${maxPct >= 100 ? `Any speed works. At 100% the lap takes ${r2(lap)} hr and uses ${r1(lap * gph)} gal.`
+        : `Run at <b>${maxPct}%</b> or slower (${r2(lap * 100 / maxPct)} hr lap). At 100% the lap takes ${r2(lap)} hr and uses only ${r1(lap * gph)} gal at ${r2(gph)} gal/hr.`}</span>
+      ${pct > maxPct ? `<button type="button" class="small" data-act="use-pct">Use ${maxPct}%</button>` : ''}</div>`;
+    const up = $('[data-act=use-pct]', box);
+    if (up) up.onclick = () => { st.pct = String(maxPct); save(); draw(); };
     const lines = st.lines.filter((l) => l.name.trim() && Number(l.rate) > 0);
     const total = gph > 0 && hrs > 0 ? gph * hrs : null;
     const prods = ac > 0 ? lines.map((l) => {
@@ -5808,7 +5845,8 @@ function renderChemigator(box) {
       const missing = prods.filter((p) => !chemFor(p.name));
       if (missing.length) { toast(`Add ${missing.map((p) => p.name).join(', ')} in Setup → Chemicals first`, true); return; }
       openChemForm({ fieldIds: [Number(st.field)], method: 'chemigation', status: 'planned',
-        values: { runtime_hr: hrs > 0 ? hrs : null, injection_gph: gph > 0 ? gph : null, acres_treated: ac },
+        values: { runtime_hr: hrs > 0 ? Math.round(hrs * 100) / 100 : null, injection_gph: gph > 0 ? gph : null, acres_treated: ac,
+          pivot_speed_pct: fromLap ? pct : null },
         lines: prods.map((p) => ({ chemical_id: chemFor(p.name).chemical_id, rate: Number(p.rate), rate_unit: p.unit, rate_basis: 'acre' })) });
     };
   };
@@ -5817,7 +5855,12 @@ function renderChemigator(box) {
     // Inputs recalc as you type; only selects redraw on change (a redraw on blur would eat the next tap).
     $$('[data-k]', box).forEach((i) => (i[i.tagName === 'SELECT' ? 'onchange' : 'oninput'] = () => {
       st[i.dataset.k] = i.value;
-      if (i.dataset.k === 'field') { const f = fieldById(i.value); st.acres = f?.acres != null ? String(Number(f.acres)) : ''; save(); draw(); return; }
+      if (i.dataset.k === 'field') {
+        const f = fieldById(i.value), pv = pivotFor(i.value);
+        st.acres = f?.acres != null ? String(Number(f.acres)) : '';
+        st.lap = pv?.full_lap_hr != null ? String(Number(pv.full_lap_hr)) : '';
+        save(); draw(); return;
+      }
       save(); calc();
     }));
     $$('[data-ln]', box).forEach((i) => (i[i.tagName === 'SELECT' ? 'onchange' : 'oninput'] = () => {
@@ -5825,7 +5868,7 @@ function renderChemigator(box) {
     }));
     $$('[data-rm]', box).forEach((b) => (b.onclick = () => { st.lines.splice(Number(b.dataset.rm), 1); save(); draw(); }));
     $('[data-act=add]', box).onclick = () => { st.lines.push({ name: '', rate: '', unit: 'fl oz' }); save(); draw(); $$('.cg-line .l-name', box).at(-1)?.focus(); };
-    $('[data-act=clear]', box).onclick = () => { st = { ...st, field: '', acres: '', gph: '', hours: '', lines: [{ name: '', rate: '', unit: 'fl oz' }] }; save(); draw(); };
+    $('[data-act=clear]', box).onclick = () => { st = { ...st, field: '', acres: '', hours: '', lap: '', pct: '100', lines: [{ name: '', rate: '', unit: 'fl oz' }] }; save(); draw(); };
   };
   draw();
 }
