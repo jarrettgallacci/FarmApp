@@ -1074,3 +1074,5 @@ html[data-style="gsp"] .stat-value { font-weight: 800; }
 .cg-line .cg-note { grid-column: 1 / -1; margin-top: -.2rem; }
 @media (max-width: 560px) { .cg-line { grid-template-columns: 1fr 1fr auto; } .cg-line .l-name { grid-column: 1 / -1; } }
 .cg-list { list-style: none; margin: .2rem 0; padding: 0; display: flex; flex-direction: column; gap: .2rem; }
+.line.split { grid-template-columns: 1fr 5.5rem 4.5rem 6.5rem 7.5rem auto; }
+@media (max-width: 560px) { .line.split { grid-template-columns: 1fr 1fr 1fr auto; } .line.split .l-grp { grid-column: 1 / -2; } }

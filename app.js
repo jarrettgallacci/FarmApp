@@ -3334,6 +3334,8 @@ async function openChemForm(opts, onDone) {
     <div class="lines-head"><b>Products</b><span class="muted small">Start typing a product name</span></div>
     <div id="lines"></div>
     <button type="button" class="small" data-act="add-line">+ Add product</button>
+    ${!ev && !asLoad ? `<label class="check"><input type="checkbox" name="split" ${opts.split ? 'checked' : ''}> Split into separate records</label>
+      <p class="muted small">For KWS beets and anything billed per chemical. Give each product a record number; products with the same number share a record.</p>` : ''}
     <datalist id="chem-options"></datalist>
     ${asLoad ? `<label class="check"><input type="checkbox" name="record_times" checked> Record start/stop times and weather for each field <span class="muted small">(required for pesticides; uncheck for fertilizer-only loads)</span></label>`
       : `<details class="wx-fields" ${ev?.started_at || ev?.wind_mph != null ? 'open' : ''}><summary>Times and weather <span class="muted small">(required for pesticides)</span></summary>
@@ -3374,12 +3376,14 @@ async function openChemForm(opts, onDone) {
     $('#chem-options', dlg).innerHTML = list.map((c) => `<option value="${esc(c.name)}">${esc(CHEM_TYPES.find(([k]) => k === c.type)?.[1] ?? '')}</option>`).join('');
   };
   const drawLines = () => {
-    $('#lines', dlg).innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}">
+    const split = !!el.split?.checked;
+    $('#lines', dlg).innerHTML = lines.map((l, i) => `<div class="line${split ? ' split' : ''}" data-i="${i}">
       <input class="l-name" list="chem-options" placeholder="Product" value="${esc(chemById(l.chemical_id)?.name ?? l.name ?? '')}" autocomplete="off">
       <input class="l-rate" type="number" step="any" min="0" placeholder="Rate" value="${esc(l.rate ?? '')}">
       <select class="l-unit">${RATE_UNITS.map((u) => `<option ${l.rate_unit === u ? 'selected' : ''}>${u}</option>`).join('')}</select>
       <select class="l-basis">${BASES.map(([k, t]) => `<option value="${k}" ${(l.rate_basis ?? 'acre') === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
       <input class="l-tank" type="number" step="any" min="0" placeholder="Tank gal" value="${esc(l.tank_gal ?? '')}" ${l.rate_basis === 'tank' ? '' : 'hidden'}>
+      ${split ? `<select class="l-grp" aria-label="Record">${lines.map((_, k) => `<option value="${k + 1}" ${Number(l.grp) === k + 1 ? 'selected' : ''}>Record ${k + 1}</option>`).join('')}</select>` : ''}
       <button type="button" class="small ghost" data-rm="${i}" aria-label="Remove">✕</button>
       ${l.rate == null && l.rate_text ? `<span class="muted small l-orig">Recorded as "${esc(l.rate_text)}"</span>` : ''}
     </div>`).join('');
@@ -3390,6 +3394,7 @@ async function openChemForm(opts, onDone) {
       $('.l-unit', row).onchange = (e) => { l.rate_unit = e.target.value; };
       $('.l-basis', row).onchange = (e) => { l.rate_basis = e.target.value; $('.l-tank', row).hidden = e.target.value !== 'tank'; };
       $('.l-tank', row).oninput = (e) => { l.tank_gal = e.target.value === '' ? null : Number(e.target.value); };
+      const g = $('.l-grp', row); if (g) g.onchange = (e) => { l.grp = Number(e.target.value); };
     });
     $$('[data-rm]', dlg).forEach((b) => (b.onclick = () => { lines.splice(Number(b.dataset.rm), 1); drawLines(); }));
   };
@@ -3417,7 +3422,11 @@ async function openChemForm(opts, onDone) {
   } else el.field_id.onchange = showCrop;
   el.applied_on.onchange = showCrop;
   el.method.onchange = syncMethod;
-  $('[data-act=add-line]', dlg).onclick = () => { lines.push({ rate_unit: 'oz', rate_basis: 'acre' }); drawLines(); $$('.l-name', dlg).at(-1)?.focus(); };
+  // Split: each product starts as its own record; products given the same number share one.
+  const fillGroups = () => lines.forEach((l, i) => { if (!(Number(l.grp) > 0)) l.grp = i + 1; });
+  if (el.split) el.split.onchange = () => { if (el.split.checked) fillGroups(); drawLines(); };
+  if (el.split?.checked) fillGroups();
+  $('[data-act=add-line]', dlg).onclick = () => { lines.push({ rate_unit: 'oz', rate_basis: 'acre', grp: lines.length + 1 }); drawLines(); $$('.l-name', dlg).at(-1)?.focus(); };
   $('[data-act=cancel]', dlg).onclick = () => dlg.close();
   drawLines();
   syncMethod();
@@ -3480,7 +3489,7 @@ async function openChemForm(opts, onDone) {
       injection_gph: method === 'chemigation' ? numOrNull('injection_gph') : null,
       notes: val('notes') || null,
     };
-    const lineRows = (eventId) => used.map((l, i) => ({
+    const lineRows = (eventId, set = used) => set.map((l, i) => ({
       event_id: eventId, chemical_id: l.chemical_id, position: i + 1,
       rate: l.rate ?? null, rate_unit: l.rate == null ? null : l.rate_unit ?? 'oz', rate_basis: l.rate == null ? null : l.rate_basis ?? 'acre',
       tank_gal: l.rate_basis === 'tank' ? l.tank_gal ?? null : null,
@@ -3489,6 +3498,8 @@ async function openChemForm(opts, onDone) {
     const btn = $('button[type=submit]', form);
     btn.disabled = true;
     try {
+      const groups = !ev && !asLoad && el.split?.checked ? [...new Set(used.map((l) => Number(l.grp) || 1))].sort((a, b) => a - b) : [null];
+      let made = 0;
       const tapped = (opts.fieldIds ?? []).filter((id) => ids.includes(id));
       const ordered = !asLoad ? ids : opts.keepOrder
         ? [...tapped, ...fieldsInOrder().map((f) => f.field_id).filter((id) => ids.includes(id) && !tapped.includes(id))]
@@ -3505,14 +3516,27 @@ async function openChemForm(opts, onDone) {
           await q(sb.from('chemical_events').update(row).eq('event_id', ev.event_id));
           await q(sb.from('chemical_event_products').delete().eq('event_id', ev.event_id));
           eventId = ev.event_id;
+        } else if (groups.length > 1) {
+          // One record per group. The first carries the application cost; the rest point back to it
+          // with split_of, so cost isn't counted twice and the tank mix can be traced.
+          let first = null;
+          for (const g of groups) {
+            const part = { ...row, ...(first ? { split_of: first, app_cost_per_acre: null, app_cost_basis: 'split' } : {}) };
+            const id = (await q(sb.from('chemical_events').insert(part).select('event_id').single())).event_id;
+            first ??= id;
+            await q(sb.from('chemical_event_products').insert(lineRows(id, used.filter((l) => Number(l.grp) === g))));
+            made++;
+          }
+          continue;
         } else {
           eventId = (await q(sb.from('chemical_events').insert(row).select('event_id').single())).event_id;
         }
+        made++;
         if (used.length) await q(sb.from('chemical_event_products').insert(lineRows(eventId)));
       }
       rotationCache.at = 0;
       dlg.close();
-      toast(asLoad ? `Load created with ${ids.length} field(s)` : ids.length > 1 ? `Saved ${ids.length} records` : 'Saved');
+      toast(asLoad ? `Load created with ${ids.length} field(s)` : made > 1 ? `Saved ${made} records` : 'Saved');
       onDone?.();
       if (asLoad) openLoad(loadId, onDone);
     } catch {
@@ -5759,7 +5783,7 @@ function renderChemigator(box) {
           <button type="button" class="small" data-act="add">+ Add product</button>
           <div class="row2">
             <label>Lap at 100% speed (hours)<input type="number" inputmode="decimal" step="any" min="0" data-k="lap" value="${esc(st.lap)}"></label>
-            <label>Pivot speed (%)<input type="number" inputmode="decimal" step="any" min="1" max="100" data-k="pct" value="${esc(st.pct)}"></label>
+            <label>Pivot speed (%)<input type="number" inputmode="decimal" step="0.1" min="0.1" max="100" data-k="pct" value="${esc(st.pct)}"></label>
           </div>
           <div class="muted small" id="cg-lap"></div>
           <div class="row2">
@@ -5801,11 +5825,11 @@ function renderChemigator(box) {
       piv.full_lap_hr = lap; toast('Lap time saved'); calc();
     };
     // Fastest speed that still uses at least the minimum mix at this injection rate.
-    const maxPct = lap > 0 && gph > 0 && minMix > 0 ? Math.min(100, Math.floor((lap * gph / minMix) * 100)) : null;
+    const maxPct = lap > 0 && gph > 0 && minMix > 0 ? Math.min(100, Math.floor((lap * gph / minMix) * 1000) / 10) : null;
     $('#cg-speed', box).innerHTML = maxPct == null ? '' : `<div class="cal-stat ${pct > maxPct ? 'warn' : 'ok'}"><span class="stat-label">Pivot speed for at least ${r1(minMix)} gal of mix</span>
       <span>${maxPct >= 100 ? `Any speed works. At 100% the lap takes ${r2(lap)} hr and uses ${r1(lap * gph)} gal.`
-        : `Run at <b>${maxPct}%</b> or slower (${r2(lap * 100 / maxPct)} hr lap). At 100% the lap takes ${r2(lap)} hr and uses only ${r1(lap * gph)} gal at ${r2(gph)} gal/hr.`}</span>
-      ${pct > maxPct ? `<button type="button" class="small" data-act="use-pct">Use ${maxPct}%</button>` : ''}</div>`;
+        : `Run at <b>${maxPct.toFixed(1)}%</b> or slower (${r2(lap * 100 / maxPct)} hr lap). At 100% the lap takes ${r2(lap)} hr and uses only ${r1(lap * gph)} gal at ${r2(gph)} gal/hr.`}</span>
+      ${pct > maxPct ? `<button type="button" class="small" data-act="use-pct">Use ${maxPct.toFixed(1)}%</button>` : ''}</div>`;
     const up = $('[data-act=use-pct]', box);
     if (up) up.onclick = () => { st.pct = String(maxPct); save(); draw(); };
     const lines = st.lines.filter((l) => l.name.trim() && Number(l.rate) > 0);
