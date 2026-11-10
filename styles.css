@@ -1076,3 +1076,16 @@ html[data-style="gsp"] .stat-value { font-weight: 800; }
 .cg-list { list-style: none; margin: .2rem 0; padding: 0; display: flex; flex-direction: column; gap: .2rem; }
 .line.split { grid-template-columns: 1fr 5.5rem 4.5rem 6.5rem 7.5rem auto; }
 @media (max-width: 560px) { .line.split { grid-template-columns: 1fr 1fr 1fr auto; } .line.split .l-grp { grid-column: 1 / -2; } }
+
+/* Reports (Tools → Reports) */
+.report-grid { display: grid; gap: 1.2rem; }
+@media (min-width: 900px) { .report-grid { grid-template-columns: 1fr 1fr; align-items: start; } }
+.report-grid h4 { margin: .8rem 0 .4rem; }
+.report-grid .row.wrap { flex-wrap: wrap; gap: .4rem; }
+.report-grid input[type=search] { flex: 1 1 12rem; min-width: 0; }
+.report-grid .chips button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.report-fields { max-height: 26rem; overflow-y: auto; border: 1px solid var(--border, #ddd); border-radius: 8px; padding: .3rem .6rem; }
+.report-grid label.check { display: flex; flex-direction: row; align-items: flex-start; gap: .5rem; margin: .35rem 0; font-weight: 400; }
+.report-grid label.check input { margin-top: .2rem; flex: none; }
+.report-fields label.check.sub { margin-left: 1.4rem; }
+.report-grid .row.wrap label { display: flex; flex-direction: column; font-size: .85rem; }
