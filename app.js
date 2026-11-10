@@ -3141,7 +3141,7 @@ const METHODS = [['spray', 'Spray'], ['chemigation', 'Chemigation'], ['spread', 
 const methodName = (m) => METHODS.find(([k]) => k === m)?.[1] ?? '—';
 const CHEM_TYPES = [['herbicide', 'Herbicide'], ['insecticide', 'Insecticide'], ['fungicide', 'Fungicide'], ['fertilizer', 'Fertilizer'],
   ['adjuvant', 'Adjuvant'], ['soil_amendment', 'Soil amendment'], ['growth_regulator', 'Growth regulator'], ['other', 'Other']];
-const RATE_UNITS = ['oz', 'pt', 'qt', 'gal', 'lb', '%'];
+const RATE_UNITS = ['oz', 'fl oz', 'pt', 'qt', 'gal', 'lb', '%'];
 const BASES = [['acre', '/acre'], ['100gal', '/100 gal'], ['tank', '/tank'], ['total', 'total'], ['volume', 'of volume']];
 const chemById = (id) => refs.chemicals.find((c) => c.chemical_id === id);
 const operatorName = (id) => refs.operators.find((o) => o.operator_id === id)?.name ?? '';
@@ -3279,8 +3279,8 @@ async function cropFor(fieldId, date) {
 async function openChemForm(opts, onDone) {
   const ev = opts.event;
   const asLoad = !!opts.asLoad;
-  const v = ev ?? { applied_on: opts.date ?? localDate(), status: asLoad ? 'planned' : opts.status ?? 'done', method: opts.method ?? 'spray' };
-  const lines = ev ? ev.chemical_event_products.map((l) => ({ ...l })) : [{ rate_unit: 'oz', rate_basis: 'acre' }];
+  const v = ev ?? { applied_on: opts.date ?? localDate(), status: asLoad ? 'planned' : opts.status ?? 'done', method: opts.method ?? 'spray', ...(opts.values ?? {}) };
+  const lines = ev ? ev.chemical_event_products.map((l) => ({ ...l })) : opts.lines?.length ? opts.lines.map((l) => ({ ...l })) : [{ rate_unit: 'oz', rate_basis: 'acre' }];
   let selected = new Set(ev ? [ev.field_id] : opts.fieldIds ?? []);
   const fields = fieldsInOrder().filter((f) => f.active || selected.has(f.field_id));
   const chems = [...refs.chemicals].filter((c) => c.active !== false);
@@ -3497,6 +3497,7 @@ async function openChemForm(opts, onDone) {
         const keepLink = ev && ev.field_id === fid && ev.crop_year_id && crops.some((c) => c.crop_year_id === ev.crop_year_id);
         const row = { ...base, field_id: fid, crop_year_id: keepLink ? ev.crop_year_id : crops[0]?.crop_year_id ?? null };
         if (asLoad) { row.queue_pos = n + 1; row.acres_treated = fieldById(fid)?.acres ?? null; }
+        else if (!ev && opts.values?.acres_treated != null && ordered.length === 1) row.acres_treated = opts.values.acres_treated;
         if (ev) { delete row.load_id; }
         let eventId;
         if (ev) {
@@ -5489,6 +5490,7 @@ const TOOLS = [
   { id: 'gp-cal', title: 'Great Plains drill calibration', blurb: 'Grams from one seed tube over 0.1 acre → lb/acre', render: renderGpCal },
   { id: 'ss-cal', title: 'Seed Spider calibration', blurb: 'Grams from one bin over a timed run → lb/acre at your speed', render: renderSsCal },
   { id: 'mono', title: 'Monosem sprockets', blurb: 'Seed plate + spacing → transmission sprockets', render: renderMonoCal },
+  { id: 'chemigator', title: 'Chemigator load', blurb: 'Products, rates and injection → total product, water and fills', render: renderChemigator },
   { id: 'voice', title: 'Voice & Siri', blurb: 'Speak a record; set up Siri', render: renderVoiceHelp },
 ];
 
@@ -5707,6 +5709,123 @@ async function renderGpCal(box) {
     $$('[data-rm-tube]', box).forEach((b) => (b.onclick = () => { st.tubes.splice(Number(b.dataset.rmTube), 1); save(); draw(); }));
     $('[data-act=add-tube]', box).onclick = () => { st.tubes.push(''); save(); draw(); $$('[data-tube]', box).at(-1)?.focus(); };
     $('[data-act=clear]', box).onclick = () => { st.target = ''; st.tubes = ['']; save(); draw(); };
+  };
+  draw();
+}
+
+// Chemigator load builder: products at per-acre rates over a field, injected at a set gal/hr for a set time.
+// Totals per product, water to add, and how to split it into chemigator fills.
+const CG_UNITS = [['fl oz', 'fl oz', 'liq', 1 / 128], ['oz', 'oz (wt)', 'dry', 1 / 16], ['pt', 'pt', 'liq', 1 / 8], ['qt', 'qt', 'liq', 1 / 4],
+  ['gal', 'gal', 'liq', 1], ['lb', 'lb', 'dry', 1]];
+const cgUnit = (u) => CG_UNITS.find((x) => x[0] === u) ?? CG_UNITS[0];
+function renderChemigator(box) {
+  let st = { field: '', acres: '', gph: '', hours: '', tank: 500, lines: [{ name: '', rate: '', unit: 'fl oz' }] };
+  try { st = { ...st, ...JSON.parse(localStorage.getItem('cg-load') || '{}') }; } catch { /* storage unavailable */ }
+  if (!Array.isArray(st.lines) || !st.lines.length) st.lines = [{ name: '', rate: '', unit: 'fl oz' }];
+  const save = () => { try { localStorage.setItem('cg-load', JSON.stringify(st)); } catch { /* ignore */ } };
+  const chems = refs.chemicals.filter((c) => c.active !== false);
+  const chemFor = (name) => chems.find((c) => c.name.toLowerCase() === String(name ?? '').trim().toLowerCase());
+  const fields = fieldsInOrder().filter((f) => f.active !== false);
+  const r2 = (v) => (Math.round(v * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const r1 = (v) => (Math.round(v * 10) / 10).toLocaleString(undefined, { maximumFractionDigits: 1 });
+  // An amount in the unit it was entered in, plus gal or lb when that reads better.
+  const amt = (v, u) => {
+    const [code, , kind, f] = cgUnit(u);
+    const big = kind === 'liq' ? `${r2(v * f)} gal` : `${r2(v * f)} lb`;
+    return code === 'gal' || code === 'lb' ? big : `${r1(v)} ${code} <span class="muted">(${big})</span>`;
+  };
+
+  const draw = () => {
+    box.innerHTML = `
+      <h3>Chemigator load</h3>
+      <div class="cal-grid">
+        <div class="cal-inputs">
+          <div class="row2">
+            <label>Field<select data-k="field"><option value="">—</option>${fields.map((f) => `<option value="${f.field_id}" ${Number(st.field) === f.field_id ? 'selected' : ''}>${f.parent_field_id ? '↳ ' : ''}${esc(f.name)}</option>`).join('')}</select></label>
+            <label>Acres<input type="number" inputmode="decimal" step="any" min="0" data-k="acres" value="${esc(st.acres)}"></label>
+          </div>
+          <div class="lines-head"><b>Products</b><span class="muted small">Rates per acre</span></div>
+          ${st.lines.map((l, i) => `<div class="cg-line">
+              <input class="l-name" list="cg-chems" placeholder="Product" data-ln="${i}" data-lk="name" value="${esc(l.name)}" autocomplete="off">
+              <input type="number" inputmode="decimal" step="any" min="0" placeholder="Rate" data-ln="${i}" data-lk="rate" value="${esc(l.rate)}">
+              <select data-ln="${i}" data-lk="unit">${CG_UNITS.map(([k, t]) => `<option value="${k}" ${l.unit === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+              <button type="button" class="icon" data-rm="${i}" aria-label="Remove product" ${st.lines.length > 1 ? '' : 'hidden'}>✕</button>
+              <span class="muted small cg-note" data-cgnote="${i}" hidden></span>
+            </div>`).join('')}
+          <datalist id="cg-chems">${chems.map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>
+          <button type="button" class="small" data-act="add">+ Add product</button>
+          <div class="row2">
+            <label>Injection rate (gal/hr)<input type="number" inputmode="decimal" step="any" min="0" data-k="gph" value="${esc(st.gph)}"></label>
+            <label>Application time (hours)<input type="number" inputmode="decimal" step="any" min="0" data-k="hours" value="${esc(st.hours)}"></label>
+          </div>
+          <details class="cal-adv"><summary>Chemigator tank</summary>
+            <label>Usable tank size (gal)<input type="number" inputmode="decimal" step="any" min="1" data-k="tank" value="${esc(st.tank)}"></label>
+          </details>
+          <button type="button" class="ghost small" data-act="clear">Clear</button>
+        </div>
+        <div class="cal-out" id="cg-out"></div>
+      </div>`;
+    calc();
+    wire();
+  };
+
+  const calc = () => {
+    const ac = Number(st.acres), gph = Number(st.gph), hrs = Number(st.hours), tank = Number(st.tank) || 500;
+    const lines = st.lines.filter((l) => l.name.trim() && Number(l.rate) > 0);
+    const total = gph > 0 && hrs > 0 ? gph * hrs : null;
+    const prods = ac > 0 ? lines.map((l) => {
+      const [, , kind, f] = cgUnit(l.unit);
+      const amount = Number(l.rate) * ac;
+      return { ...l, amount, kind, gal: kind === 'liq' ? amount * f : 0 };
+    }) : [];
+    const chemGal = prods.reduce((a, p) => a + p.gal, 0);
+    const water = total != null ? total - chemGal : null;
+    const fills = total != null ? Math.max(1, Math.ceil(total / tank - 1e-9)) : 1;
+    const dry = prods.some((p) => p.kind === 'dry');
+    st.lines.forEach((l, i) => {
+      const c = chemFor(l.name), n = $(`[data-cgnote="${i}"]`, box);
+      n.innerHTML = c?.chemigation ? `Label: ${esc(c.chemigation)}` : l.name.trim() && !c ? 'Not in your chemical list. Add it in Setup → Chemicals before making a record.' : '';
+      n.hidden = !n.innerHTML;
+    });
+    const out = $('#cg-out', box);
+    if (!(ac > 0) || !prods.length) { out.innerHTML = '<p class="muted small">Enter acres and at least one product with a rate.</p>'; return; }
+    out.innerHTML = `
+      <div class="cal-stat"><span class="stat-label">Total product</span>
+        <ul class="cg-list">${prods.map((p) => `<li><b>${esc(p.name)}</b> ${amt(p.amount, p.unit)}</li>`).join('')}</ul>
+        <span class="muted small">${r1(ac)} acres</span></div>
+      <div class="cal-stat ${water != null && water < 0 ? 'bad' : ''}"><span class="stat-label">Water to add</span>
+        <span class="stat-value">${water != null ? r1(Math.max(0, water)) : '—'}<small> gal</small></span>
+        <span class="muted small">${total != null ? `${r1(total)} gal of solution (${r2(gph)} gal/hr × ${r2(hrs)} hr) minus ${r1(chemGal)} gal of liquid product${dry ? '. Dry product isn’t subtracted; it adds very little volume.' : '.'}` : 'Enter the injection rate and application time.'}
+        ${water != null && water < 0 ? '<br><b>The liquid product alone is more than the solution. Raise the injection rate or the time.</b>' : ''}</span></div>
+      ${total != null && water >= 0 ? `<div class="cal-stat ${fills > 1 ? 'warn' : 'ok'}"><span class="stat-label">${fills > 1 ? `${fills} fills of the ${r1(tank)} gal tank` : `One fill (${r1(tank)} gal tank)`}</span>
+        ${fills > 1 ? '<span class="muted small">Each fill:</span>' : ''}
+        <ul class="cg-list"><li>Water <b>${r1(water / fills)} gal</b></li>${prods.map((p) => `<li>${esc(p.name)} <b>${amt(p.amount / fills, p.unit)}</b></li>`).join('')}</ul>
+        <span class="muted small">${r1(total / fills)} gal of solution per fill · ${r2(ac / hrs)} acres per hour</span></div>` : ''}
+      <button type="button" class="primary" data-act="record" ${st.field ? '' : 'disabled'}>Make chemical record</button>
+      ${st.field ? '' : '<span class="muted small">Pick a field to make a record.</span>'}`;
+    const rec = $('[data-act=record]', out);
+    if (rec) rec.onclick = () => {
+      const missing = prods.filter((p) => !chemFor(p.name));
+      if (missing.length) { toast(`Add ${missing.map((p) => p.name).join(', ')} in Setup → Chemicals first`, true); return; }
+      openChemForm({ fieldIds: [Number(st.field)], method: 'chemigation', status: 'planned',
+        values: { runtime_hr: hrs > 0 ? hrs : null, injection_gph: gph > 0 ? gph : null, acres_treated: ac },
+        lines: prods.map((p) => ({ chemical_id: chemFor(p.name).chemical_id, rate: Number(p.rate), rate_unit: p.unit, rate_basis: 'acre' })) });
+    };
+  };
+
+  const wire = () => {
+    // Inputs recalc as you type; only selects redraw on change (a redraw on blur would eat the next tap).
+    $$('[data-k]', box).forEach((i) => (i[i.tagName === 'SELECT' ? 'onchange' : 'oninput'] = () => {
+      st[i.dataset.k] = i.value;
+      if (i.dataset.k === 'field') { const f = fieldById(i.value); st.acres = f?.acres != null ? String(Number(f.acres)) : ''; save(); draw(); return; }
+      save(); calc();
+    }));
+    $$('[data-ln]', box).forEach((i) => (i[i.tagName === 'SELECT' ? 'onchange' : 'oninput'] = () => {
+      st.lines[Number(i.dataset.ln)][i.dataset.lk] = i.value; save(); calc();
+    }));
+    $$('[data-rm]', box).forEach((b) => (b.onclick = () => { st.lines.splice(Number(b.dataset.rm), 1); save(); draw(); }));
+    $('[data-act=add]', box).onclick = () => { st.lines.push({ name: '', rate: '', unit: 'fl oz' }); save(); draw(); $$('.cg-line .l-name', box).at(-1)?.focus(); };
+    $('[data-act=clear]', box).onclick = () => { st = { ...st, field: '', acres: '', gph: '', hours: '', lines: [{ name: '', rate: '', unit: 'fl oz' }] }; save(); draw(); };
   };
   draw();
 }
