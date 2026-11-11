@@ -6849,21 +6849,24 @@ function renderMonoCal(box) {
 // The day-by-day steps are the farm's posted calendar (Murrell, Saskatchewan
 // Agriculture and Food) at a steady 30°C, adjusted to the farm's agreed best
 // practice (Nov 2026): release at 30–50% of females out (SARE, Parma),
-// humidity 70%+, light traps, vacuuming, a day 11 pupal check and a forecast
+// humidity 60–70% (under 50% kills emerging bees, Johansen & Eves 1973), light traps, vacuuming, a day 11 pupal check and a forecast
 // check. Vapona stays because the farm uses it.
 // =====================================================================
 const BEE_RELEASE_DAY = 22;          // trays out when 30–50% of females are out (SARE, U of Idaho Parma)
 const BEE_RELEASE_PCT = [30, 50];
 const BEE_WARMUP_DAYS = 3;           // in trays at 65–70°F before day 1
 const BEE_HOLD_BELOW_F = 68;         // a setpoint under this is a hold: those days don't count
-const BEE_RH_MIN = 70, BEE_HOT_F = 90;
-const BEE_VAPONA_DAYS = [7, 13];     // humidity under 70% with strips in is the risky case (Parma)
+// Incubation humidity: target 60–70%. Under 50% is the only measured lethal level
+// (Johansen & Eves 1973); 70%+ is extension advice without a study behind it.
+// Over 80% risks condensation and mold.
+const BEE_RH_MIN = 60, BEE_RH_LETHAL = 50, BEE_RH_MAX = 80, BEE_HOT_F = 90;
+const BEE_VAPONA_DAYS = [7, 13];
 const BEE_COOLER = { maxF: 41, maxRh: 80, canOverF: 3 };
 const BEE_SCHEDULE = [
   [-BEE_WARMUP_DAYS, 0, 'Out of the cooler', 'Cells into trays, no deeper than 1 inch, at 65–70°F in dry air (no humidifier yet) for 2–3 days so they don’t sweat. Bleach dip, if used, at the start so cells are dry before 86°F. Light traps set up and running.'],
-  [1, 1, 'Room at 30°C (86°F)', 'All prepupae. Humidifier on: 70% or more. Check the temperature and humidity alarms. 1 inch of vermiculite over the cells. Light traps on: count and skim the pans daily.'],
+  [1, 1, 'Room at 30°C (86°F)', 'All prepupae. Humidifier on: 60–70%; never under 50%. Check the temperature and humidity alarms. 1 inch of vermiculite over the cells. Light traps on: count and skim the pans daily.'],
   [3, 3, 'Pteromalus pupate', 'Pteromalus make their final molt into the pupal stage.'],
-  [7, 7, 'Vapona in', 'Dichlorvos strips in at ¾ strip per 1,000 cu ft; less if the room is only partly full. Humidity must stay at 70% or more while strips are in.'],
+  [7, 7, 'Vapona in', 'Dichlorvos strips in at ¾ strip per 1,000 cu ft; less if the room is only partly full. Don’t open or break cells while strips are in: bare prepupae are what dichlorvos kills (Hill et al. 1984).'],
   [8, 8, 'Bees pupate: hold steady', 'Very sensitive to temperature swings now. No cooling or holding.'],
   [8, 15, 'Parasitic wasps emerging', 'Pteromalus come out days 8–12, Monodontomerus 14–15. Vacuum walls and floor twice a day and empty it outside. Log trap counts.'],
   [10, 10, 'Pink-eyed stage', 'Pupae start to show eye colour.'],
@@ -6956,10 +6959,9 @@ function beeRunAlerts(r, ev, wx) {
   const { day } = beeDayOn(r, ev, today);
   const read = latestOf(ev, 'reading');
   if (read?.temp_f != null && read.temp_f >= BEE_HOT_F) out.push(['bad', `Room at ${tempBoth(read.temp_f)}: 90°F and above kills bees.`]);
-  if (read?.rh_pct != null && read.rh_pct < BEE_RH_MIN) {
-    const vap = day >= BEE_VAPONA_DAYS[0] && day <= BEE_VAPONA_DAYS[1];
-    out.push([vap ? 'bad' : 'warn', `Humidity ${num(read.rh_pct, 0)}%: under ${BEE_RH_MIN}%${vap ? ' with Vapona in, the riskiest case' : ''}.`]);
-  }
+  if (read?.rh_pct != null && read.rh_pct < BEE_RH_LETHAL) out.push(['bad', `Humidity ${num(read.rh_pct, 0)}%: under ${BEE_RH_LETHAL}% kills emerging bees. Add water now.`]);
+  else if (read?.rh_pct != null && read.rh_pct < BEE_RH_MIN) out.push(['warn', `Humidity ${num(read.rh_pct, 0)}%: below the ${BEE_RH_MIN}–${BEE_RH_MAX - 10}% target.`]);
+  else if (read?.rh_pct != null && read.rh_pct > BEE_RH_MAX) out.push(['warn', `Humidity ${num(read.rh_pct, 0)}%: over ${BEE_RH_MAX}%, watch for condensation and mold; keep air moving.`]);
   const planned = beeDateOf(r, ev, BEE_RELEASE_DAY);
   const stage = latestOf(ev, 'stage_check');
   if (stage && BEE_DAYS_LEFT[stage.pupal_stage] != null && day < BEE_RELEASE_DAY) {
@@ -7008,7 +7010,7 @@ async function renderBees(el) {
   if (s.tab === 'fumigation') return renderBeeFumigation(body, reload);
   if (s.tab === 'schedule') {
     body.innerHTML = `<div class="section-head"><h2>Incubation schedule</h2></div>
-      <p class="muted small">The calendar posted in the bee room (Murrell, Saskatchewan Agriculture and Food) at a steady 30°C (86°F), with the farm’s agreed changes: release on day ${BEE_RELEASE_DAY} when ${BEE_RELEASE_PCT.join('–')}% of females are out (SARE, U of Idaho), humidity ${BEE_RH_MIN}% or more, light traps, vacuuming, a day 11 stage check and a forecast check. Never let the room reach 90°F (32°C). Cold storage before: steady 38°F; humidity only matters for mold.</p>
+      <p class="muted small">The calendar posted in the bee room (Murrell, Saskatchewan Agriculture and Food) at a steady 30°C (86°F), with the farm’s agreed changes: release on day ${BEE_RELEASE_DAY} when ${BEE_RELEASE_PCT.join('–')}% of females are out (SARE, U of Idaho), humidity ${BEE_RH_MIN}–${BEE_RH_MAX - 10}% (never under ${BEE_RH_LETHAL}%), light traps, vacuuming, a day 11 stage check and a forecast check. Never let the room reach 90°F (32°C). Cold storage before: steady 38°F; humidity only matters for mold.</p>
       <ul class="list job-list card">${BEE_SCHEDULE.map(([a, b, t, d]) => `<li><span class="li-name"><b>${beeDayLabel(a, b)} · ${esc(t)}</b><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>
       <h3>Pupal stage: days left to 50% emergence at 86°F</h3>
       <ul class="list card">${BEE_STAGES.filter(([k]) => BEE_DAYS_LEFT[k] != null).map(([k, l]) => `<li><span class="li-name">${esc(l)}</span><span class="li-value">${BEE_DAYS_LEFT[k] === 4.5 ? '4–5' : BEE_DAYS_LEFT[k]} days</span></li>`).join('')}</ul>`;
@@ -7268,7 +7270,7 @@ function openBeeLog(run, onDone) {
     <div class="row2"><label>What *<select name="kind">${BEE_EVENT_KINDS.map(([k, l]) => `<option value="${k}" ${k === guess ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label>When<input type="datetime-local" name="at" value="${nowLocal()}"></label></div>
     <div class="row2" data-k="reading"><label>Room temp °F<input type="number" name="temp_f" step="0.1"></label><label>Humidity %<input type="number" name="rh_pct" step="1"></label></div>
-    <p class="muted small" data-k="reading">Read a hygrometer at tray height. Target 86°F and ${BEE_RH_MIN}% or more; 90°F and above kills bees.</p>
+    <p class="muted small" data-k="reading">Read a hygrometer at tray height. Target 86°F and ${BEE_RH_MIN}–${BEE_RH_MAX - 10}% humidity; under ${BEE_RH_LETHAL}% or 90°F and above kills bees.</p>
     <label data-k="stage_check">Most of 10 opened cells are at<select name="pupal_stage"><option value="">Choose…</option>${BEE_STAGES.map(([k, l]) => `<option value="${k}">${l}${BEE_DAYS_LEFT[k] != null ? ` · ${BEE_DAYS_LEFT[k] === 4.5 ? '4–5' : BEE_DAYS_LEFT[k]} days left` : ''}</option>`).join('')}</select></label>
     <label data-k="female_check">Percent of females out (sample tray)<input type="number" name="pct_females_out" step="1" min="0" max="100"></label>
     <p class="muted small" data-k="female_check">Release at ${BEE_RELEASE_PCT.join('–')}%. Females are the larger bees, with a pointed abdomen; males are smaller with a blunter tip and pale face hairs.</p>
