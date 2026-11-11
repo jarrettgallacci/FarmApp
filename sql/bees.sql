@@ -84,7 +84,7 @@ create table if not exists public.bee_plans (
   season             smallint not null,
   field_id           bigint not null references public.fields,
   crop_year_id       bigint references public.crop_years,
-  target_flight_on   date not null,         -- start of bloom
+  target_flight_on   date,                  -- start of bloom; blank until known
   bees_per_acre      integer,                -- live bees; 30,000-40,000 established
   acres              numeric(8,2),           -- blank = field acres
   notes              text,

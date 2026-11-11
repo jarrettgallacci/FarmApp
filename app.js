@@ -7020,24 +7020,33 @@ async function renderBees(el) {
     const acresOf = (p) => Number(p.acres ?? fieldById(p.field_id)?.acres ?? 0);
     const liveGal = (p) => (p.bees_per_acre && acresOf(p) ? (p.bees_per_acre * acresOf(p)) / 10000 : null);
     const totalGal = plans.reduce((t, p) => t + (liveGal(p) ?? 0), 0);
+    const nameSort = (a, b) => fieldName(a.field_id).localeCompare(fieldName(b.field_id), undefined, { numeric: true });
+    const sorted = [...plans.filter((p) => p.target_flight_on).sort((a, b) => a.target_flight_on.localeCompare(b.target_flight_on) || nameSort(a, b)),
+      ...plans.filter((p) => !p.target_flight_on).sort(nameSort)];
+    const undated = plans.filter((p) => !p.target_flight_on).length;
     body.innerHTML = `<div class="section-head"><h2>Bee plan</h2>
-        <div class="row">${seasonNav}<button class="primary" data-act="add">Add field</button></div></div>
-      <p class="muted small">Enter the day you want bees flying (start of bloom). Incubation starts ${BEE_RELEASE_DAY - 1} days earlier so trays go out on day ${BEE_RELEASE_DAY}; pull trays from the cooler ${BEE_WARMUP_DAYS} days before that to warm up. With rooms staggered, aim to have the last room out by about peak bloom.</p>
+        <div class="row">${seasonNav}<button class="primary" data-act="bulk">Add fields</button></div></div>
+      <p class="muted small">Add every field that will need bees now and set each bloom date in late spring, once you can see the crop. The bloom date is the day you want bees flying. Incubation starts ${BEE_RELEASE_DAY - 1} days earlier so trays go out on day ${BEE_RELEASE_DAY}; pull trays from the cooler ${BEE_WARMUP_DAYS} days before that to warm up. With rooms staggered, aim to have the last room out by about peak bloom.</p>
       <div class="card table-wrap crud-wrap"><table class="crud m-cards"><thead><tr>
         <th>Field</th><th>Bees flying</th><th>Day 1 at 30°C</th><th>Warm-up</th><th>Live bees</th><th>Run</th><th></th></tr></thead><tbody>
-      ${plans.length ? plans.map((p) => {
-        const r = runOf(p), start = beeStartFor(p.target_flight_on);
+      ${sorted.length ? sorted.map((p) => {
+        const r = runOf(p), start = p.target_flight_on ? beeStartFor(p.target_flight_on) : null;
         return `<tr><td><b>${esc(fieldName(p.field_id))}</b>${acresOf(p) ? ` <span class="muted small">${num(acresOf(p), 1)} ac</span>` : ''}</td>
-          <td><span class="m-only">flying </span>${fmtDay(p.target_flight_on)}</td><td><span class="m-only">day 1 </span>${fmtDay(start)}</td>
-          <td>${fmtDay(addDays(start, -BEE_WARMUP_DAYS))}</td>
+          <td><label class="bee-date"><span class="m-only">Bees flying </span><input type="date" data-date="${p.plan_id}" value="${esc(p.target_flight_on ?? '')}" aria-label="Bees flying, ${esc(fieldName(p.field_id))}"></label></td>
+          <td>${start ? `<span class="m-only">day 1 </span>${fmtDay(start)}` : '<span class="muted small">set bloom date</span>'}</td>
+          <td>${start ? `<span class="m-only">warm-up </span>${fmtDay(addDays(start, -BEE_WARMUP_DAYS))}` : ''}</td>
           <td>${liveGal(p) != null ? `${num(liveGal(p), 1)} gal <span class="muted small">(${Number(p.bees_per_acre).toLocaleString()}/ac)</span>` : ''}</td>
           <td>${r ? `<span class="badge ${r.status === 'running' ? 'up' : ''}">${esc(rooms.find((x) => x.room_id === r.room_id)?.name ?? '')} · ${esc(labelOf(BEE_RUN_STATUS, r.status))}</span>` : '<span class="muted">—</span>'}</td>
-          <td class="nowrap"><button class="small" data-edit="${p.plan_id}">Edit</button>${r ? '' : ` <button class="small primary" data-run="${p.plan_id}">Start run</button>`}</td></tr>`;
+          <td class="nowrap"><button class="small" data-edit="${p.plan_id}">Edit</button>${r || !start ? '' : ` <button class="small primary" data-run="${p.plan_id}">Start run</button>`}</td></tr>`;
       }).join('') : `<tr><td colspan="7" class="muted">No fields planned for ${s.season} yet.</td></tr>`}
       </tbody></table></div>
+      ${undated ? `<p class="small"><span class="badge warn">${undated} field${undated === 1 ? '' : 's'}</span> still need a bloom date.</p>` : ''}
       ${totalGal ? `<p class="muted small">Total: ${num(totalGal, 1)} gallons of <b>live</b> bees (about 10,000 per gallon). Divide by your sample’s percent live to get gallons of cells.</p>` : ''}`;
     wireSeason();
-    $('[data-act=add]', body).onclick = () => openBeePlan(null, reload);
+    $('[data-act=bulk]', body).onclick = () => openBeePlanBulk(plans, reload);
+    $$('[data-date]', body).forEach((i) => (i.onchange = async () => {
+      try { await q(sb.from('bee_plans').update({ target_flight_on: i.value || null }).eq('plan_id', Number(i.dataset.date))); toast('Saved'); reload(); } catch { /* shown */ }
+    }));
     $$('[data-edit]', body).forEach((b) => (b.onclick = () => openBeePlan(plans.find((p) => p.plan_id === Number(b.dataset.edit)), reload)));
     $$('[data-run]', body).forEach((b) => (b.onclick = () => openBeeRun(null, { plans, runs, rooms, pick: Number(b.dataset.run) }, reload)));
     return;
@@ -7095,7 +7104,7 @@ function openBeePlan(plan, onDone) {
     <h3>${plan ? 'Edit' : 'Add'} bee field · ${beeState.season}</h3>
     <label>Field *<select name="field_id" required><option value="">Choose…</option>${fields.map((f) =>
       `<option value="${f.field_id}" ${f.field_id === plan?.field_id ? 'selected' : ''}>${esc(f.name)}${f.acres ? ` · ${num(f.acres, 1)} ac` : ''}</option>`).join('')}</select></label>
-    <label>Bees flying (start of bloom) *<input type="date" name="target_flight_on" value="${esc(plan?.target_flight_on ?? '')}" required></label>
+    <label>Bees flying (start of bloom; blank until you know)<input type="date" name="target_flight_on" value="${esc(plan?.target_flight_on ?? '')}"></label>
     <p class="muted small" data-calc></p>
     <div class="row2">
       <label>Live bees per acre<input type="number" name="bees_per_acre" step="1000" value="${esc(plan?.bees_per_acre ?? 35000)}"></label>
@@ -7110,7 +7119,7 @@ function openBeePlan(plan, onDone) {
   };
   f.target_flight_on.oninput = calc; calc();
   guardSubmit(form, async () => {
-    const data = { season: beeState.season, field_id: Number(f.field_id.value), target_flight_on: f.target_flight_on.value,
+    const data = { season: beeState.season, field_id: Number(f.field_id.value), target_flight_on: f.target_flight_on.value || null,
       bees_per_acre: f.bees_per_acre.value ? Number(f.bees_per_acre.value) : null, acres: f.acres.value ? Number(f.acres.value) : null, notes: f.notes.value.trim() || null };
     try {
       if (plan) await q(sb.from('bee_plans').update(data).eq('plan_id', plan.plan_id));
@@ -7124,6 +7133,47 @@ function openBeePlan(plan, onDone) {
     if (!confirm('Delete this bee field from the plan?')) return;
     try { await q(sb.from('bee_plans').delete().eq('plan_id', plan.plan_id)); dlg.close(); toast('Deleted'); onDone(); } catch { /* shown */ }
   };
+  if (!dlg.open) dlg.showModal();
+}
+
+// Add many bee fields at once. Fields in alfalfa this season start ticked;
+// the bloom date can wait until late spring.
+async function openBeePlanBulk(plans, onDone) {
+  const yr = beeState.season, have = new Set(plans.map((p) => p.field_id));
+  const alfalfa = refs.crops.filter((c) => /alfalfa/i.test(c.name));
+  const seedOnly = alfalfa.filter((c) => /seed/i.test(c.name));
+  const beeCrops = new Set((seedOnly.length ? seedOnly : alfalfa).map((c) => c.crop_id));
+  let inCrop = new Set();
+  if (beeCrops.size) {
+    const cys = (await sb.from('crop_years').select('field_id, crop_id, season, multi_year, end_season').lte('season', yr)).data ?? [];
+    inCrop = new Set(cys.filter((c) => beeCrops.has(c.crop_id) && (c.season === yr || (c.multi_year && (c.end_season == null || c.end_season >= yr)))).map((c) => c.field_id));
+  }
+  const fields = refs.fields.filter((f) => f.active && !have.has(f.field_id))
+    .sort((a, b) => (inCrop.has(b.field_id) - inCrop.has(a.field_id)) || String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+  const dlg = $('#dialog');
+  dlg.innerHTML = `<form class="form"><h3>Add bee fields · ${yr}</h3>
+    ${inCrop.size ? `<p class="muted small">Fields in ${esc([...beeCrops].map(cropName).join(' / '))} for ${yr} are ticked and listed first.</p>` : ''}
+    <div class="row"><button type="button" class="small" data-all="1">Select all</button><button type="button" class="small" data-all="0">Clear</button><span class="muted small" data-n></span></div>
+    <fieldset class="bee-fields bee-pick">${fields.length ? fields.map((f) => `<label class="check"><input type="checkbox" name="fid" value="${f.field_id}" ${inCrop.has(f.field_id) ? 'checked' : ''}> ${esc(f.name)}${f.acres ? ` <span class="muted small">${num(f.acres, 1)} ac</span>` : ''}</label>`).join('') : '<p class="muted small">Every active field is already in this year’s plan.</p>'}</fieldset>
+    <div class="row2"><label>Live bees per acre<input type="number" name="bees_per_acre" step="1000" value="35000"></label>
+      <label>Bloom date (optional, same for all)<input type="date" name="target_flight_on"></label></div>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Add</button></div></form>`;
+  const form = $('form', dlg), f = form.elements;
+  const ticked = () => $$('input[name=fid]:checked', form).map((x) => Number(x.value));
+  const count = () => { $('[data-n]', form).textContent = `${ticked().length} selected`; };
+  $$('input[name=fid]', form).forEach((x) => (x.onchange = count));
+  $$('[data-all]', form).forEach((b) => (b.onclick = () => { $$('input[name=fid]', form).forEach((x) => (x.checked = b.dataset.all === '1')); count(); }));
+  count();
+  guardSubmit(form, async () => {
+    const ids = ticked();
+    if (!ids.length) return toast('Tick at least one field', true);
+    const bpa = f.bees_per_acre.value ? Number(f.bees_per_acre.value) : null;
+    try {
+      await q(sb.from('bee_plans').insert(ids.map((id) => ({ season: yr, field_id: id, target_flight_on: f.target_flight_on.value || null, bees_per_acre: bpa }))));
+      dlg.close(); toast(`Added ${ids.length} field${ids.length === 1 ? '' : 's'}`); onDone();
+    } catch { /* shown */ }
+  });
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
   if (!dlg.open) dlg.showModal();
 }
 
@@ -7141,7 +7191,7 @@ function openBeeRun(run, ctx, onDone) {
   dlg.onclose = () => dlg.classList.remove('wide');
   const taken = new Set(runs.filter((r) => r !== run).flatMap((r) => (r.bee_run_plans ?? []).map((x) => x.plan_id)));
   const mine = new Set((run?.bee_run_plans ?? []).map((x) => x.plan_id).concat(ctx.pick ? [ctx.pick] : []));
-  const free = plans.filter((p) => !taken.has(p.plan_id));
+  const free = plans.filter((p) => !taken.has(p.plan_id) && (p.target_flight_on || mine.has(p.plan_id)));
   const incubators = rooms.filter((r) => r.kind === 'incubator' && (r.active || r.room_id === run?.room_id));
   const ev = run?.bee_run_events ?? [];
   const today = localDate();
@@ -7159,7 +7209,7 @@ function openBeeRun(run, ctx, onDone) {
       <label>Setpoint °F<input type="number" name="setpoint_f" step="0.5" value="${esc(run?.setpoint_f ?? 86)}"></label></div>
     <label>Tray cover<select name="tray_cover"><option value="">—</option>${BEE_COVERS.map(([k, l]) => `<option value="${k}" ${k === (run?.tray_cover ?? 'vermiculite') ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     <fieldset class="bee-fields"><legend>Fields this room serves</legend>
-      ${free.length ? free.map((p) => `<label class="check"><input type="checkbox" name="plan" value="${p.plan_id}" ${mine.has(p.plan_id) ? 'checked' : ''}> ${esc(fieldName(p.field_id))} <span class="muted small">flying ${fmtDay(p.target_flight_on)}</span></label>`).join('') : '<p class="muted small">No planned fields left. Add them in the Planner.</p>'}
+      ${free.length ? free.map((p) => `<label class="check"><input type="checkbox" name="plan" value="${p.plan_id}" ${mine.has(p.plan_id) ? 'checked' : ''}> ${esc(fieldName(p.field_id))} <span class="muted small">${p.target_flight_on ? `flying ${fmtDay(p.target_flight_on)}` : "no bloom date"}</span></label>`).join('') : '<p class="muted small">No fields with a bloom date left. Add fields and set their dates in the Planner.</p>'}
     </fieldset>
     <p class="muted small" data-calc></p>
     <label>Notes<textarea name="notes" rows="2">${esc(run?.notes ?? '')}</textarea></label>
@@ -7172,7 +7222,7 @@ function openBeeRun(run, ctx, onDone) {
   const form = $('form', dlg), f = form.elements;
   const checked = () => $$('input[name=plan]:checked', form).map((x) => Number(x.value));
   const calc = () => {
-    const sel = plans.filter((p) => checked().includes(p.plan_id)).sort((a, b) => a.target_flight_on.localeCompare(b.target_flight_on));
+    const sel = plans.filter((p) => checked().includes(p.plan_id) && p.target_flight_on).sort((a, b) => a.target_flight_on.localeCompare(b.target_flight_on));
     if (!sel.length) { $('[data-calc]', form).textContent = ''; return; }
     const want = beeStartFor(sel[0].target_flight_on);
     if (!run && !f.started_on.value) f.started_on.value = want;
