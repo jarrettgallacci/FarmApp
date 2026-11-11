@@ -1,4 +1,4 @@
--- Bees (alfalfa leafcutter): DRAFT schema, not yet used by the app.
+-- Bees (alfalfa leafcutter): schema for the Bees tab.
 -- Follows each lot of cells from cooler to incubator to field shelter and back,
 -- so every season ends with a return ratio per field and per shelter.
 -- Sprays near shelters are not stored here: they come from chemical_events on
