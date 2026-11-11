@@ -6858,7 +6858,7 @@ const BEE_WARMUP_DAYS = 3;           // in trays at 65–70°F before day 1
 const BEE_HOLD_BELOW_F = 68;         // a setpoint under this is a hold: those days don't count
 const BEE_RH_MIN = 70, BEE_HOT_F = 90;
 const BEE_VAPONA_DAYS = [7, 13];     // humidity under 70% with strips in is the risky case (Parma)
-const BEE_COOLER = { maxF: 41, maxRh: 65, canOverF: 3 };
+const BEE_COOLER = { maxF: 41, maxRh: 80, canOverF: 3 };
 const BEE_SCHEDULE = [
   [-BEE_WARMUP_DAYS, 0, 'Out of the cooler', 'Cells into trays, no deeper than 1 inch, at 65–70°F in dry air (no humidifier yet) for 2–3 days so they don’t sweat. Bleach dip, if used, at the start so cells are dry before 86°F. Light traps set up and running.'],
   [1, 1, 'Room at 30°C (86°F)', 'All prepupae. Humidifier on: 70% or more. Check the temperature and humidity alarms. 1 inch of vermiculite over the cells. Light traps on: count and skim the pans daily.'],
@@ -7008,7 +7008,7 @@ async function renderBees(el) {
   if (s.tab === 'fumigation') return renderBeeFumigation(body, reload);
   if (s.tab === 'schedule') {
     body.innerHTML = `<div class="section-head"><h2>Incubation schedule</h2></div>
-      <p class="muted small">The calendar posted in the bee room (Murrell, Saskatchewan Agriculture and Food) at a steady 30°C (86°F), with the farm’s agreed changes: release on day ${BEE_RELEASE_DAY} when ${BEE_RELEASE_PCT.join('–')}% of females are out (SARE, U of Idaho), humidity ${BEE_RH_MIN}% or more, light traps, vacuuming, a day 11 stage check and a forecast check. Never let the room reach 90°F (32°C). Cold storage before: 38°F, about 50% humidity.</p>
+      <p class="muted small">The calendar posted in the bee room (Murrell, Saskatchewan Agriculture and Food) at a steady 30°C (86°F), with the farm’s agreed changes: release on day ${BEE_RELEASE_DAY} when ${BEE_RELEASE_PCT.join('–')}% of females are out (SARE, U of Idaho), humidity ${BEE_RH_MIN}% or more, light traps, vacuuming, a day 11 stage check and a forecast check. Never let the room reach 90°F (32°C). Cold storage before: steady 38°F; humidity only matters for mold.</p>
       <ul class="list job-list card">${BEE_SCHEDULE.map(([a, b, t, d]) => `<li><span class="li-name"><b>${beeDayLabel(a, b)} · ${esc(t)}</b><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>
       <h3>Pupal stage: days left to 50% emergence at 86°F</h3>
       <ul class="list card">${BEE_STAGES.filter(([k]) => BEE_DAYS_LEFT[k] != null).map(([k, l]) => `<li><span class="li-name">${esc(l)}</span><span class="li-value">${BEE_DAYS_LEFT[k] === 4.5 ? '4–5' : BEE_DAYS_LEFT[k]} days</span></li>`).join('')}</ul>`;
@@ -7314,7 +7314,7 @@ async function renderBeeStorage(body, rooms, reload) {
   ].filter(Boolean);
   const months = (d) => { if (!d) return null; const m = Math.round((new Date(localDate()) - new Date(d)) / (864e5 * 30.4)); return `${m} month${m === 1 ? "" : "s"}`; };
   body.innerHTML = `<div class="section-head"><h2>Cold storage</h2></div>
-    <p class="muted small">Target 38°F (alarm above ${BEE_COOLER.maxF}°F) and about 50% humidity (alarm above ${BEE_COOLER.maxRh}%), for 5–7 months. Once a month, push a probe into the middle of a can or two: more than ${BEE_COOLER.canOverF}°F above the room means space the cans out or use smaller ones. When checking for mold, dig cells from the bottom of a can, not just the top.</p>
+    <p class="muted small">Target 38°F (alarm above ${BEE_COOLER.maxF}°F) for 5–7 months. Humidity doesn’t affect survival in storage (USDA test, 0–88% RH at 41°F, Cane 2025); the alarm above ${BEE_COOLER.maxRh}% is a mold check, since leaf pieces in open cans can mold when it’s damp. Steady temperature and storage length matter most. Once a month, push a probe into the middle of a can or two: more than ${BEE_COOLER.canOverF}°F above the room means space the cans out or use smaller ones. When checking for mold, dig cells from the bottom of a can, not just the top.</p>
     ${coolers.length ? coolers.map((c) => {
       const mine = reads.filter((x) => x.room_id === c.room_id);
       const last = mine[0];
