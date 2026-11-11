@@ -6844,6 +6844,318 @@ function renderMonoCal(box) {
 }
 
 // =====================================================================
+// Bees (alfalfa leafcutter): a target flight date per field works back to
+// the incubation start; each run then shows what day it is and what to do.
+// The day-by-day steps are the farm's posted calendar (Murrell, Saskatchewan
+// Agriculture and Food) at a steady 30°C, plus vacuuming, humidity and
+// light-traps-off from the bee guide. Vapona stays because the farm uses it.
+// =====================================================================
+const BEE_RELEASE_DAY = 23;   // trays out once 75% of females have hatched (days 23–24)
+const BEE_WARMUP_DAYS = 3;    // in trays at room temperature before day 1
+const BEE_HOLD_BELOW_F = 68;  // a setpoint under this is a hold: those days don't count
+const BEE_SCHEDULE = [
+  [-BEE_WARMUP_DAYS, 0, 'Out of the cooler', 'Cocoons into incubation trays; let them warm slowly at room temperature, then bring the room to 30°C (86°F).'],
+  [1, 1, 'Room at 30°C', 'All prepupae. Black lights and water traps in place; check the temperature alarm works.'],
+  [3, 3, 'Pteromalus pupate', 'Pteromalus make their final molt into the pupal stage.'],
+  [7, 7, 'Vapona in', 'Dichlorvos strips in at ¾ strip per 1,000 cu ft; less if the incubator is only partly full.'],
+  [8, 8, 'Bees pupate: hold steady', 'Very sensitive to temperature swings now. No cooling or holding.'],
+  [8, 15, 'Parasitic wasps emerging', 'Pteromalus come out days 8–12 (with Vapona working they should die in the trays). Keep black lights and water traps going; vacuum walls and windows twice a day.'],
+  [10, 10, 'Pink-eyed stage', 'Pupae start to show eye colour.'],
+  [12, 12, 'Darkening', 'Eyes and back darkening.'],
+  [13, 13, 'Vapona out, air the room', 'Remove the strips. Air the incubator thoroughly with exhaust and circulating fans for 24–48 hours; hold 30°C if possible.'],
+  [14, 15, 'Back to 30°C', 'If the room cooled while airing, bring it back to 30°C to continue development.'],
+  [14, 15, 'Native leafcutters emerge', 'Early emergers are native bees. The timing isn’t off.'],
+  [14, 22, 'Slow-down window', 'If bloom or weather is late, bring the cocoons (not just the air) to 10–15°C (50–59°F) for up to 2 weeks. Development stops and resumes when warmed.'],
+  [16, 16, 'Males dark', 'Early hatchers (mostly males) fully dark; later ones (mostly females) darkening.'],
+  [18, 19, 'Males emerging', 'Bees are very susceptible to high temperatures. Check the alarm. Light traps off: bees go to the lights too (bee guide).'],
+  [21, 22, 'Females begin', 'Male emergence peaks. Second-generation Pteromalus begin to emerge.'],
+  [23, 24, 'Release', 'Female emergence peaks. Trays to the field once 75% of females have hatched. Trays can come back for 2–3 days to finish the female hatch, then go out again.'],
+  [28, 28, 'Hatch complete', 'Hatch is virtually complete at 30°C.'],
+];
+const BEE_EVENT_KINDS = [['reading', 'Temperature / humidity'], ['stage_check', 'Pupal stage check'], ['trap_count', 'Trap count'],
+  ['setpoint', 'Setpoint change (hold or resume)'], ['vacuum', 'Vacuumed'], ['feeding', 'Fed held bees'], ['note', 'Note']];
+const BEE_STAGES = [['prepupa', 'Prepupae (white grubs)'], ['white', 'White pupae'], ['eyes_pink', 'Eyes pink to tan'], ['eyes_dark', 'Eyes dark red/brown'],
+  ['body_darkening', 'Body darkening'], ['black', 'Fully black'], ['males_out', 'Males emerging'], ['females_out', 'Females emerging']];
+const BEE_RUN_STATUS = [['planned', 'Planned'], ['running', 'Running'], ['released', 'Released'], ['done', 'Done']];
+const fToC = (f) => Math.round(((f - 32) * 5) / 9);
+const tempBoth = (f) => (f == null ? '' : `${fToC(f)}°C (${Number(f)}°F)`);
+const beeStartFor = (flightOn) => addDays(flightOn, -(BEE_RELEASE_DAY - 1));
+
+const beeState = { tab: 'plan', season: new Date().getMonth() >= 7 ? new Date().getFullYear() + 1 : new Date().getFullYear() };
+
+// Which warm days have passed: holds (setpoint under BEE_HOLD_BELOW_F) don't count.
+// Returns { day, held } for an ISO date; day 1 is the start date.
+function beeDayOn(run, events, iso) {
+  const sets = events.filter((e) => e.kind === 'setpoint' && e.setpoint_f != null)
+    .sort((a, b) => a.happened_at.localeCompare(b.happened_at));
+  const heldOn = (d) => {
+    let sp = Number(run.setpoint_f);
+    for (const e of sets) if (localDate(new Date(e.happened_at)) <= d) sp = Number(e.setpoint_f);
+    return sp < BEE_HOLD_BELOW_F;
+  };
+  if (iso < run.started_on) return { day: -Math.round((new Date(run.started_on) - new Date(iso)) / 864e5) + 1, held: false };
+  let day = 0;
+  for (let d = run.started_on; d <= iso; d = addDays(d, 1)) if (!heldOn(d)) day++;
+  return { day, held: heldOn(iso) };
+}
+// Calendar date of a schedule day, counting forward from today (assumes warm from tomorrow if held now).
+function beeDateOf(run, events, n) {
+  const today = localDate();
+  if (today < run.started_on || n <= 0) return addDays(run.started_on, n - 1);
+  const { day } = beeDayOn(run, events, today);
+  if (n > day) return addDays(today, n - day);
+  for (let d = run.started_on; d <= today; d = addDays(d, 1)) if (beeDayOn(run, events, d).day === n) return d;
+  return today;
+}
+const beeDayLabel = (a, b) => (a <= 0 ? 'Warm-up' : a === b ? `Day ${a}` : `Days ${a}–${b}`);
+const beeStepsOn = (day) => BEE_SCHEDULE.filter(([a, b]) => day >= a && day <= b);
+
+async function renderBees(el) {
+  const s = beeState;
+  const [roomsRes, plansRes, runsRes] = await Promise.all([
+    sb.from('bee_rooms').select('*').order('name'),
+    sb.from('bee_plans').select('*').eq('season', s.season).order('target_flight_on'),
+    sb.from('bee_incubation_runs').select('*, bee_run_plans(plan_id), bee_run_events(*)').eq('season', s.season).order('started_on'),
+  ]);
+  if (roomsRes.error || plansRes.error || runsRes.error) {
+    el.innerHTML = '<div class="empty">Bees isn’t set up yet. Run <b>bees.sql</b> in Supabase first.</div>';
+    return;
+  }
+  const rooms = roomsRes.data, plans = plansRes.data, runs = runsRes.data;
+  const tabs = [['plan', 'Planner'], ['runs', `Incubation${runs.some((r) => r.status === 'running') ? ' ●' : ''}`], ['schedule', 'Schedule'], ['rooms', 'Rooms']];
+  el.innerHTML = `<div class="subtabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === s.tab ? 'active' : ''}">${esc(l)}</button>`).join('')}</div>
+    <div id="bee-body"></div>`;
+  $$('[data-tab]', el).forEach((b) => (b.onclick = () => { s.tab = b.dataset.tab; renderBees(el); }));
+  const body = $('#bee-body', el);
+  const reload = () => renderBees(el);
+  const seasonNav = `<button data-season="-1" aria-label="Previous year">‹</button><strong class="season">${s.season}</strong><button data-season="1" aria-label="Next year">›</button>`;
+  const wireSeason = () => $$('[data-season]', body).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
+
+  if (s.tab === 'rooms') return renderCrud(BEE_ROOMS, body);
+  if (s.tab === 'schedule') {
+    body.innerHTML = `<div class="section-head"><h2>Incubation schedule</h2></div>
+      <p class="muted small">From the calendar posted in the bee room (Murrell, Saskatchewan Agriculture and Food). Assumes steady cool storage at 5°C before, and a steady 30°C (86°F) during. Keep humidity at 70% or more the whole time (dry air gives deformed adults) and never let the room reach 90°F (32°C). Release is planned for day ${BEE_RELEASE_DAY}. Humidity, vacuuming and light traps off at day 18 are added from the bee guide.</p>
+      <ul class="list job-list card">${BEE_SCHEDULE.map(([a, b, t, d]) => `<li><span class="li-name"><b>${beeDayLabel(a, b)} · ${esc(t)}</b><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>`;
+    return;
+  }
+
+  if (s.tab === 'plan') {
+    const runOf = (p) => runs.find((r) => (r.bee_run_plans ?? []).some((x) => x.plan_id === p.plan_id));
+    const acresOf = (p) => Number(p.acres ?? fieldById(p.field_id)?.acres ?? 0);
+    const liveGal = (p) => (p.bees_per_acre && acresOf(p) ? (p.bees_per_acre * acresOf(p)) / 10000 : null);
+    const totalGal = plans.reduce((t, p) => t + (liveGal(p) ?? 0), 0);
+    body.innerHTML = `<div class="section-head"><h2>Bee plan</h2>
+        <div class="row">${seasonNav}<button class="primary" data-act="add">Add field</button></div></div>
+      <p class="muted small">Enter the day you want bees flying (start of bloom). Incubation starts ${BEE_RELEASE_DAY - 1} days earlier so trays go out on day ${BEE_RELEASE_DAY}; pull trays from the cooler ${BEE_WARMUP_DAYS} days before that to warm up.</p>
+      <div class="card table-wrap crud-wrap"><table class="crud m-cards"><thead><tr>
+        <th>Field</th><th>Bees flying</th><th>Day 1 at 30°C</th><th>Warm-up</th><th>Live bees</th><th>Run</th><th></th></tr></thead><tbody>
+      ${plans.length ? plans.map((p) => {
+        const r = runOf(p), start = beeStartFor(p.target_flight_on);
+        return `<tr><td><b>${esc(fieldName(p.field_id))}</b>${acresOf(p) ? ` <span class="muted small">${num(acresOf(p), 1)} ac</span>` : ''}</td>
+          <td><span class="m-only">flying </span>${fmtDay(p.target_flight_on)}</td><td><span class="m-only">day 1 </span>${fmtDay(start)}</td>
+          <td>${fmtDay(addDays(start, -BEE_WARMUP_DAYS))}</td>
+          <td>${liveGal(p) != null ? `${num(liveGal(p), 1)} gal <span class="muted small">(${Number(p.bees_per_acre).toLocaleString()}/ac)</span>` : ''}</td>
+          <td>${r ? `<span class="badge ${r.status === 'running' ? 'up' : ''}">${esc(rooms.find((x) => x.room_id === r.room_id)?.name ?? '')} · ${esc(BEE_RUN_STATUS.find(([k]) => k === r.status)[1])}</span>` : '<span class="muted">—</span>'}</td>
+          <td class="nowrap"><button class="small" data-edit="${p.plan_id}">Edit</button>${r ? '' : ` <button class="small primary" data-run="${p.plan_id}">Start run</button>`}</td></tr>`;
+      }).join('') : `<tr><td colspan="7" class="muted">No fields planned for ${s.season} yet.</td></tr>`}
+      </tbody></table></div>
+      ${totalGal ? `<p class="muted small">Total: ${num(totalGal, 1)} gallons of <b>live</b> bees (about 10,000 per gallon). Divide by your sample’s percent live to get gallons of cells.</p>` : ''}`;
+    wireSeason();
+    $('[data-act=add]', body).onclick = () => openBeePlan(null, reload);
+    $$('[data-edit]', body).forEach((b) => (b.onclick = () => openBeePlan(plans.find((p) => p.plan_id === Number(b.dataset.edit)), reload)));
+    $$('[data-run]', body).forEach((b) => (b.onclick = () => openBeeRun(null, { plans, runs, rooms, pick: Number(b.dataset.run) }, reload)));
+    return;
+  }
+
+  // Incubation runs
+  const today = localDate();
+  body.innerHTML = `<div class="section-head"><h2>Incubation</h2>
+      <div class="row">${seasonNav}<button class="primary" data-act="new">New run</button></div></div>
+    ${runs.length ? runs.map((r) => {
+      const ev = r.bee_run_events ?? [];
+      const { day, held } = beeDayOn(r, ev, today);
+      const steps = r.status === 'running' || r.status === 'planned' ? beeStepsOn(day) : [];
+      const next = BEE_SCHEDULE.find(([a]) => a > day);
+      const fieldsTxt = (r.bee_run_plans ?? []).map((x) => fieldName(plans.find((p) => p.plan_id === x.plan_id)?.field_id)).filter(Boolean).join(', ');
+      const lastRead = ev.filter((e) => e.kind === 'reading').sort((a, b) => b.happened_at.localeCompare(a.happened_at))[0];
+      return `<div class="card bee-run">
+        <div class="dialog-head"><div><h3>${esc(rooms.find((x) => x.room_id === r.room_id)?.name ?? 'Room')} <span class="badge ${r.status === 'running' ? 'up' : r.status === 'planned' ? '' : 'off'}">${esc(BEE_RUN_STATUS.find(([k]) => k === r.status)[1])}</span>${held ? ' <span class="badge warn">On hold</span>' : ''}</h3>
+          <p class="muted small">${fieldsTxt ? esc(fieldsTxt) + ' · ' : ''}day 1 ${fmtDateY(r.started_on)} · release about ${fmtDay(beeDateOf(r, ev, BEE_RELEASE_DAY))}${lastRead ? ` · last reading ${[lastRead.temp_f != null ? tempBoth(lastRead.temp_f) : '', lastRead.rh_pct != null ? `${num(lastRead.rh_pct, 0)}% RH` : ''].filter(Boolean).join(', ')} ${esc(fmtTime(lastRead.happened_at))}` : ''}</p></div>
+          <div class="row"><button class="small" data-log="${r.run_id}">Log</button><button class="small" data-open="${r.run_id}">Open</button></div></div>
+        ${r.status === 'running' || r.status === 'planned' ? `<p class="bee-today"><b>${day <= 0 ? (day >= -BEE_WARMUP_DAYS ? 'Warm-up' : `Starts in ${1 - day} days`) : `Day ${day}`}${held ? ' (held)' : ''}</b>${steps.length ? ': ' + steps.map(([, , t, d]) => `<b>${esc(t)}</b> ${esc(d)}`).join(' ') : ''}</p>
+          ${next ? `<p class="muted small">Next: ${next[0] <= 0 ? 'warm-up' : `day ${next[0]}`} (${fmtDay(beeDateOf(r, ev, next[0]))}) ${esc(next[2])}</p>` : ''}` : ''}
+      </div>`;
+    }).join('') : `<div class="empty">No incubation runs for ${s.season}. Start one from the Planner, or with New run.</div>`}`;
+  wireSeason();
+  $('[data-act=new]', body).onclick = () => openBeeRun(null, { plans, runs, rooms }, reload);
+  $$('[data-open]', body).forEach((b) => (b.onclick = () => openBeeRun(runs.find((r) => r.run_id === Number(b.dataset.open)), { plans, runs, rooms }, reload)));
+  $$('[data-log]', body).forEach((b) => (b.onclick = () => openBeeLog(runs.find((r) => r.run_id === Number(b.dataset.log)), reload)));
+}
+
+const BEE_ROOMS = {
+  table: 'bee_rooms', pk: 'room_id', title: 'Bee rooms', singular: 'room', order: 'name', allowDelete: true,
+  columns: [
+    { key: 'name', label: 'Name', type: 'text', required: true, list: true },
+    { key: 'kind', label: 'Kind', type: 'select', required: true, list: true,
+      options: () => [['incubator', 'Incubation room'], ['cooler', 'Cooler (winter storage)'], ['fall', 'Fall warm / drying room']] },
+    { key: 'controller_make', label: 'Controller make', type: 'text', list: true },
+    { key: 'controller_model', label: 'Controller model', type: 'text', list: true },
+    { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
+    { key: 'notes', label: 'Notes', type: 'textarea' },
+  ],
+};
+
+function openBeePlan(plan, onDone) {
+  const dlg = $('#dialog');
+  const fields = refs.fields.filter((f) => f.active || f.field_id === plan?.field_id)
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+  dlg.innerHTML = `<form class="form">
+    <h3>${plan ? 'Edit' : 'Add'} bee field · ${beeState.season}</h3>
+    <label>Field *<select name="field_id" required><option value="">Choose…</option>${fields.map((f) =>
+      `<option value="${f.field_id}" ${f.field_id === plan?.field_id ? 'selected' : ''}>${esc(f.name)}${f.acres ? ` · ${num(f.acres, 1)} ac` : ''}</option>`).join('')}</select></label>
+    <label>Bees flying (start of bloom) *<input type="date" name="target_flight_on" value="${esc(plan?.target_flight_on ?? '')}" required></label>
+    <p class="muted small" data-calc></p>
+    <div class="row2">
+      <label>Live bees per acre<input type="number" name="bees_per_acre" step="1000" value="${esc(plan?.bees_per_acre ?? 35000)}"></label>
+      <label>Acres (blank = whole field)<input type="number" name="acres" step="0.01" value="${esc(plan?.acres ?? '')}"></label></div>
+    <label>Notes<textarea name="notes" rows="2">${esc(plan?.notes ?? '')}</textarea></label>
+    <div class="actions">${plan ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}<span class="spacer"></span>
+      <button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Save</button></div></form>`;
+  const form = $('form', dlg), f = form.elements;
+  const calc = () => {
+    const v = f.target_flight_on.value;
+    $('[data-calc]', form).textContent = v ? `Warm-up ${fmtDay(addDays(beeStartFor(v), -BEE_WARMUP_DAYS))} · day 1 at 30°C ${fmtDay(beeStartFor(v))} · trays out day ${BEE_RELEASE_DAY}.` : '';
+  };
+  f.target_flight_on.oninput = calc; calc();
+  guardSubmit(form, async () => {
+    const data = { season: beeState.season, field_id: Number(f.field_id.value), target_flight_on: f.target_flight_on.value,
+      bees_per_acre: f.bees_per_acre.value ? Number(f.bees_per_acre.value) : null, acres: f.acres.value ? Number(f.acres.value) : null, notes: f.notes.value.trim() || null };
+    try {
+      if (plan) await q(sb.from('bee_plans').update(data).eq('plan_id', plan.plan_id));
+      else await q(sb.from('bee_plans').insert(data));
+      dlg.close(); toast('Saved'); onDone();
+    } catch { /* shown */ }
+  });
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  const del = $('[data-act=del]', dlg);
+  if (del) del.onclick = async () => {
+    if (!confirm('Delete this bee field from the plan?')) return;
+    try { await q(sb.from('bee_plans').delete().eq('plan_id', plan.plan_id)); dlg.close(); toast('Deleted'); onDone(); } catch { /* shown */ }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+// New run: pick a room and the fields it serves; day 1 defaults from the earliest flight date.
+// Existing run: status, the full calendar with dates, and the log.
+function openBeeRun(run, ctx, onDone) {
+  const { plans, runs, rooms } = ctx;
+  const dlg = $('#dialog');
+  dlg.classList.add('wide');
+  dlg.onclose = () => dlg.classList.remove('wide');
+  const taken = new Set(runs.filter((r) => r !== run).flatMap((r) => (r.bee_run_plans ?? []).map((x) => x.plan_id)));
+  const mine = new Set((run?.bee_run_plans ?? []).map((x) => x.plan_id).concat(ctx.pick ? [ctx.pick] : []));
+  const free = plans.filter((p) => !taken.has(p.plan_id));
+  const incubators = rooms.filter((r) => r.kind === 'incubator' && (r.active || r.room_id === run?.room_id));
+  const ev = run?.bee_run_events ?? [];
+  const today = localDate();
+  const cur = run ? beeDayOn(run, ev, today) : null;
+  dlg.innerHTML = `<form class="form">
+    <div class="dialog-head"><div><h3>${run ? 'Incubation run' : 'New incubation run'} · ${beeState.season}</h3>
+      ${cur ? `<p class="muted small">Today is ${cur.day <= 0 ? 'before day 1' : `day ${cur.day}`}${cur.held ? ' (held)' : ''}.</p>` : ''}</div>
+      ${run ? '<button type="button" data-act="log">Log</button>' : ''}</div>
+    ${incubators.length ? '' : '<p class="warning">Add an incubation room under Bees → Rooms first.</p>'}
+    <div class="row2">
+      <label>Room *<select name="room_id" required><option value="">Choose…</option>${incubators.map((r) => `<option value="${r.room_id}" ${r.room_id === run?.room_id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select></label>
+      <label>Status<select name="status">${BEE_RUN_STATUS.map(([k, l]) => `<option value="${k}" ${k === (run?.status ?? 'planned') ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
+    <div class="row2">
+      <label>Day 1 at 30°C *<input type="date" name="started_on" value="${esc(run?.started_on ?? '')}" required></label>
+      <label>Setpoint °F<input type="number" name="setpoint_f" step="0.5" value="${esc(run?.setpoint_f ?? 86)}"></label></div>
+    <fieldset class="bee-fields"><legend>Fields this room serves</legend>
+      ${free.length ? free.map((p) => `<label class="check"><input type="checkbox" name="plan" value="${p.plan_id}" ${mine.has(p.plan_id) ? 'checked' : ''}> ${esc(fieldName(p.field_id))} <span class="muted small">flying ${fmtDay(p.target_flight_on)}</span></label>`).join('') : '<p class="muted small">No planned fields left. Add them in the Planner.</p>'}
+    </fieldset>
+    <p class="muted small" data-calc></p>
+    <label>Notes<textarea name="notes" rows="2">${esc(run?.notes ?? '')}</textarea></label>
+    ${run ? `<h4>Calendar</h4><ul class="list job-list">${BEE_SCHEDULE.map(([a, b, t, d]) => `<li class="${cur.day >= a && cur.day <= b ? 'bee-now' : ''}"><span class="li-name">
+        <b>${beeDayLabel(a, b)} · ${esc(t)}</b><span class="small">${fmtDay(beeDateOf(run, ev, a))}${a !== b ? ` – ${fmtDay(beeDateOf(run, ev, b))}` : ''}</span><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>
+      <h4>Log</h4>${ev.length ? `<ul class="list">${[...ev].sort((a, b) => b.happened_at.localeCompare(a.happened_at)).map((e) => `<li><span class="li-name">${esc(fmtTime(e.happened_at))} · <b>${esc(BEE_EVENT_KINDS.find(([k]) => k === e.kind)?.[1] ?? e.kind)}</b>
+        ${e.temp_f != null ? ' ' + tempBoth(e.temp_f) : ''}${e.rh_pct != null ? ` ${num(e.rh_pct, 0)}% RH` : ''}${e.setpoint_f != null ? ' ' + tempBoth(e.setpoint_f) : ''}${e.pupal_stage ? ' ' + esc(BEE_STAGES.find(([k]) => k === e.pupal_stage)?.[1] ?? '') : ''}${e.trap_count != null ? ` ${e.trap_count} caught` : ''}
+        ${e.notes ? `<span class="muted small">${esc(e.notes)}</span>` : ''}</span></li>`).join('')}</ul>` : '<p class="muted small">Nothing logged yet.</p>'}` : ''}
+    <div class="actions">${run ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}<span class="spacer"></span>
+      <button type="button" data-act="cancel">${run ? 'Close' : 'Cancel'}</button><button type="submit" class="primary">Save</button></div></form>`;
+  const form = $('form', dlg), f = form.elements;
+  const checked = () => $$('input[name=plan]:checked', form).map((x) => Number(x.value));
+  const calc = () => {
+    const sel = plans.filter((p) => checked().includes(p.plan_id)).sort((a, b) => a.target_flight_on.localeCompare(b.target_flight_on));
+    if (!sel.length) { $('[data-calc]', form).textContent = ''; return; }
+    const want = beeStartFor(sel[0].target_flight_on);
+    if (!run && !f.started_on.value) f.started_on.value = want;
+    const spread = sel.length > 1 ? Math.round((new Date(sel.at(-1).target_flight_on) - new Date(sel[0].target_flight_on)) / 864e5) : 0;
+    $('[data-calc]', form).textContent = `For ${fmtDay(sel[0].target_flight_on)} flight, day 1 is ${fmtDay(want)}.`
+      + (spread ? ` These fields bloom ${spread} days apart; the later ones may need a hold in the day 14–22 window.` : '');
+  };
+  $$('input[name=plan]', form).forEach((x) => (x.onchange = calc)); calc();
+  guardSubmit(form, async () => {
+    const data = { season: beeState.season, room_id: Number(f.room_id.value), status: f.status.value, started_on: f.started_on.value,
+      setpoint_f: f.setpoint_f.value ? Number(f.setpoint_f.value) : 86, target_release_on: addDays(f.started_on.value, BEE_RELEASE_DAY - 1), notes: f.notes.value.trim() || null };
+    try {
+      let id = run?.run_id;
+      if (run) await q(sb.from('bee_incubation_runs').update(data).eq('run_id', id));
+      else id = (await q(sb.from('bee_incubation_runs').insert(data).select().single())).run_id;
+      await q(sb.from('bee_run_plans').delete().eq('run_id', id));
+      const ids = checked();
+      if (ids.length) await q(sb.from('bee_run_plans').insert(ids.map((plan_id) => ({ run_id: id, plan_id }))));
+      dlg.close(); toast('Saved'); onDone();
+    } catch { /* shown */ }
+  });
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  const log = $('[data-act=log]', dlg);
+  if (log) log.onclick = () => openBeeLog(run, onDone);
+  const del = $('[data-act=del]', dlg);
+  if (del) del.onclick = async () => {
+    if (!confirm('Delete this run and its log? This can’t be undone.')) return;
+    try { await q(sb.from('bee_incubation_runs').delete().eq('run_id', run.run_id)); dlg.close(); toast('Deleted'); onDone(); } catch { /* shown */ }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+function openBeeLog(run, onDone) {
+  const dlg = $('#dialog');
+  dlg.classList.remove('wide');
+  const now = new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+  dlg.innerHTML = `<form class="form">
+    <h3>Log · incubation run</h3>
+    <div class="row2"><label>What *<select name="kind">${BEE_EVENT_KINDS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+      <label>When<input type="datetime-local" name="at" value="${now}"></label></div>
+    <div class="row2" data-k="reading"><label>Room temp °F<input type="number" name="temp_f" step="0.1"></label><label>Humidity %<input type="number" name="rh_pct" step="1"></label></div>
+    <label data-k="stage_check">Most cells are at<select name="pupal_stage"><option value="">Choose…</option>${BEE_STAGES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+    <label data-k="trap_count">Wasps caught<input type="number" name="trap_count" step="1"></label>
+    <label data-k="setpoint">New setpoint °F <span class="muted small" data-c></span><input type="number" name="setpoint_f" step="0.5" placeholder="55 to hold, 86 to resume"></label>
+    <p class="muted small" data-k="setpoint">Under ${BEE_HOLD_BELOW_F}°F counts as a hold: those days don’t count toward release. Hold only on days 14–22, and it’s the cocoons that need to reach 10–15°C, not just the air.</p>
+    <label>Notes<textarea name="notes" rows="2"></textarea></label>
+    <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Save</button></div></form>`;
+  const form = $('form', dlg), f = form.elements;
+  const sync = () => $$('[data-k]', form).forEach((x) => (x.hidden = x.dataset.k !== f.kind.value));
+  f.kind.onchange = sync; sync();
+  f.setpoint_f.oninput = () => { $('[data-c]', form).textContent = f.setpoint_f.value ? `= ${fToC(Number(f.setpoint_f.value))}°C` : ''; };
+  guardSubmit(form, async () => {
+    const kind = f.kind.value, at = new Date(f.at.value || Date.now()).toISOString(), notes = f.notes.value.trim() || null;
+    try {
+      if (kind === 'reading' && !f.temp_f.value && !f.rh_pct.value) return toast('Enter a temperature or humidity', true);
+      if (kind === 'setpoint' && !f.setpoint_f.value) return toast('Enter the new setpoint', true);
+      const n = (k) => (f[k].value === '' ? null : Number(f[k].value));
+      await q(sb.from('bee_run_events').insert({ run_id: run.run_id, happened_at: at, kind, notes,
+        temp_f: kind === 'reading' ? n('temp_f') : null, rh_pct: kind === 'reading' ? n('rh_pct') : null,
+        pupal_stage: kind === 'stage_check' ? f.pupal_stage.value || null : null,
+        trap_count: kind === 'trap_count' ? n('trap_count') : null,
+        setpoint_f: kind === 'setpoint' ? n('setpoint_f') : null }));
+      dlg.close(); toast('Logged'); onDone();
+    } catch { /* shown */ }
+  });
+  $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+  if (!dlg.open) dlg.showModal();
+}
+
+// =====================================================================
 // Navigation and sign-in
 // =====================================================================
 const VIEWS = {
@@ -6857,6 +7169,7 @@ const VIEWS = {
   maint: renderMaint,
   setup: renderSetup,
   tools: renderTools,
+  bees: renderBees,
 };
 let currentView = 'home';
 

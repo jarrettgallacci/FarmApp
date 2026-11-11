@@ -67,7 +67,7 @@ create table if not exists public.bee_storage (
   notes       text
 );
 
--- Temperature / humidity, typed in or pulled from a controller.
+-- Temperature / humidity pulled from a controller (typed-in readings go on bee_run_events).
 create table if not exists public.bee_room_readings (
   reading_id  bigint generated always as identity primary key,
   room_id     bigint not null references public.bee_rooms on delete cascade,
@@ -116,12 +116,15 @@ create table if not exists public.bee_run_plans (
   primary key (run_id, plan_id)
 );
 
--- Daily log during a run: pupal stage checks, trap counts, setpoint changes, feeding.
+-- Daily log during a run: readings, pupal stage checks, trap counts, setpoint changes
+-- (a setpoint under 68F is a hold; those days don't count toward release), feeding.
 create table if not exists public.bee_run_events (
   event_id     bigint generated always as identity primary key,
   run_id       bigint not null references public.bee_incubation_runs on delete cascade,
   happened_at  timestamptz not null default now(),
-  kind         text not null check (kind in ('stage_check','trap_count','setpoint','feeding','vacuum','note')),
+  kind         text not null check (kind in ('reading','stage_check','trap_count','setpoint','feeding','vacuum','note')),
+  temp_f       numeric(5,1),           -- reading: room temperature
+  rh_pct       numeric(5,1),           -- reading: humidity
   pupal_stage  text check (pupal_stage in ('prepupa','white','eyes_pink','eyes_dark','body_darkening','black','males_out','females_out')),
   trap_count   integer,
   setpoint_f   numeric(4,1),

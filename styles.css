@@ -1089,3 +1089,11 @@ html[data-style="gsp"] .stat-value { font-weight: 800; }
 .report-grid label.check input { margin-top: .2rem; flex: none; }
 .report-fields label.check.sub { margin-left: 1.4rem; }
 .report-grid .row.wrap label { display: flex; flex-direction: column; font-size: .85rem; }
+
+/* Bees */
+.bee-run { margin-bottom: .75rem; }
+.bee-run h3 { margin: 0; }
+.bee-today { margin: .5rem 0 .25rem; }
+li.bee-now { background: var(--green-soft); }
+.bee-fields { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: .5rem .75rem; margin: 0; }
+.bee-fields legend { padding: 0 .25rem; font-weight: 600; }
