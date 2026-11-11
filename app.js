@@ -6847,39 +6847,52 @@ function renderMonoCal(box) {
 // Bees (alfalfa leafcutter): a target flight date per field works back to
 // the incubation start; each run then shows what day it is and what to do.
 // The day-by-day steps are the farm's posted calendar (Murrell, Saskatchewan
-// Agriculture and Food) at a steady 30°C, plus vacuuming, humidity and
-// light-traps-off from the bee guide. Vapona stays because the farm uses it.
+// Agriculture and Food) at a steady 30°C, adjusted to the farm's agreed best
+// practice (Nov 2026): release at 30–50% of females out (SARE, Parma),
+// humidity 70%+, light traps, vacuuming, a day 11 pupal check and a forecast
+// check. Vapona stays because the farm uses it.
 // =====================================================================
-const BEE_RELEASE_DAY = 23;   // trays out once 75% of females have hatched (days 23–24)
-const BEE_WARMUP_DAYS = 3;    // in trays at room temperature before day 1
-const BEE_HOLD_BELOW_F = 68;  // a setpoint under this is a hold: those days don't count
+const BEE_RELEASE_DAY = 22;          // trays out when 30–50% of females are out (SARE, U of Idaho Parma)
+const BEE_RELEASE_PCT = [30, 50];
+const BEE_WARMUP_DAYS = 3;           // in trays at 65–70°F before day 1
+const BEE_HOLD_BELOW_F = 68;         // a setpoint under this is a hold: those days don't count
+const BEE_RH_MIN = 70, BEE_HOT_F = 90;
+const BEE_VAPONA_DAYS = [7, 13];     // humidity under 70% with strips in is the risky case (Parma)
+const BEE_COOLER = { maxF: 41, maxRh: 65, canOverF: 3 };
 const BEE_SCHEDULE = [
-  [-BEE_WARMUP_DAYS, 0, 'Out of the cooler', 'Cocoons into incubation trays; let them warm slowly at room temperature, then bring the room to 30°C (86°F).'],
-  [1, 1, 'Room at 30°C', 'All prepupae. Black lights and water traps in place; check the temperature alarm works.'],
+  [-BEE_WARMUP_DAYS, 0, 'Out of the cooler', 'Cells into trays, no deeper than 1 inch, at 65–70°F in dry air (no humidifier yet) for 2–3 days so they don’t sweat. Bleach dip, if used, at the start so cells are dry before 86°F. Light traps set up and running.'],
+  [1, 1, 'Room at 30°C (86°F)', 'All prepupae. Humidifier on: 70% or more. Check the temperature and humidity alarms. 1 inch of vermiculite over the cells. Light traps on: count and skim the pans daily.'],
   [3, 3, 'Pteromalus pupate', 'Pteromalus make their final molt into the pupal stage.'],
-  [7, 7, 'Vapona in', 'Dichlorvos strips in at ¾ strip per 1,000 cu ft; less if the incubator is only partly full.'],
+  [7, 7, 'Vapona in', 'Dichlorvos strips in at ¾ strip per 1,000 cu ft; less if the room is only partly full. Humidity must stay at 70% or more while strips are in.'],
   [8, 8, 'Bees pupate: hold steady', 'Very sensitive to temperature swings now. No cooling or holding.'],
-  [8, 15, 'Parasitic wasps emerging', 'Pteromalus come out days 8–12 (with Vapona working they should die in the trays). Keep black lights and water traps going; vacuum walls and windows twice a day.'],
+  [8, 15, 'Parasitic wasps emerging', 'Pteromalus come out days 8–12, Monodontomerus 14–15. Vacuum walls and floor twice a day and empty it outside. Log trap counts.'],
   [10, 10, 'Pink-eyed stage', 'Pupae start to show eye colour.'],
+  [11, 11, 'Pupal stage check', 'Open 10 cells and log the stage most are at. The app works out whether the room is early or late.'],
+  [12, 14, 'Check the release-day forecast', 'If release day looks cold, wet or windy, plan a slow-down now while it still works.'],
   [12, 12, 'Darkening', 'Eyes and back darkening.'],
-  [13, 13, 'Vapona out, air the room', 'Remove the strips. Air the incubator thoroughly with exhaust and circulating fans for 24–48 hours; hold 30°C if possible.'],
-  [14, 15, 'Back to 30°C', 'If the room cooled while airing, bring it back to 30°C to continue development.'],
-  [14, 15, 'Native leafcutters emerge', 'Early emergers are native bees. The timing isn’t off.'],
+  [13, 13, 'Vapona out, air the room', 'Remove the strips. Air the room with exhaust and circulating fans for 24–48 hours; hold 30°C if possible.'],
+  [14, 15, 'Back to 30°C', 'If the room cooled while airing, bring it back to 30°C. Native leafcutters may emerge early; the timing isn’t off.'],
   [14, 22, 'Slow-down window', 'If bloom or weather is late, bring the cocoons (not just the air) to 10–15°C (50–59°F) for up to 2 weeks. Development stops and resumes when warmed.'],
   [16, 16, 'Males dark', 'Early hatchers (mostly males) fully dark; later ones (mostly females) darkening.'],
-  [18, 19, 'Males emerging', 'Bees are very susceptible to high temperatures. Check the alarm. Light traps off: bees go to the lights too (bee guide).'],
-  [21, 22, 'Females begin', 'Male emergence peaks. Second-generation Pteromalus begin to emerge.'],
-  [23, 24, 'Release', 'Female emergence peaks. Trays to the field once 75% of females have hatched. Trays can come back for 2–3 days to finish the female hatch, then go out again.'],
+  [17, 17, 'Screened lids on', 'Lids on the trays before males start emerging.'],
+  [18, 19, 'Males emerging', 'Light traps off: bees go to the lights too. Very heat-sensitive now: check the alarm.'],
+  [20, 21, 'Females begin', 'Check a sample tray daily and log the percent of females out. Male emergence peaks; second-generation Pteromalus begin.'],
+  [22, 22, 'Release', 'Trays to the field when 30–50% of females are out. Fair-weather morning or early evening; tarp loosely; keep rain off.'],
+  [23, 24, 'If release has to wait', 'Feed 1:1 sugar syrup on paper towels laid on the screens, twice a day. Hold no more than 2–3 days, then release on the first decent morning.'],
   [28, 28, 'Hatch complete', 'Hatch is virtually complete at 30°C.'],
 ];
-const BEE_EVENT_KINDS = [['reading', 'Temperature / humidity'], ['stage_check', 'Pupal stage check'], ['trap_count', 'Trap count'],
+const BEE_EVENT_KINDS = [['reading', 'Temperature / humidity'], ['stage_check', 'Pupal stage check'], ['female_check', 'Females out (%)'], ['trap_count', 'Trap count'],
   ['setpoint', 'Setpoint change (hold or resume)'], ['vacuum', 'Vacuumed'], ['feeding', 'Fed held bees'], ['note', 'Note']];
 const BEE_STAGES = [['prepupa', 'Prepupae (white grubs)'], ['white', 'White pupae'], ['eyes_pink', 'Eyes pink to tan'], ['eyes_dark', 'Eyes dark red/brown'],
   ['body_darkening', 'Body darkening'], ['black', 'Fully black'], ['males_out', 'Males emerging'], ['females_out', 'Females emerging']];
+// Days left to 50% emergence at 85°F by pupal stage (U of Idaho Parma degree-day model).
+const BEE_DAYS_LEFT = { white: 11, eyes_pink: 10, eyes_dark: 8, body_darkening: 4.5, black: 3 };
 const BEE_RUN_STATUS = [['planned', 'Planned'], ['running', 'Running'], ['released', 'Released'], ['done', 'Done']];
+const BEE_COVERS = [['vermiculite', 'Vermiculite'], ['sawdust', 'Sawdust'], ['cedar_baked', 'Cedar, baked'], ['trial', 'Mixed (cover trial)'], ['none', 'None']];
 const fToC = (f) => Math.round(((f - 32) * 5) / 9);
 const tempBoth = (f) => (f == null ? '' : `${fToC(f)}°C (${Number(f)}°F)`);
 const beeStartFor = (flightOn) => addDays(flightOn, -(BEE_RELEASE_DAY - 1));
+const labelOf = (list, k) => list.find(([v]) => v === k)?.[1] ?? '';
 
 const beeState = { tab: 'plan', season: new Date().getMonth() >= 7 ? new Date().getFullYear() + 1 : new Date().getFullYear() };
 
@@ -6909,6 +6922,63 @@ function beeDateOf(run, events, n) {
 }
 const beeDayLabel = (a, b) => (a <= 0 ? 'Warm-up' : a === b ? `Day ${a}` : `Days ${a}–${b}`);
 const beeStepsOn = (day) => BEE_SCHEDULE.filter(([a, b]) => day >= a && day <= b);
+const latestOf = (ev, kind) => ev.filter((e) => e.kind === kind).sort((a, b) => b.happened_at.localeCompare(a.happened_at))[0];
+
+// 16-day daily forecast for the farm, cached for an hour; empty when offline.
+let beeWx = null;
+async function beeForecast() {
+  if (beeWx && Date.now() - beeWx.at < 3600e3) return beeWx.days;
+  const days = new Map();
+  try {
+    const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${FARM_LAT}&longitude=${FARM_LON}`
+      + '&daily=temperature_2m_max,precipitation_probability_max,wind_speed_10m_max&temperature_unit=fahrenheit&wind_speed_unit=mph'
+      + '&timezone=America%2FLos_Angeles&forecast_days=16');
+    const d = (await r.json()).daily;
+    d.time.forEach((t, i) => days.set(t, { hi: d.temperature_2m_max[i], rain: d.precipitation_probability_max?.[i], wind: d.wind_speed_10m_max[i] }));
+  } catch { /* no forecast */ }
+  beeWx = { at: Date.now(), days };
+  return days;
+}
+// Bees need warm, calm, dry weather to fly and orient (thresholds are a starting point, not research).
+function beeWxProblem(w) {
+  if (!w) return null;
+  const bad = [];
+  if (w.hi != null && w.hi < 70) bad.push(`high only ${Math.round(w.hi)}°F`);
+  if (w.rain != null && w.rain >= 50) bad.push(`${w.rain}% chance of rain`);
+  if (w.wind != null && w.wind >= 20) bad.push(`wind ${Math.round(w.wind)} mph`);
+  return bad.length ? bad.join(', ') : null;
+}
+
+// Flags for one run: humidity, heat, stage check vs plan, females out, release-day weather.
+function beeRunAlerts(r, ev, wx) {
+  const out = [];
+  const today = localDate();
+  const { day } = beeDayOn(r, ev, today);
+  const read = latestOf(ev, 'reading');
+  if (read?.temp_f != null && read.temp_f >= BEE_HOT_F) out.push(['bad', `Room at ${tempBoth(read.temp_f)}: 90°F and above kills bees.`]);
+  if (read?.rh_pct != null && read.rh_pct < BEE_RH_MIN) {
+    const vap = day >= BEE_VAPONA_DAYS[0] && day <= BEE_VAPONA_DAYS[1];
+    out.push([vap ? 'bad' : 'warn', `Humidity ${num(read.rh_pct, 0)}%: under ${BEE_RH_MIN}%${vap ? ' with Vapona in, the riskiest case' : ''}.`]);
+  }
+  const planned = beeDateOf(r, ev, BEE_RELEASE_DAY);
+  const stage = latestOf(ev, 'stage_check');
+  if (stage && BEE_DAYS_LEFT[stage.pupal_stage] != null && day < BEE_RELEASE_DAY) {
+    const predicted = addDays(localDate(new Date(stage.happened_at)), Math.round(BEE_DAYS_LEFT[stage.pupal_stage]));
+    const diff = Math.round((new Date(predicted) - new Date(planned)) / 864e5);
+    if (Math.abs(diff) > 1) out.push(['warn', `Stage check says about ${fmtDay(predicted)}: ${Math.abs(diff)} days ${diff < 0 ? 'early' : 'late'} against the plan.`]);
+  }
+  const fem = latestOf(ev, 'female_check');
+  if (fem?.pct_females_out != null && r.status === 'running') {
+    const p = Number(fem.pct_females_out);
+    if (p > BEE_RELEASE_PCT[1]) out.push(['bad', `${num(p, 0)}% of females out: past the ${BEE_RELEASE_PCT.join('–')}% target. Release now.`]);
+    else if (p >= BEE_RELEASE_PCT[0]) out.push(['up', `${num(p, 0)}% of females out: release.`]);
+  }
+  if (r.status === 'running' && day >= 10 && day < BEE_RELEASE_DAY) {
+    const prob = beeWxProblem(wx.get(planned));
+    if (prob) out.push(['warn', `Release day ${fmtDay(planned)} looks poor (${prob}).${day <= 22 && day >= 14 ? ' Slow down now if it holds.' : ' Watch it; slow down on day 14–22 if it holds.'}`]);
+  }
+  return out;
+}
 
 async function renderBees(el) {
   const s = beeState;
@@ -6922,7 +6992,8 @@ async function renderBees(el) {
     return;
   }
   const rooms = roomsRes.data, plans = plansRes.data, runs = runsRes.data;
-  const tabs = [['plan', 'Planner'], ['runs', `Incubation${runs.some((r) => r.status === 'running') ? ' ●' : ''}`], ['schedule', 'Schedule'], ['rooms', 'Rooms']];
+  const tabs = [['plan', 'Planner'], ['runs', `Incubation${runs.some((r) => r.status === 'running') ? ' ●' : ''}`], ['storage', 'Storage'],
+    ['samples', 'Cell samples'], ['fumigation', 'Fumigation'], ['schedule', 'Schedule'], ['rooms', 'Rooms']];
   el.innerHTML = `<div class="subtabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === s.tab ? 'active' : ''}">${esc(l)}</button>`).join('')}</div>
     <div id="bee-body"></div>`;
   $$('[data-tab]', el).forEach((b) => (b.onclick = () => { s.tab = b.dataset.tab; renderBees(el); }));
@@ -6932,10 +7003,15 @@ async function renderBees(el) {
   const wireSeason = () => $$('[data-season]', body).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
 
   if (s.tab === 'rooms') return renderCrud(BEE_ROOMS, body);
+  if (s.tab === 'storage') return renderBeeStorage(body, rooms, reload);
+  if (s.tab === 'samples') return renderBeeSamples(body, reload);
+  if (s.tab === 'fumigation') return renderBeeFumigation(body, reload);
   if (s.tab === 'schedule') {
     body.innerHTML = `<div class="section-head"><h2>Incubation schedule</h2></div>
-      <p class="muted small">From the calendar posted in the bee room (Murrell, Saskatchewan Agriculture and Food). Assumes steady cool storage at 5°C before, and a steady 30°C (86°F) during. Keep humidity at 70% or more the whole time (dry air gives deformed adults) and never let the room reach 90°F (32°C). Release is planned for day ${BEE_RELEASE_DAY}. Humidity, vacuuming and light traps off at day 18 are added from the bee guide.</p>
-      <ul class="list job-list card">${BEE_SCHEDULE.map(([a, b, t, d]) => `<li><span class="li-name"><b>${beeDayLabel(a, b)} · ${esc(t)}</b><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>`;
+      <p class="muted small">The calendar posted in the bee room (Murrell, Saskatchewan Agriculture and Food) at a steady 30°C (86°F), with the farm’s agreed changes: release on day ${BEE_RELEASE_DAY} when ${BEE_RELEASE_PCT.join('–')}% of females are out (SARE, U of Idaho), humidity ${BEE_RH_MIN}% or more, light traps, vacuuming, a day 11 stage check and a forecast check. Never let the room reach 90°F (32°C). Cold storage before: 38°F, about 50% humidity.</p>
+      <ul class="list job-list card">${BEE_SCHEDULE.map(([a, b, t, d]) => `<li><span class="li-name"><b>${beeDayLabel(a, b)} · ${esc(t)}</b><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>
+      <h3>Pupal stage: days left to 50% emergence at 86°F</h3>
+      <ul class="list card">${BEE_STAGES.filter(([k]) => BEE_DAYS_LEFT[k] != null).map(([k, l]) => `<li><span class="li-name">${esc(l)}</span><span class="li-value">${BEE_DAYS_LEFT[k] === 4.5 ? '4–5' : BEE_DAYS_LEFT[k]} days</span></li>`).join('')}</ul>`;
     return;
   }
 
@@ -6946,7 +7022,7 @@ async function renderBees(el) {
     const totalGal = plans.reduce((t, p) => t + (liveGal(p) ?? 0), 0);
     body.innerHTML = `<div class="section-head"><h2>Bee plan</h2>
         <div class="row">${seasonNav}<button class="primary" data-act="add">Add field</button></div></div>
-      <p class="muted small">Enter the day you want bees flying (start of bloom). Incubation starts ${BEE_RELEASE_DAY - 1} days earlier so trays go out on day ${BEE_RELEASE_DAY}; pull trays from the cooler ${BEE_WARMUP_DAYS} days before that to warm up.</p>
+      <p class="muted small">Enter the day you want bees flying (start of bloom). Incubation starts ${BEE_RELEASE_DAY - 1} days earlier so trays go out on day ${BEE_RELEASE_DAY}; pull trays from the cooler ${BEE_WARMUP_DAYS} days before that to warm up. With rooms staggered, aim to have the last room out by about peak bloom.</p>
       <div class="card table-wrap crud-wrap"><table class="crud m-cards"><thead><tr>
         <th>Field</th><th>Bees flying</th><th>Day 1 at 30°C</th><th>Warm-up</th><th>Live bees</th><th>Run</th><th></th></tr></thead><tbody>
       ${plans.length ? plans.map((p) => {
@@ -6955,7 +7031,7 @@ async function renderBees(el) {
           <td><span class="m-only">flying </span>${fmtDay(p.target_flight_on)}</td><td><span class="m-only">day 1 </span>${fmtDay(start)}</td>
           <td>${fmtDay(addDays(start, -BEE_WARMUP_DAYS))}</td>
           <td>${liveGal(p) != null ? `${num(liveGal(p), 1)} gal <span class="muted small">(${Number(p.bees_per_acre).toLocaleString()}/ac)</span>` : ''}</td>
-          <td>${r ? `<span class="badge ${r.status === 'running' ? 'up' : ''}">${esc(rooms.find((x) => x.room_id === r.room_id)?.name ?? '')} · ${esc(BEE_RUN_STATUS.find(([k]) => k === r.status)[1])}</span>` : '<span class="muted">—</span>'}</td>
+          <td>${r ? `<span class="badge ${r.status === 'running' ? 'up' : ''}">${esc(rooms.find((x) => x.room_id === r.room_id)?.name ?? '')} · ${esc(labelOf(BEE_RUN_STATUS, r.status))}</span>` : '<span class="muted">—</span>'}</td>
           <td class="nowrap"><button class="small" data-edit="${p.plan_id}">Edit</button>${r ? '' : ` <button class="small primary" data-run="${p.plan_id}">Start run</button>`}</td></tr>`;
       }).join('') : `<tr><td colspan="7" class="muted">No fields planned for ${s.season} yet.</td></tr>`}
       </tbody></table></div>
@@ -6969,20 +7045,24 @@ async function renderBees(el) {
 
   // Incubation runs
   const today = localDate();
+  const wx = runs.some((r) => r.status === 'running') ? await beeForecast() : new Map();
   body.innerHTML = `<div class="section-head"><h2>Incubation</h2>
       <div class="row">${seasonNav}<button class="primary" data-act="new">New run</button></div></div>
     ${runs.length ? runs.map((r) => {
       const ev = r.bee_run_events ?? [];
       const { day, held } = beeDayOn(r, ev, today);
-      const steps = r.status === 'running' || r.status === 'planned' ? beeStepsOn(day) : [];
+      const live = r.status === 'running' || r.status === 'planned';
+      const steps = live ? beeStepsOn(day) : [];
       const next = BEE_SCHEDULE.find(([a]) => a > day);
       const fieldsTxt = (r.bee_run_plans ?? []).map((x) => fieldName(plans.find((p) => p.plan_id === x.plan_id)?.field_id)).filter(Boolean).join(', ');
-      const lastRead = ev.filter((e) => e.kind === 'reading').sort((a, b) => b.happened_at.localeCompare(a.happened_at))[0];
+      const lastRead = latestOf(ev, 'reading');
+      const alerts = live ? beeRunAlerts(r, ev, wx) : [];
       return `<div class="card bee-run">
-        <div class="dialog-head"><div><h3>${esc(rooms.find((x) => x.room_id === r.room_id)?.name ?? 'Room')} <span class="badge ${r.status === 'running' ? 'up' : r.status === 'planned' ? '' : 'off'}">${esc(BEE_RUN_STATUS.find(([k]) => k === r.status)[1])}</span>${held ? ' <span class="badge warn">On hold</span>' : ''}</h3>
-          <p class="muted small">${fieldsTxt ? esc(fieldsTxt) + ' · ' : ''}day 1 ${fmtDateY(r.started_on)} · release about ${fmtDay(beeDateOf(r, ev, BEE_RELEASE_DAY))}${lastRead ? ` · last reading ${[lastRead.temp_f != null ? tempBoth(lastRead.temp_f) : '', lastRead.rh_pct != null ? `${num(lastRead.rh_pct, 0)}% RH` : ''].filter(Boolean).join(', ')} ${esc(fmtTime(lastRead.happened_at))}` : ''}</p></div>
+        <div class="dialog-head"><div><h3>${esc(rooms.find((x) => x.room_id === r.room_id)?.name ?? 'Room')} <span class="badge ${r.status === 'running' ? 'up' : r.status === 'planned' ? '' : 'off'}">${esc(labelOf(BEE_RUN_STATUS, r.status))}</span>${held ? ' <span class="badge warn">On hold</span>' : ''}</h3>
+          <p class="muted small">${fieldsTxt ? esc(fieldsTxt) + ' · ' : ''}day 1 ${fmtDateY(r.started_on)} · release about ${fmtDay(beeDateOf(r, ev, BEE_RELEASE_DAY))}${r.tray_cover ? ' · ' + esc(labelOf(BEE_COVERS, r.tray_cover)) : ''}${lastRead ? ` · last reading ${[lastRead.temp_f != null ? tempBoth(lastRead.temp_f) : '', lastRead.rh_pct != null ? `${num(lastRead.rh_pct, 0)}% RH` : ''].filter(Boolean).join(', ')} ${esc(fmtTime(lastRead.happened_at))}` : ''}</p></div>
           <div class="row"><button class="small" data-log="${r.run_id}">Log</button><button class="small" data-open="${r.run_id}">Open</button></div></div>
-        ${r.status === 'running' || r.status === 'planned' ? `<p class="bee-today"><b>${day <= 0 ? (day >= -BEE_WARMUP_DAYS ? 'Warm-up' : `Starts in ${1 - day} days`) : `Day ${day}`}${held ? ' (held)' : ''}</b>${steps.length ? ': ' + steps.map(([, , t, d]) => `<b>${esc(t)}</b> ${esc(d)}`).join(' ') : ''}</p>
+        ${alerts.length ? `<ul class="bee-alerts">${alerts.map(([k, t]) => `<li class="bee-alert ${k}">${esc(t)}</li>`).join('')}</ul>` : ''}
+        ${live ? `<p class="bee-today"><b>${day <= 0 ? (day >= -BEE_WARMUP_DAYS ? 'Warm-up' : `Starts in ${1 - day} days`) : `Day ${day}`}${held ? ' (held)' : ''}</b>${steps.length ? ': ' + steps.map(([, , t, d]) => `<b>${esc(t)}</b> ${esc(d)}`).join(' ') : ''}</p>
           ${next ? `<p class="muted small">Next: ${next[0] <= 0 ? 'warm-up' : `day ${next[0]}`} (${fmtDay(beeDateOf(r, ev, next[0]))}) ${esc(next[2])}</p>` : ''}` : ''}
       </div>`;
     }).join('') : `<div class="empty">No incubation runs for ${s.season}. Start one from the Planner, or with New run.</div>`}`;
@@ -6998,6 +7078,8 @@ const BEE_ROOMS = {
     { key: 'name', label: 'Name', type: 'text', required: true, list: true },
     { key: 'kind', label: 'Kind', type: 'select', required: true, list: true,
       options: () => [['incubator', 'Incubation room'], ['cooler', 'Cooler (winter storage)'], ['fall', 'Fall warm / drying room']] },
+    { key: 'cubic_ft', label: 'Volume (cu ft), for Vapona and humidifier sizing', listLabel: 'Cu ft', type: 'number', list: true },
+    { key: 'loaded_on', label: 'Coolers: bees in since', listLabel: 'Bees in', type: 'date', list: true },
     { key: 'controller_make', label: 'Controller make', type: 'text', list: true },
     { key: 'controller_model', label: 'Controller model', type: 'text', list: true },
     { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
@@ -7045,6 +7127,11 @@ function openBeePlan(plan, onDone) {
   if (!dlg.open) dlg.showModal();
 }
 
+const beeEventText = (e) => [
+  e.temp_f != null ? tempBoth(e.temp_f) : '', e.rh_pct != null ? `${num(e.rh_pct, 0)}% RH` : '', e.setpoint_f != null ? tempBoth(e.setpoint_f) : '',
+  e.pupal_stage ? labelOf(BEE_STAGES, e.pupal_stage) : '', e.pct_females_out != null ? `${num(e.pct_females_out, 0)}% of females out` : '',
+  e.trap_count != null ? `${e.trap_count} caught` : ''].filter(Boolean).join(' · ');
+
 // New run: pick a room and the fields it serves; day 1 defaults from the earliest flight date.
 // Existing run: status, the full calendar with dates, and the log.
 function openBeeRun(run, ctx, onDone) {
@@ -7070,6 +7157,7 @@ function openBeeRun(run, ctx, onDone) {
     <div class="row2">
       <label>Day 1 at 30°C *<input type="date" name="started_on" value="${esc(run?.started_on ?? '')}" required></label>
       <label>Setpoint °F<input type="number" name="setpoint_f" step="0.5" value="${esc(run?.setpoint_f ?? 86)}"></label></div>
+    <label>Tray cover<select name="tray_cover"><option value="">—</option>${BEE_COVERS.map(([k, l]) => `<option value="${k}" ${k === (run?.tray_cover ?? 'vermiculite') ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     <fieldset class="bee-fields"><legend>Fields this room serves</legend>
       ${free.length ? free.map((p) => `<label class="check"><input type="checkbox" name="plan" value="${p.plan_id}" ${mine.has(p.plan_id) ? 'checked' : ''}> ${esc(fieldName(p.field_id))} <span class="muted small">flying ${fmtDay(p.target_flight_on)}</span></label>`).join('') : '<p class="muted small">No planned fields left. Add them in the Planner.</p>'}
     </fieldset>
@@ -7077,9 +7165,8 @@ function openBeeRun(run, ctx, onDone) {
     <label>Notes<textarea name="notes" rows="2">${esc(run?.notes ?? '')}</textarea></label>
     ${run ? `<h4>Calendar</h4><ul class="list job-list">${BEE_SCHEDULE.map(([a, b, t, d]) => `<li class="${cur.day >= a && cur.day <= b ? 'bee-now' : ''}"><span class="li-name">
         <b>${beeDayLabel(a, b)} · ${esc(t)}</b><span class="small">${fmtDay(beeDateOf(run, ev, a))}${a !== b ? ` – ${fmtDay(beeDateOf(run, ev, b))}` : ''}</span><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>
-      <h4>Log</h4>${ev.length ? `<ul class="list">${[...ev].sort((a, b) => b.happened_at.localeCompare(a.happened_at)).map((e) => `<li><span class="li-name">${esc(fmtTime(e.happened_at))} · <b>${esc(BEE_EVENT_KINDS.find(([k]) => k === e.kind)?.[1] ?? e.kind)}</b>
-        ${e.temp_f != null ? ' ' + tempBoth(e.temp_f) : ''}${e.rh_pct != null ? ` ${num(e.rh_pct, 0)}% RH` : ''}${e.setpoint_f != null ? ' ' + tempBoth(e.setpoint_f) : ''}${e.pupal_stage ? ' ' + esc(BEE_STAGES.find(([k]) => k === e.pupal_stage)?.[1] ?? '') : ''}${e.trap_count != null ? ` ${e.trap_count} caught` : ''}
-        ${e.notes ? `<span class="muted small">${esc(e.notes)}</span>` : ''}</span></li>`).join('')}</ul>` : '<p class="muted small">Nothing logged yet.</p>'}` : ''}
+      <h4>Log</h4>${ev.length ? `<ul class="list">${[...ev].sort((a, b) => b.happened_at.localeCompare(a.happened_at)).map((e) => `<li><span class="li-name">${esc(fmtTime(e.happened_at))} · <b>${esc(labelOf(BEE_EVENT_KINDS, e.kind) || e.kind)}</b>
+        ${esc(beeEventText(e))} ${e.notes ? `<span class="muted small">${esc(e.notes)}</span>` : ''}</span></li>`).join('')}</ul>` : '<p class="muted small">Nothing logged yet.</p>'}` : ''}
     <div class="actions">${run ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}<span class="spacer"></span>
       <button type="button" data-act="cancel">${run ? 'Close' : 'Cancel'}</button><button type="submit" class="primary">Save</button></div></form>`;
   const form = $('form', dlg), f = form.elements;
@@ -7096,7 +7183,8 @@ function openBeeRun(run, ctx, onDone) {
   $$('input[name=plan]', form).forEach((x) => (x.onchange = calc)); calc();
   guardSubmit(form, async () => {
     const data = { season: beeState.season, room_id: Number(f.room_id.value), status: f.status.value, started_on: f.started_on.value,
-      setpoint_f: f.setpoint_f.value ? Number(f.setpoint_f.value) : 86, target_release_on: addDays(f.started_on.value, BEE_RELEASE_DAY - 1), notes: f.notes.value.trim() || null };
+      setpoint_f: f.setpoint_f.value ? Number(f.setpoint_f.value) : 86, target_release_on: addDays(f.started_on.value, BEE_RELEASE_DAY - 1),
+      tray_cover: f.tray_cover.value || null, notes: f.notes.value.trim() || null };
     try {
       let id = run?.run_id;
       if (run) await q(sb.from('bee_incubation_runs').update(data).eq('run_id', id));
@@ -7118,19 +7206,26 @@ function openBeeRun(run, ctx, onDone) {
   if (!dlg.open) dlg.showModal();
 }
 
+const nowLocal = () => new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+
 function openBeeLog(run, onDone) {
   const dlg = $('#dialog');
   dlg.classList.remove('wide');
-  const now = new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+  const { day } = beeDayOn(run, run.bee_run_events ?? [], localDate());
+  const guess = day >= 20 ? 'female_check' : day === 11 ? 'stage_check' : 'reading';
   dlg.innerHTML = `<form class="form">
-    <h3>Log · incubation run</h3>
-    <div class="row2"><label>What *<select name="kind">${BEE_EVENT_KINDS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
-      <label>When<input type="datetime-local" name="at" value="${now}"></label></div>
+    <h3>Log · incubation run · day ${day > 0 ? day : '—'}</h3>
+    <div class="row2"><label>What *<select name="kind">${BEE_EVENT_KINDS.map(([k, l]) => `<option value="${k}" ${k === guess ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>When<input type="datetime-local" name="at" value="${nowLocal()}"></label></div>
     <div class="row2" data-k="reading"><label>Room temp °F<input type="number" name="temp_f" step="0.1"></label><label>Humidity %<input type="number" name="rh_pct" step="1"></label></div>
-    <label data-k="stage_check">Most cells are at<select name="pupal_stage"><option value="">Choose…</option>${BEE_STAGES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
-    <label data-k="trap_count">Wasps caught<input type="number" name="trap_count" step="1"></label>
+    <p class="muted small" data-k="reading">Read a hygrometer at tray height. Target 86°F and ${BEE_RH_MIN}% or more; 90°F and above kills bees.</p>
+    <label data-k="stage_check">Most of 10 opened cells are at<select name="pupal_stage"><option value="">Choose…</option>${BEE_STAGES.map(([k, l]) => `<option value="${k}">${l}${BEE_DAYS_LEFT[k] != null ? ` · ${BEE_DAYS_LEFT[k] === 4.5 ? '4–5' : BEE_DAYS_LEFT[k]} days left` : ''}</option>`).join('')}</select></label>
+    <label data-k="female_check">Percent of females out (sample tray)<input type="number" name="pct_females_out" step="1" min="0" max="100"></label>
+    <p class="muted small" data-k="female_check">Release at ${BEE_RELEASE_PCT.join('–')}%. Females are the larger bees, with a pointed abdomen; males are smaller with a blunter tip and pale face hairs.</p>
+    <label data-k="trap_count">Wasps caught (all pans)<input type="number" name="trap_count" step="1"></label>
     <label data-k="setpoint">New setpoint °F <span class="muted small" data-c></span><input type="number" name="setpoint_f" step="0.5" placeholder="55 to hold, 86 to resume"></label>
     <p class="muted small" data-k="setpoint">Under ${BEE_HOLD_BELOW_F}°F counts as a hold: those days don’t count toward release. Hold only on days 14–22, and it’s the cocoons that need to reach 10–15°C, not just the air.</p>
+    <p class="muted small" data-k="feeding">1:1 sugar syrup sprayed on paper towels laid on the screens; don’t rub the screens. Hold no more than 2–3 days.</p>
     <label>Notes<textarea name="notes" rows="2"></textarea></label>
     <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Save</button></div></form>`;
   const form = $('form', dlg), f = form.elements;
@@ -7139,13 +7234,15 @@ function openBeeLog(run, onDone) {
   f.setpoint_f.oninput = () => { $('[data-c]', form).textContent = f.setpoint_f.value ? `= ${fToC(Number(f.setpoint_f.value))}°C` : ''; };
   guardSubmit(form, async () => {
     const kind = f.kind.value, at = new Date(f.at.value || Date.now()).toISOString(), notes = f.notes.value.trim() || null;
+    const n = (k) => (f[k].value === '' ? null : Number(f[k].value));
+    if (kind === 'reading' && !f.temp_f.value && !f.rh_pct.value) return toast('Enter a temperature or humidity', true);
+    if (kind === 'setpoint' && !f.setpoint_f.value) return toast('Enter the new setpoint', true);
+    if (kind === 'female_check' && !f.pct_females_out.value) return toast('Enter the percent of females out', true);
     try {
-      if (kind === 'reading' && !f.temp_f.value && !f.rh_pct.value) return toast('Enter a temperature or humidity', true);
-      if (kind === 'setpoint' && !f.setpoint_f.value) return toast('Enter the new setpoint', true);
-      const n = (k) => (f[k].value === '' ? null : Number(f[k].value));
       await q(sb.from('bee_run_events').insert({ run_id: run.run_id, happened_at: at, kind, notes,
         temp_f: kind === 'reading' ? n('temp_f') : null, rh_pct: kind === 'reading' ? n('rh_pct') : null,
         pupal_stage: kind === 'stage_check' ? f.pupal_stage.value || null : null,
+        pct_females_out: kind === 'female_check' ? n('pct_females_out') : null,
         trap_count: kind === 'trap_count' ? n('trap_count') : null,
         setpoint_f: kind === 'setpoint' ? n('setpoint_f') : null }));
       dlg.close(); toast('Logged'); onDone();
@@ -7154,6 +7251,171 @@ function openBeeLog(run, onDone) {
   $('[data-act=cancel]', dlg).onclick = () => dlg.close();
   if (!dlg.open) dlg.showModal();
 }
+
+// ---- Storage: cooler readings with alarms, including the centre of a storage can.
+async function renderBeeStorage(body, rooms, reload) {
+  const coolers = rooms.filter((r) => r.kind === 'cooler' && r.active);
+  const reads = (await sb.from('bee_room_readings').select('*').in('room_id', coolers.map((r) => r.room_id).concat(0))
+    .order('read_at', { ascending: false }).limit(200)).data ?? [];
+  const flags = (x) => [
+    x.temp_f != null && x.temp_f > BEE_COOLER.maxF ? `over ${BEE_COOLER.maxF}°F` : '',
+    x.rh_pct != null && x.rh_pct > BEE_COOLER.maxRh ? `humidity over ${BEE_COOLER.maxRh}%` : '',
+    x.can_temp_f != null && x.temp_f != null && x.can_temp_f - x.temp_f > BEE_COOLER.canOverF ? `can centre ${num(x.can_temp_f - x.temp_f, 1)}°F warmer` : '',
+  ].filter(Boolean);
+  const months = (d) => { if (!d) return null; const m = Math.round((new Date(localDate()) - new Date(d)) / (864e5 * 30.4)); return `${m} month${m === 1 ? "" : "s"}`; };
+  body.innerHTML = `<div class="section-head"><h2>Cold storage</h2></div>
+    <p class="muted small">Target 38°F (alarm above ${BEE_COOLER.maxF}°F) and about 50% humidity (alarm above ${BEE_COOLER.maxRh}%), for 5–7 months. Once a month, push a probe into the middle of a can or two: more than ${BEE_COOLER.canOverF}°F above the room means space the cans out or use smaller ones. When checking for mold, dig cells from the bottom of a can, not just the top.</p>
+    ${coolers.length ? coolers.map((c) => {
+      const mine = reads.filter((x) => x.room_id === c.room_id);
+      const last = mine[0];
+      return `<div class="card bee-run"><div class="dialog-head"><div><h3>${esc(c.name)}</h3>
+        <p class="muted small">${c.loaded_on ? `Bees in since ${fmtDateY(c.loaded_on)} (${months(c.loaded_on)})` : 'Set “bees in since” under Rooms'}${last ? ` · last ${esc(fmtTime(last.read_at))}` : ''}</p></div>
+        <div class="row"><button class="small primary" data-read="${c.room_id}">Log reading</button></div></div>
+        ${last && flags(last).length ? `<ul class="bee-alerts"><li class="bee-alert warn">${esc(flags(last).join(', ').replace(/^./, (ch) => ch.toUpperCase()))}</li></ul>` : ''}
+        ${mine.length ? `<ul class="list">${mine.slice(0, 8).map((x) => `<li><span class="li-name">${esc(fmtTime(x.read_at))} · ${x.temp_f != null ? `${num(x.temp_f, 1)}°F` : ''}${x.rh_pct != null ? ` · ${num(x.rh_pct, 0)}% RH` : ''}${x.can_temp_f != null ? ` · can centre ${num(x.can_temp_f, 1)}°F` : ''}
+          ${flags(x).length ? ` <span class="badge warn">${esc(flags(x).join(', '))}</span>` : ''}</span></li>`).join('')}</ul>` : '<p class="muted small">No readings yet.</p>'}</div>`;
+    }).join('') : '<div class="empty">Add your cooler under Bees → Rooms (kind: Cooler).</div>'}`;
+  $$('[data-read]', body).forEach((b) => (b.onclick = () => {
+    const dlg = $('#dialog');
+    dlg.innerHTML = `<form class="form"><h3>Cooler reading · ${esc(coolers.find((c) => c.room_id === Number(b.dataset.read)).name)}</h3>
+      <label>When<input type="datetime-local" name="at" value="${nowLocal()}"></label>
+      <div class="row2"><label>Room °F<input type="number" name="temp_f" step="0.1"></label><label>Humidity %<input type="number" name="rh_pct" step="1"></label></div>
+      <label>Can centre °F (optional)<input type="number" name="can_temp_f" step="0.1"></label>
+      <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Save</button></div></form>`;
+    const form = $('form', dlg), f = form.elements, n = (k) => (f[k].value === '' ? null : Number(f[k].value));
+    guardSubmit(form, async () => {
+      if (!f.temp_f.value && !f.rh_pct.value && !f.can_temp_f.value) return toast('Enter at least one reading', true);
+      try {
+        await q(sb.from('bee_room_readings').insert({ room_id: Number(b.dataset.read), read_at: new Date(f.at.value || Date.now()).toISOString(),
+          temp_f: n('temp_f'), rh_pct: n('rh_pct'), can_temp_f: n('can_temp_f'), source: 'manual' }));
+        dlg.close(); toast('Logged'); reload();
+      } catch { /* shown */ }
+    });
+    $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+    dlg.showModal();
+  }));
+}
+
+// ---- Cell samples: a cut-test guide and tally (or a Parma lab report entered as counts out of 100).
+const BEE_CELL_KINDS = [
+  ['live', 'Live, healthy', 'A plump, firm, creamy-white prepupa (curled grub) filling the cocoon.'],
+  ['chalkbrood', 'Chalkbrood', 'The larva has died and hardened into a chalky cadaver, often grey to black and powdery when broken (spores). Open these over a tray and bleach your tools after.'],
+  ['pollen_ball', 'Pollen ball', 'The cell holds a pollen mass (yellow-brown, sometimes moldy or dried hard) and no larva, or only a tiny dead one.'],
+  ['parasitized', 'Parasitized', 'Instead of one bee: several to dozens of tiny larvae, pupae or small black wasps (Pteromalus), or a few larger ones (Monodontomerus). Count the cell once.'],
+  ['dead', 'Dead, other', 'A bee larva or pupa that is shrivelled, discoloured, or soft and dark.'],
+  ['empty', 'Empty / emerged', 'Exit hole or empty cocoon. Not counted in the percentages.'],
+];
+async function renderBeeSamples(body, reload) {
+  const rows = (await sb.from('bee_samples').select('*').order('sampled_on', { ascending: false }).limit(100)).data ?? [];
+  body.innerHTML = `<div class="section-head"><h2>Cell samples</h2><div class="row"><button class="primary" data-act="add">New sample</button></div></div>
+    <p class="muted small">Cut test: open about 100 cells mixed from several cans and depths, sort each into one of the kinds below, and repeat a few times. Send a Parma Cocoon Testing Lab X-ray sample (about 2 cups of loose cells) each fall to check your own counts. Live bees per pound from the lab sets the gallons to release.</p>
+    <details class="card bee-guide"><summary><b>How to tell them apart</b></summary><ul class="list">${BEE_CELL_KINDS.map(([, l, d]) => `<li><span class="li-name"><b>${esc(l)}</b><span class="muted small">${esc(d)}</span></span></li>`).join('')}</ul>
+      <p class="muted small">Descriptions are a field guide, not lab certainty; when unsure, the Parma X-ray is the reference.</p></details>
+    <div class="card table-wrap crud-wrap"><table class="crud m-cards"><thead><tr><th>Date</th><th>Live</th><th>Sample</th><th>Chalkbrood</th><th>Pollen ball</th><th>Parasitized</th><th>Dead</th><th>Cells</th><th></th></tr></thead><tbody>
+    ${rows.length ? rows.map((r) => `<tr><td>${fmtDateY(r.sampled_on)}</td><td>${r.pct_live != null ? num(r.pct_live, 0) + '% live' : ''}</td>
+      <td>${esc([labelOf([['cut', 'Cut test'], ['lab', 'Lab X-ray'], ['emergence', 'Emergence']], r.method), r.label, r.tray_cover ? labelOf(BEE_COVERS, r.tray_cover) : ''].filter(Boolean).join(' · '))}</td>
+      <td>${num(r.pct_chalkbrood, 0)}%</td><td>${num(r.pct_pollen_ball, 0)}%</td><td>${num(r.pct_parasitized, 0)}%</td><td>${num(r.pct_dead, 0)}%</td><td>${r.cells_counted ?? ''}${r.live_per_lb ? ` · ${Number(r.live_per_lb).toLocaleString()}/lb` : ''}</td>
+      <td class="nowrap"><button class="small" data-del="${r.sample_id}">Delete</button></td></tr>`).join('') : '<tr><td colspan="9" class="muted">No samples yet.</td></tr>'}
+    </tbody></table></div>`;
+  $$('[data-del]', body).forEach((b) => (b.onclick = async () => {
+    if (!confirm('Delete this sample?')) return;
+    try { await q(sb.from('bee_samples').delete().eq('sample_id', Number(b.dataset.del))); toast('Deleted'); reload(); } catch { /* shown */ }
+  }));
+  $('[data-act=add]', body).onclick = () => {
+    const dlg = $('#dialog');
+    dlg.innerHTML = `<form class="form"><h3>New cell sample</h3>
+      <div class="row2"><label>Date *<input type="date" name="sampled_on" value="${localDate()}" required></label>
+        <label>Method<select name="method"><option value="cut">Cut test</option><option value="lab">Lab X-ray (enter % as counts out of 100)</option><option value="emergence">Emergence test</option></select></label></div>
+      <div class="row2"><label>Which bees (lot, cooler, room…)<input name="label"></label>
+        <label>Tray cover (for the cover trial)<select name="tray_cover"><option value="">—</option>${BEE_COVERS.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label></div>
+      <div class="bee-tally">${BEE_CELL_KINDS.map(([k, l]) => `<div class="bee-tally-row"><span>${esc(l)}</span>
+        <button type="button" class="small" data-minus="${k}" aria-label="One less">−</button><input type="number" name="n_${k}" value="0" min="0" inputmode="numeric">
+        <button type="button" class="small primary" data-plus="${k}" aria-label="One more">+</button></div>`).join('')}</div>
+      <p class="small" data-sum></p>
+      <label>Live bees per pound (lab report)<input type="number" name="live_per_lb" step="1"></label>
+      <label>Notes<textarea name="notes" rows="2"></textarea></label>
+      <div class="actions"><span class="spacer"></span><button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Save</button></div></form>`;
+    const form = $('form', dlg), f = form.elements;
+    const counts = () => Object.fromEntries(BEE_CELL_KINDS.map(([k]) => [k, Math.max(0, Number(f[`n_${k}`].value) || 0)]));
+    const pct = (c) => { const tot = BEE_CELL_KINDS.filter(([k]) => k !== 'empty').reduce((t, [k]) => t + c[k], 0); return { tot, p: (k) => (tot ? (100 * c[k]) / tot : 0) }; };
+    const sum = () => { const c = counts(), { tot, p } = pct(c);
+      $('[data-sum]', form).textContent = tot ? `${tot} cells counted · ${num(p('live'), 0)}% live · ${num(p('chalkbrood'), 0)}% chalkbrood · ${num(p('pollen_ball'), 0)}% pollen ball · ${num(p('parasitized'), 0)}% parasitized` : 'Tap + for each cell you open.'; };
+    $$('[data-plus]', form).forEach((b) => (b.onclick = () => { const i = f[`n_${b.dataset.plus}`]; i.value = Number(i.value || 0) + 1; sum(); }));
+    $$('[data-minus]', form).forEach((b) => (b.onclick = () => { const i = f[`n_${b.dataset.minus}`]; i.value = Math.max(0, Number(i.value || 0) - 1); sum(); }));
+    $$('input[name^=n_]', form).forEach((i) => (i.oninput = sum)); sum();
+    guardSubmit(form, async () => {
+      const c = counts(), { tot, p } = pct(c);
+      if (!tot) return toast('Count some cells first', true);
+      try {
+        await q(sb.from('bee_samples').insert({ sampled_on: f.sampled_on.value, method: f.method.value, label: f.label.value.trim() || null,
+          tray_cover: f.tray_cover.value || null, cells_counted: tot, pct_live: p('live'), pct_chalkbrood: p('chalkbrood'), pct_pollen_ball: p('pollen_ball'),
+          pct_parasitized: p('parasitized'), pct_dead: p('dead'), live_per_lb: f.live_per_lb.value ? Number(f.live_per_lb.value) : null, notes: f.notes.value.trim() || null }));
+        dlg.close(); toast('Saved'); reload();
+      } catch { /* shown */ }
+    });
+    $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+    dlg.showModal();
+  };
+}
+
+// ---- Fumigation: paraformaldehyde to the label (Sun Pac Mildewcide, EPA Reg. No. 4972-43).
+async function renderBeeFumigation(body, reload) {
+  const rows = (await sb.from('bee_fumigations').select('*').order('fumigated_on', { ascending: false }).limit(100)).data;
+  if (!rows) { body.innerHTML = '<div class="empty">Run the updated <b>bees.sql</b> in Supabase to add the fumigation log.</div>'; return; }
+  const cleared = (r) => r.air_ppm != null && Number(r.air_ppm) < 0.1;
+  body.innerHTML = `<div class="section-head"><h2>Board fumigation</h2><div class="row"><button class="primary" data-act="add">Log fumigation</button></div></div>
+    <p class="muted small">Label (Sun Pac Mildewcide, EPA Reg. No. 4972-43): dedicated sealed chamber, 5 g per cu ft, 48 hours at 68–77°F and 60–70% RH first, product heated at 400–475°F for 4 hours. After 24 hours, neutralize by heating ammonium carbonate or bicarbonate in the sealed chamber (amount per the label). Vent from the top. Nobody enters without a respirator until the air tests below 0.1 ppm; SCBA before neutralizing. Let ammonia clear before testing with detector tubes. Never heat-treat polystyrene boards.</p>
+    <div class="card table-wrap crud-wrap"><table class="crud m-cards"><thead><tr><th>Date</th><th>Status</th><th>Chamber</th><th>Product</th><th>Neutralized</th><th>Air test</th><th>Signed off</th><th></th></tr></thead><tbody>
+    ${rows.length ? rows.map((r) => `<tr><td>${fmtDateY(r.fumigated_on)}</td>
+      <td>${cleared(r) ? '<span class="badge up">Cleared</span>' : '<span class="badge warn">Not cleared</span>'}</td>
+      <td>${esc(r.chamber ?? '')}${r.cubic_ft ? ` · ${Number(r.cubic_ft).toLocaleString()} cu ft` : ''}</td>
+      <td>${r.product_g != null ? `${Number(r.product_g).toLocaleString()} g` : ''}</td>
+      <td>${r.neutralized ? `Yes${r.neutralizer_g != null ? ` · ${Number(r.neutralizer_g).toLocaleString()} g` : ''}` : '<span class="badge warn">No</span>'}</td>
+      <td>${r.air_ppm != null ? `${r.air_ppm} ppm${r.air_tested_on ? ' · ' + fmtDay(r.air_tested_on) : ''}` : ''}</td>
+      <td>${esc(r.signed_off_by ?? '')}</td>
+      <td class="nowrap"><button class="small" data-edit="${r.fumigation_id}">Edit</button></td></tr>`).join('') : '<tr><td colspan="8" class="muted">No fumigations logged.</td></tr>'}
+    </tbody></table></div>`;
+  const open = (row) => {
+    const dlg = $('#dialog');
+    dlg.innerHTML = `<form class="form"><h3>${row ? 'Edit' : 'Log'} fumigation</h3>
+      <div class="row2"><label>Date *<input type="date" name="fumigated_on" value="${esc(row?.fumigated_on ?? localDate())}" required></label>
+        <label>Chamber<input name="chamber" value="${esc(row?.chamber ?? '')}"></label></div>
+      <div class="row2"><label>Chamber volume (cu ft)<input type="number" name="cubic_ft" value="${esc(row?.cubic_ft ?? '')}"></label>
+        <label>Product (g) <span class="muted small" data-rate></span><input type="number" name="product_g" value="${esc(row?.product_g ?? '')}"></label></div>
+      <label class="check"><input type="checkbox" name="neutralized" ${row?.neutralized ? 'checked' : ''}> Neutralized after 24 hours</label>
+      <label>Neutralizer (g, per the label)<input type="number" name="neutralizer_g" value="${esc(row?.neutralizer_g ?? '')}"></label>
+      <div class="row2"><label>Air tested on<input type="date" name="air_tested_on" value="${esc(row?.air_tested_on ?? '')}"></label>
+        <label>Air reading (ppm)<input type="number" name="air_ppm" step="0.01" value="${esc(row?.air_ppm ?? '')}"></label></div>
+      <label>Signed off by<input name="signed_off_by" value="${esc(row?.signed_off_by ?? '')}"></label>
+      <label>Notes<textarea name="notes" rows="2">${esc(row?.notes ?? '')}</textarea></label>
+      <div class="actions">${row ? '<button type="button" class="danger" data-act="del">Delete</button>' : ''}<span class="spacer"></span>
+        <button type="button" data-act="cancel">Cancel</button><button type="submit" class="primary">Save</button></div></form>`;
+    const form = $('form', dlg), f = form.elements, n = (k) => (f[k].value === '' ? null : Number(f[k].value));
+    const rate = () => { $('[data-rate]', form).textContent = f.cubic_ft.value ? `label rate: ${(5 * Number(f.cubic_ft.value)).toLocaleString()} g` : ''; };
+    f.cubic_ft.oninput = rate; rate();
+    guardSubmit(form, async () => {
+      const data = { fumigated_on: f.fumigated_on.value, chamber: f.chamber.value.trim() || null, cubic_ft: n('cubic_ft'), product_g: n('product_g'),
+        neutralized: f.neutralized.checked, neutralizer_g: n('neutralizer_g'), air_tested_on: f.air_tested_on.value || null, air_ppm: n('air_ppm'),
+        signed_off_by: f.signed_off_by.value.trim() || null, notes: f.notes.value.trim() || null };
+      try {
+        if (row) await q(sb.from('bee_fumigations').update(data).eq('fumigation_id', row.fumigation_id));
+        else await q(sb.from('bee_fumigations').insert(data));
+        dlg.close(); toast('Saved'); reload();
+      } catch { /* shown */ }
+    });
+    $('[data-act=cancel]', dlg).onclick = () => dlg.close();
+    const del = $('[data-act=del]', dlg);
+    if (del) del.onclick = async () => {
+      if (!confirm('Delete this fumigation record?')) return;
+      try { await q(sb.from('bee_fumigations').delete().eq('fumigation_id', row.fumigation_id)); dlg.close(); toast('Deleted'); reload(); } catch { /* shown */ }
+    };
+    dlg.showModal();
+  };
+  $('[data-act=add]', body).onclick = () => open(null);
+  $$('[data-edit]', body).forEach((b) => (b.onclick = () => open(rows.find((r) => r.fumigation_id === Number(b.dataset.edit)))));
+}
+
+
 
 // =====================================================================
 // Navigation and sign-in

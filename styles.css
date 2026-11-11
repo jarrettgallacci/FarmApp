@@ -1097,3 +1097,12 @@ html[data-style="gsp"] .stat-value { font-weight: 800; }
 li.bee-now { background: var(--green-soft); }
 .bee-fields { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: .5rem .75rem; margin: 0; }
 .bee-fields legend { padding: 0 .25rem; font-weight: 600; }
+.bee-alerts { list-style: none; padding: 0; margin: .5rem 0; display: grid; gap: .35rem; }
+.bee-alert { padding: .4rem .6rem; border-radius: 6px; border-left: 4px solid var(--amber); background: var(--amber-soft); }
+.bee-alert.bad { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.bee-alert.up { border-left-color: var(--green); background: var(--green-soft); }
+.bee-guide summary { cursor: pointer; }
+.bee-tally { display: grid; gap: .35rem; margin: .5rem 0; }
+.bee-tally-row { display: grid; grid-template-columns: 1fr auto 4.5rem auto; gap: .4rem; align-items: center; }
+.bee-tally-row input { width: 100%; text-align: center; }
+.bee-tally-row button { min-width: 2.75rem; min-height: 2.5rem; font-size: 1.1rem; }

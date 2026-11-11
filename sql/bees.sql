@@ -98,7 +98,7 @@ create table if not exists public.bee_incubation_runs (
   season           smallint not null,
   room_id          bigint not null references public.bee_rooms,
   started_on       date not null,
-  setpoint_f       numeric(4,1) not null default 85,
+  setpoint_f       numeric(4,1) not null default 86,  -- 30°C
   target_release_on date,
   status           text not null default 'planned' check (status in ('planned','running','released','done')),
   notes            text
@@ -190,12 +190,43 @@ create table if not exists public.bee_recoveries (
   notes           text
 );
 
+-- Fumigation of nest boards (paraformaldehyde, label: 5 g per cu ft, 24 h,
+-- neutralize with ammonium bicarbonate, air under 0.1 ppm before handling).
+create table if not exists public.bee_fumigations (
+  fumigation_id  bigint generated always as identity primary key,
+  fumigated_on   date not null,
+  chamber        text,
+  cubic_ft       numeric(10,1),
+  product_g      numeric(10,1),
+  neutralized    boolean not null default false,
+  neutralizer_g  numeric(10,1),
+  air_tested_on  date,
+  air_ppm        numeric(6,3),
+  signed_off_by  text,
+  notes          text,
+  created_at     timestamptz not null default now()
+);
+
+-- Added after the first draft (safe on a database that already has the tables).
+alter table public.bee_rooms add column if not exists cubic_ft numeric(10,1);
+alter table public.bee_rooms add column if not exists loaded_on date;
+alter table public.bee_room_readings add column if not exists can_temp_f numeric(5,1);  -- centre of a storage can
+alter table public.bee_incubation_runs add column if not exists tray_cover text;        -- vermiculite, sawdust, cedar...
+alter table public.bee_incubation_runs alter column setpoint_f set default 86;
+alter table public.bee_run_events add column if not exists pct_females_out numeric(5,2);
+alter table public.bee_run_events drop constraint if exists bee_run_events_kind_check;
+alter table public.bee_run_events add constraint bee_run_events_kind_check
+  check (kind in ('reading','stage_check','female_check','trap_count','setpoint','feeding','vacuum','note'));
+alter table public.bee_samples alter column lot_id drop not null;   -- cut tests before lots are set up
+alter table public.bee_samples add column if not exists label text;
+alter table public.bee_samples add column if not exists tray_cover text;
+
 do $$
 declare t text;
 begin
   foreach t in array array['bee_rooms','bee_lots','bee_samples','bee_storage','bee_room_readings',
     'bee_plans','bee_incubation_runs','bee_run_lots','bee_run_plans','bee_run_events','bee_shelters',
-    'bee_placements','bee_releases','bee_shelter_checks','bee_recoveries'] loop
+    'bee_placements','bee_releases','bee_shelter_checks','bee_recoveries','bee_fumigations'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('drop policy if exists "authenticated full access" on public.%I', t);
     execute format('create policy "authenticated full access" on public.%I for all to authenticated using (true) with check (true)', t);
