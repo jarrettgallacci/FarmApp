@@ -3529,6 +3529,27 @@ async function openChemForm(opts, onDone) {
     const list = [...chems].sort((a, b) => (fertFirst ? Number(b.type === 'fertilizer') - Number(a.type === 'fertilizer') : 0) || a.name.localeCompare(b.name));
     $('#chem-options', dlg).innerHTML = list.map((c) => `<option value="${esc(c.name)}">${esc(CHEM_TYPES.find(([k]) => k === c.type)?.[1] ?? '')}</option>`).join('');
   };
+  // Picking a product with no rate typed fills the rate from the last record of it: same crop first, then any.
+  let curCrop = null;
+  const fillLastRate = async (l) => {
+    const id = l.chemical_id;
+    const { data, error } = await sb.from('chemical_event_products')
+      .select('rate, rate_unit, rate_basis, tank_gal, chemical_events!inner(event_id, applied_on, status, crop_years(crop_id))')
+      .eq('chemical_id', id).not('rate', 'is', null).order('line_id', { ascending: false }).limit(60);
+    if (error || !data?.length || l.chemical_id !== id || l.rate != null) return;
+    const rows = data.filter((r) => r.chemical_events?.event_id !== ev?.event_id)
+      .sort((a, b) => Number(b.chemical_events.status === 'done') - Number(a.chemical_events.status === 'done') ||
+        b.chemical_events.applied_on.localeCompare(a.chemical_events.applied_on));
+    const cropOf = (r) => r.chemical_events.crop_years?.crop_id ?? null;
+    const hit = (curCrop && rows.find((r) => cropOf(r) === curCrop)) || rows[0];
+    if (!hit) return;
+    Object.assign(l, { autoRate: true, rate: Number(hit.rate), rate_unit: hit.rate_unit ?? l.rate_unit, rate_basis: hit.rate_basis ?? 'acre', tank_gal: hit.tank_gal ?? null });
+    const crop = cropOf(hit) ? cropName(cropOf(hit)) : '';
+    l.hint = `Rate from your last use${crop ? ` on ${crop}` : ''}, ${fmtDateY(hit.chemical_events.applied_on)}${curCrop && cropOf(hit) !== curCrop ? ' (not this crop)' : ''}. Check it against the label.`;
+    const focused = document.activeElement?.classList.contains('l-name') ? $$('.l-name', dlg).indexOf(document.activeElement) : -1;
+    drawLines();
+    if (focused >= 0) { const x = $$('.l-name', dlg)[focused]; x?.focus(); x?.setSelectionRange(x.value.length, x.value.length); }
+  };
   const drawLines = () => {
     const split = !!el.split?.checked;
     $('#lines', dlg).innerHTML = lines.map((l, i) => `<div class="line${split ? ' split' : ''}" data-i="${i}">
@@ -3540,11 +3561,18 @@ async function openChemForm(opts, onDone) {
       ${split ? `<select class="l-grp" aria-label="Record">${lines.map((_, k) => `<option value="${k + 1}" ${Number(l.grp) === k + 1 ? 'selected' : ''}>Record ${k + 1}</option>`).join('')}</select>` : ''}
       <button type="button" class="small ghost" data-rm="${i}" aria-label="Remove">✕</button>
       ${l.rate == null && l.rate_text ? `<span class="muted small l-orig">Recorded as "${esc(l.rate_text)}"</span>` : ''}
+      ${l.hint ? `<span class="muted small l-orig l-hint">${esc(l.hint)}</span>` : ''}
     </div>`).join('');
     $$('.line', dlg).forEach((row) => {
       const l = lines[Number(row.dataset.i)];
-      $('.l-name', row).oninput = (e) => { l.name = e.target.value; l.chemical_id = chems.find((c) => c.name.toLowerCase() === e.target.value.trim().toLowerCase())?.chemical_id; };
-      $('.l-rate', row).oninput = (e) => { l.rate = e.target.value === '' ? null : Number(e.target.value); };
+      $('.l-name', row).oninput = (e) => {
+        const before = l.chemical_id;
+        l.name = e.target.value; l.chemical_id = chems.find((c) => c.name.toLowerCase() === e.target.value.trim().toLowerCase())?.chemical_id;
+        if (l.chemical_id === before) return;
+        if (l.autoRate) { Object.assign(l, { rate: null, hint: null, autoRate: false }); $('.l-rate', row).value = ''; $('.l-orig.l-hint', row)?.remove(); }
+        if (l.chemical_id && l.rate == null) fillLastRate(l);
+      };
+      $('.l-rate', row).oninput = (e) => { l.rate = e.target.value === '' ? null : Number(e.target.value); l.hint = null; l.autoRate = false; };
       $('.l-unit', row).onchange = (e) => { l.rate_unit = e.target.value; };
       $('.l-basis', row).onchange = (e) => { l.rate_basis = e.target.value; $('.l-tank', row).hidden = e.target.value !== 'tank'; };
       $('.l-tank', row).oninput = (e) => { l.tank_gal = e.target.value === '' ? null : Number(e.target.value); };
@@ -3560,8 +3588,9 @@ async function openChemForm(opts, onDone) {
   const showCrop = async () => {
     const ids = pickedIds();
     const line = $('#crop-line', dlg);
-    if (ids.length !== 1 || !el.applied_on.value) { line.textContent = ''; return; }
+    if (ids.length !== 1 || !el.applied_on.value) { line.textContent = ''; curCrop = null; return; }
     const crops = await cropFor(ids[0], el.applied_on.value);
+    curCrop = crops[0]?.crop_id ?? null;
     line.textContent = crops.length ? `Crop: ${crops.map((c) => cropName(c.crop_id) + (c.variety ? ` (${c.variety})` : '')).join(', ')}`
       : ev?.crop_label ? `Crop as recorded: ${ev.crop_label}` : 'No crop in this field\'s history for that season.';
   };
