@@ -1,6 +1,9 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
+// An invite or "new password" link lands here with #access_token…&type=invite|recovery.
+// Read it before the client tidies the address bar, so the app can ask for a password.
+const ARRIVED_TO_SET_PASSWORD = /[#&]type=(invite|recovery)\b/.test(location.hash);
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // =====================================================================
@@ -5764,11 +5767,23 @@ async function renderUsers(el) {
   const opFor = (u) => refs.operators.find((o) => (o.login_email ?? '').trim().toLowerCase() === (u.email ?? '').toLowerCase());
   el.innerHTML = `
     <div class="section-head"><h2>Users</h2></div>
-    <p class="muted small">To add someone, invite their email from the Supabase dashboard (Authentication → Users → Invite). They show up here with no access until you give them a role.
-      Link them to their person under Setup → Operators (sign-in email) so their work, checklists and loads are theirs.</p>
+    <div class="card"><h3>Add someone</h3>
+      <p class="muted small">Makes a one-time sign-in link for them. Text or copy it to them; nothing is emailed. Opening it signs them in and asks them to pick a password.</p>
+      <form id="invite-form" class="user-fields invite-fields">
+        <label>Email<input name="email" type="email" autocomplete="off" required placeholder="name@example.com"></label>
+        <label>Role<select name="role">${ROLES.map(([k, l]) => `<option value="${k}" ${k === 'employee' ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label class="check"><input type="checkbox" name="can_apply"> Can apply</label>
+        <label>Name<input name="name" placeholder="Optional"></label>
+        <button type="submit" class="primary">Make sign-in link</button>
+      </form>
+      <div id="invite-out"></div></div>
+    <p class="muted small">Link each login to their person under Setup → Operators (sign-in email) so their work, checklists and loads are theirs.
+      Forgot their password? <b>New link</b> on their row makes a fresh one.</p>
     <div class="card user-list">${users.map((u) => { const o = opFor(u); return `<div class="user-row">
-        <div class="user-head"><b>${esc(u.email)}</b>${u.user_id === me.userId ? ' <span class="muted small">(you)</span>' : ''}
+        <div class="user-head"><div><b>${esc(u.email)}</b>${u.user_id === me.userId ? ' <span class="muted small">(you)</span>' : ''}
           <div class="muted small">${o ? `Person: ${esc(o.name)}` : 'Not linked to a person yet'}</div></div>
+          ${u.user_id === me.userId ? '' : `<button type="button" class="small" data-newlink="${esc(u.email)}">New link</button>`}</div>
+        <div class="link-out" data-linkout="${esc(u.email)}"></div>
         <div class="user-fields">
           <label>Name<input data-name="${u.user_id}" value="${esc(u.name ?? '')}" placeholder="Name"></label>
           <label>Role<select data-role="${u.user_id}">${ROLES.map(([k, l]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
@@ -5784,6 +5799,54 @@ async function renderUsers(el) {
   }));
   $$('[data-apply]', el).forEach((c) => (c.onchange = () => save(c.dataset.apply, { can_apply: c.checked }, c.checked ? 'Marked as a licensed applicator' : 'Applicator removed')));
   $$('[data-name]', el).forEach((i) => (i.onchange = () => save(i.dataset.name, { name: i.value.trim() || null }, 'Name saved')));
+  const f = $('#invite-form', el);
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('button[type=submit]', f); btn.disabled = true;
+    const r = await makeSignInLink({ email: f.elements.email.value.trim(), role: f.elements.role.value, can_apply: f.elements.can_apply.checked, name: f.elements.name.value.trim() });
+    btn.disabled = false;
+    if (!r) return;
+    showSignInLink($('#invite-out', el), r, f.elements.email.value.trim());
+    if (!r.existing) { f.reset(); f.elements.role.value = 'employee'; refreshUserRows(el); }
+  };
+  $$('[data-newlink]', el).forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    const r = await makeSignInLink({ email: b.dataset.newlink });
+    b.disabled = false;
+    if (r) showSignInLink($(`[data-linkout="${CSS.escape(b.dataset.newlink)}"]`, el), r, b.dataset.newlink);
+  }));
+}
+// After an invite, redraw just the people list so the link box above stays on screen.
+async function refreshUserRows(el) {
+  const out = $('#invite-out', el); const keep = out?.innerHTML ?? '';
+  await renderUsers(el);
+  const box = $('#invite-out', el); if (box) { box.innerHTML = keep; wireLinkBox(box); }
+}
+// Calls the invite-user Edge Function (it holds the service key; the app never does).
+async function makeSignInLink(body) {
+  const { data, error } = await sb.functions.invoke('invite-user', { body: { ...body, redirect_to: location.origin + location.pathname } });
+  if (error) {
+    let msg = error.message;
+    try { msg = (await error.context.json()).error ?? msg; } catch { /* keep the generic one */ }
+    if (/Failed to send|not found|404/i.test(msg)) msg = 'The invite-user function isn’t set up in Supabase yet.';
+    toast(msg, true); return null;
+  }
+  return data;
+}
+function showSignInLink(box, r, email) {
+  box.innerHTML = `<div class="link-box">
+    <p class="small">${r.existing ? `<b>${esc(email)}</b> already has a login, so this link lets them pick a new password.` : `Login made for <b>${esc(email)}</b>.`}
+      Send them this link. It works once and expires (1 hour unless the link time was raised in Supabase).</p>
+    <input readonly value="${esc(r.link)}">
+    <div class="row"><button type="button" class="primary small" data-copy>Copy link</button>
+      ${navigator.share ? '<button type="button" class="small" data-share>Text / share…</button>' : ''}</div></div>`;
+  wireLinkBox(box);
+}
+function wireLinkBox(box) {
+  const input = $('input', box); if (!input) return;
+  const copy = $('[data-copy]', box), share = $('[data-share]', box);
+  if (copy) copy.onclick = async () => { try { await navigator.clipboard.writeText(input.value); toast('Link copied'); } catch { input.select(); } };
+  if (share) share.onclick = () => navigator.share({ title: 'Three Point Farms app', text: 'Here’s your sign-in link for the farm app. Open it on your phone, then pick a password:', url: input.value }).catch(() => {});
 }
 
 // =====================================================================
@@ -7648,6 +7711,7 @@ async function startApp() {
   $('#login').hidden = true;
   $('#app').hidden = false;
   try { await loadMe(); } catch { return; }
+  if (ARRIVED_TO_SET_PASSWORD && !startApp.askedPw) { startApp.askedPw = true; setTimeout(() => openPasswordDialog(true), 300); }
   if (me.role === 'none') {
     $('#view').innerHTML = `<div class="empty"><h2>Waiting for access</h2>
       <p>You're signed in as <b>${esc(me.email)}</b>, but a partner hasn't given you access yet.</p>
@@ -7696,19 +7760,21 @@ $('#login-form').onsubmit = async (e) => {
   if (error) toast(error.message, true);
 };
 $('#signout').onclick = () => sb.auth.signOut();
-$('#account').onclick = async () => {
+// Change password (Account), or set the first one after following an invite link.
+async function openPasswordDialog(first = false) {
   const { data: { user } } = await sb.auth.getUser();
   const dlg = $('#dialog');
   dlg.classList.remove('wide');
   dlg.innerHTML = `<form class="form">
-    <h3>Account</h3>
-    <p class="muted small">Signed in as <b>${esc(user?.email ?? '')}</b></p>
+    <h3>${first ? 'Welcome! Pick a password' : 'Account'}</h3>
+    <p class="muted small">${first ? `You're signed in as <b>${esc(user?.email ?? '')}</b>. Pick a password so you can sign in again on this phone or another one.`
+      : `Signed in as <b>${esc(user?.email ?? '')}</b>`}</p>
     <label>New password<input type="password" name="pw" autocomplete="new-password" minlength="8" required></label>
     <label>Type it again<input type="password" name="pw2" autocomplete="new-password" minlength="8" required></label>
     <p class="muted small">At least 8 characters.</p>
     <div class="actions"><span class="spacer"></span>
-      <button type="button" data-act="cancel">Cancel</button>
-      <button type="submit" class="primary">Change password</button></div></form>`;
+      <button type="button" data-act="cancel">${first ? 'Later' : 'Cancel'}</button>
+      <button type="submit" class="primary">${first ? 'Save password' : 'Change password'}</button></div></form>`;
   const form = $('form', dlg);
   $('[data-act=cancel]', dlg).onclick = () => dlg.close();
   form.onsubmit = async (e) => {
@@ -7721,10 +7787,11 @@ $('#account').onclick = async () => {
     btn.disabled = false;
     if (error) return toast(error.message, true);
     dlg.close();
-    toast('Password changed');
+    toast(first ? 'Password saved' : 'Password changed');
   };
   dlg.showModal();
-};
+}
+$('#account').onclick = () => openPasswordDialog();
 $$('nav [data-view]').forEach((b) => (b.onclick = () => show(b.dataset.view)));
 // Phone bottom bar: More opens the rest of the tabs above it
 function closeMoreMenu() {
