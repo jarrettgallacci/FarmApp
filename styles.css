@@ -1108,3 +1108,8 @@ li.bee-now { background: var(--green-soft); }
 .bee-tally-row button { min-width: 2.75rem; min-height: 2.5rem; font-size: 1.1rem; }
 .bee-date input { width: 100%; min-width: 9.5rem; }
 .bee-pick { max-height: 50vh; overflow-y: auto; display: grid; gap: .25rem; }
+
+/* Roles (sql/user_roles.sql): money and Setup are for admins and managers only. */
+[data-role="employee"] .staff-only, [data-role="none"] .staff-only { display: none !important; }
+[data-role="none"] .topbar nav { display: none; }
+[data-role="employee"] button.danger[data-act^="del"] { display: none !important; }

@@ -35,7 +35,34 @@ async function q(request) {
 // =====================================================================
 // Reference data used across screens
 // =====================================================================
-const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [], workTypes: [], equipment: [], appRates: [], customers: [] };
+const refs = { riders: [], turnouts: [], fields: [], leases: [], crops: [], chemicals: [], operators: [], workTypes: [], equipment: [], rates: [], customers: [], contracts: [] };
+
+// Who's signed in. Roles (sql/user_roles.sql): admin, manager, employee, none.
+// Admins and managers ("staff") see money and Setup; the database enforces it, the app just hides what won't work.
+const me = { userId: null, email: '', role: null, canApply: false };
+const isAdmin = () => me.role === 'admin';
+const isStaff = () => me.role === 'admin' || me.role === 'manager';
+async function loadMe() {
+  const { data: { user } } = await sb.auth.getUser();
+  Object.assign(me, { userId: user?.id ?? null, email: (user?.email ?? '').toLowerCase() });
+  const { data } = await sb.from('profiles').select('*').eq('user_id', me.userId).maybeSingle();
+  // Before user_roles.sql is run there's no role column and every login is a partner.
+  me.role = data && 'role' in data ? data.role : 'admin';
+  me.canApply = !!data?.can_apply;
+  document.documentElement.dataset.role = me.role;
+}
+// Money sits in staff-only side tables, embedded with the record (e.g. work_costs). For employees
+// the embed comes back empty, so the money fields are simply missing.
+function flatMoney(r, side) {
+  if (!r) return r;
+  const { [side]: m, ...rest } = r;
+  const { updated_at, ...vals } = (Array.isArray(m) ? m[0] : m) ?? {};
+  return { ...rest, ...vals };
+}
+
+// Contracts (staff only): which one covers a crop year, and how it reads in a list.
+const contractFor = (cropYearId) => refs.contracts.find((c) => (c.contract_crop_years ?? []).some((x) => x.crop_year_id === cropYearId)) ?? null;
+const contractLabel = (c) => [c.season, [c.company, c.contract_number].filter(Boolean).join(' #'), c.price != null ? `$${Number(c.price)}/${c.unit ?? ''}` : ''].filter(Boolean).join(' · ');
 
 async function loadRefs() {
   const [riders, turnouts, fields, leases, crops, chemicals, operators] = await Promise.all([
@@ -48,27 +75,25 @@ async function loadRefs() {
     q(sb.from('operators').select('*').order('name')),
   ]);
   Object.assign(refs, { riders, turnouts, fields, leases, crops, chemicals, operators });
+  me.operatorId = operators.find((o) => (o.login_email ?? '').trim().toLowerCase() === me.email)?.operator_id ?? null;
   // Work types (tolerates the table/columns not being set up yet)
   refs.workTypes = (await sb.from('operation_types').select('*').order('sort_order', { nullsFirst: false }).order('operation')).data ?? [];
   const eqRes = await sb.from('equipment').select('*, equipment_work_types(operation), equipment_fields(field_id)').order('name');
   refs.equipment = (eqRes.error ? (await sb.from('equipment').select('*, equipment_work_types(operation)').order('name')).data : eqRes.data) ?? [];
-  refs.appRates = (await sb.from('application_rates').select('*')).data ?? [];
   refs.customers = (await sb.from('customers').select('*').order('name')).data ?? [];
+  refs.rates = isStaff() ? (await sb.from('rates').select('*')).data ?? [] : [];
+  refs.contracts = isStaff() ? (await sb.from('contracts').select('*, contract_crop_years(crop_year_id)').order('season', { ascending: false })).data ?? [] : [];
 }
 // ---- Cost rates ($/acre). Machine override first, then the work type's / application method's rate.
 const money = (v, d = 2) => (v == null || v === '' ? '' : '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }));
+// The rate card (sql/money_tables.sql). The database freezes the cost onto a record when it's saved;
+// these are only for showing staff the cost before they save.
+const rateOf = (kind, ref) => { const r = refs.rates.find((x) => x.kind === kind && x.ref === String(ref)); return r?.cost_per_acre != null ? Number(r.cost_per_acre) : null; };
 function workRate(operation, equipmentId) {
-  const m = refs.equipment.find((e) => e.equipment_id === Number(equipmentId));
-  if (m?.cost_per_acre != null) return { rate: Number(m.cost_per_acre), basis: m.name };
-  const w = refs.workTypes.find((x) => x.operation === operation);
-  if (w?.cost_per_acre != null) return { rate: Number(w.cost_per_acre), basis: `${workLabel(operation)} rate` };
-  return { rate: null, basis: null };
-}
-function appRate(method, sprayerId) {
-  const m = method === 'spray' ? refs.equipment.find((e) => e.equipment_id === Number(sprayerId)) : null;
-  if (m?.cost_per_acre != null) return { rate: Number(m.cost_per_acre), basis: m.name };
-  const r = refs.appRates.find((x) => x.method === method);
-  if (r?.cost_per_acre != null) return { rate: Number(r.cost_per_acre), basis: `${methodName(method)} rate` };
+  const m = equipmentId ? rateOf('equipment', Number(equipmentId)) : null;
+  if (m != null) return { rate: m, basis: equipName(Number(equipmentId)) };
+  const w = rateOf('work_type', operation);
+  if (w != null) return { rate: w, basis: `${workLabel(operation)} rate` };
   return { rate: null, basis: null };
 }
 // Which crop a work pass is charged to. Tillage prepares the NEXT crop; everything else belongs to the crop standing in the field.
@@ -302,9 +327,8 @@ const CRUD = {
       { key: 'hours', label: 'Hours', type: 'number', step: '0.1', list: true },
       { key: 'hours_date', label: 'Hours as of', type: 'date' },
       { key: 'purchase_date', label: 'Purchase date', type: 'date' },
-      { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01' },
+      { key: 'purchase_price', label: 'Purchase price', type: 'number', step: '0.01', side: 'equipment_finance' },
       { key: 'license_plate', label: 'License plate', type: 'text' },
-      { key: 'cost_per_acre', label: 'Cost per acre when this machine is used ($/ac, optional; overrides the work type or application rate)', listLabel: '$/ac', type: 'number', step: '0.01', list: true },
       { key: 'planting_settings', label: 'Planting settings to record (planters only, one per line; for a choice write "Name: Option A | Option B")', type: 'textarea' },
       { key: 'work', label: 'Used for', list: true, form: false, compute: (r) => (r.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', ') },
       { key: 'verified_on', label: 'Last checked (seen on the farm)', listLabel: 'Checked', type: 'date', list: true },
@@ -363,7 +387,6 @@ const CRUD = {
       { key: 'phone', label: 'Phone', type: 'text', list: true },
       { key: 'email', label: 'Email', type: 'text' },
       { key: 'address', label: 'Address', type: 'textarea' },
-      { key: 'default_rate', label: 'Usual rate ($/acre)', listLabel: '$/ac', type: 'number', step: '0.01', list: true },
       { key: 'notes', label: 'Notes', type: 'textarea' },
       { key: 'active', label: 'Active', type: 'checkbox', default: true, list: true },
     ],
@@ -379,8 +402,25 @@ const CRUD = {
       { key: 'lessor', label: 'Other party (landowner, partner grower, or tenant)', type: 'text', required: true, list: true },
       { key: 'start_date', label: 'Start date', type: 'date', required: true, list: true },
       { key: 'end_date', label: 'End date', type: 'date', list: true },
-      { key: 'rate', label: 'Rate (leave blank for partnerships)', type: 'number', step: '0.01', list: true },
-      { key: 'rate_basis', label: 'Rate basis (per acre, flat, crop share)', type: 'text', list: true },
+      { key: 'rate', label: 'Rate (leave blank for partnerships)', type: 'number', step: '0.01', list: true, side: 'lease_terms' },
+      { key: 'rate_basis', label: 'Rate basis (per acre, flat, crop share)', type: 'text', list: true, side: 'lease_terms' },
+      { key: 'notes', label: 'Notes', type: 'textarea' },
+    ],
+  },
+  contracts: {
+    table: 'contracts', pk: 'contract_id', title: 'Contracts', singular: 'contract', order: ['season', 'company'], allowDelete: true, refreshRefs: true, search: true,
+    select: '*, contract_crop_years(crop_year_id)',
+    columns: [
+      { key: 'season', label: 'Year', type: 'number', step: '1', list: true, default: new Date().getFullYear() },
+      { key: 'company', label: 'Company', type: 'text', required: true, list: true },
+      { key: 'contract_number', label: 'Contract #', listLabel: 'Contract #', type: 'text', list: true },
+      { key: 'crop_id', label: 'Crop', type: 'select', num: true, list: true, options: () => refs.crops.map((c) => [c.crop_id, c.name]) },
+      { key: 'price', label: 'Price', type: 'number', step: 'any', list: true },
+      { key: 'bonus', label: 'Bonus', type: 'number', step: 'any' },
+      { key: 'unit', label: 'Price per', type: 'select', list: true, default: 'lb', options: () => ['lb', 'bu', 'cwt', 'ton', 'acre'].map((u) => [u, u]) },
+      { key: 'minimum', label: 'Minimum', type: 'number', step: 'any' },
+      { key: 'overage', label: 'Overage terms', type: 'text' },
+      { key: 'fields_n', label: 'Fields', list: true, form: false, compute: (r) => String((r.contract_crop_years ?? []).length || '') },
       { key: 'notes', label: 'Notes', type: 'textarea' },
     ],
   },
@@ -408,17 +448,21 @@ function crudCell(c, r) {
   return `<td>${pre}${esc(v)}${post}</td>`;
 }
 
+// Columns with `side` live in a staff-only table keyed by the same id (money: sql/money_tables.sql).
+const crudSides = (cfg) => (isStaff() ? [...new Set(cfg.columns.filter((c) => c.side).map((c) => c.side))] : []);
 async function renderCrud(cfg, el) {
-  let req = sb.from(cfg.table).select(cfg.select ?? '*');
+  const sides = crudSides(cfg);
+  let req = sb.from(cfg.table).select([cfg.select ?? '*', ...sides.map((t) => `${t}(*)`)].join(', '));
   for (const col of [].concat(cfg.order)) req = req.order(col, { nullsFirst: false });
-  const rows = await q(req);
-  const cols = cfg.columns.filter((c) => c.list);
+  const rows = (await q(req)).map((r) => sides.reduce(flatMoney, r));
+  const canEdit = isStaff();
+  const cols = cfg.columns.filter((c) => c.list && (!c.side || isStaff()));
   const st = (cfg.state ??= { q: '', f: {}, sort: cfg.sorts?.[0]?.[0] ?? '', tab: cfg.tabs?.[0]?.key });
   const filters = cfg.filters ?? [];
   const tab = cfg.tabs?.find((t) => t.key === st.tab);
   el.innerHTML = `
     <div class="section-head"><h2>${esc(cfg.title)}</h2>
-      <div class="row">${cfg.headExtra ?? ''}<button class="primary" data-act="add">Add ${esc(cfg.singular)}</button></div></div>
+      <div class="row">${cfg.headExtra ?? ''}${canEdit ? `<button class="primary" data-act="add">Add ${esc(cfg.singular)}</button>` : ''}</div></div>
     ${cfg.tabs ? `<div class="subtabs">${cfg.tabs.map((t) => `<button class="${t.key === st.tab ? 'active' : ''}" data-tab="${t.key}">
       ${esc(t.label)} <span class="muted">${rows.filter(t.test).length}</span></button>`).join('')}</div>` : ''}
     ${cfg.search || filters.length || cfg.sorts ? `<div class="filters">
@@ -443,7 +487,7 @@ async function renderCrud(cfg, el) {
         ${cols.map((c) => c.type === 'color'
           ? `<td><span class="swatch" style="background:${esc(r[c.key] || c.fallback(r))}"></span></td>`
           : crudCell(c, r)).join('')}
-        <td class="nowrap"><button class="small" data-edit="${r[cfg.pk]}">Edit</button>${cfg.rowAction ? ` <button class="small primary" data-row-act="${r[cfg.pk]}">${esc(cfg.rowAction.label)}</button>` : ''}</td></tr>`).join('')
+        <td class="nowrap">${canEdit ? `<button class="small" data-edit="${r[cfg.pk]}">Edit</button>` : ''}${cfg.rowAction ? ` <button class="small primary" data-row-act="${r[cfg.pk]}">${esc(cfg.rowAction.label)}</button>` : ''}</td></tr>`).join('')
       : `<tr><td colspan="${cols.length + 1}" class="muted">${pool.length ? 'Nothing matches.' : 'Nothing here yet.'}</td></tr>`;
     const count = $('[data-count]', el);
     if (count) count.textContent = `${shown.length} of ${pool.length}`;
@@ -452,7 +496,7 @@ async function renderCrud(cfg, el) {
     $$('[data-row-act]', el).forEach((b) => (b.onclick = () =>
       cfg.rowAction.fn(rows.find((r) => String(r[cfg.pk]) === b.dataset.rowAct), reload)));
   };
-  $('[data-act=add]', el).onclick = () => openForm(cfg, null, reload);
+  $('[data-act=add]', el)?.addEventListener('click', () => openForm(cfg, null, reload));
   cfg.wireHead?.(el, rows);
   $$('[data-tab]', el).forEach((b) => (b.onclick = () => { st.tab = b.dataset.tab; reload(); }));
   const search = $('.search', el);
@@ -464,7 +508,7 @@ async function renderCrud(cfg, el) {
 }
 
 function fieldHtml(c, row) {
-  if (c.form === false) return '';
+  if (c.form === false || (c.side && !isStaff())) return '';
   const v = (row ? row[c.key] : c.default) ?? c.fallback?.(row);
   const req = c.required ? 'required' : '';
   const lbl = esc(c.label) + (c.required ? ' *' : '');
@@ -486,7 +530,7 @@ function fieldHtml(c, row) {
 function readForm(cfg, form) {
   const data = {};
   for (const c of cfg.columns) {
-    if (c.form === false) continue;
+    if (c.form === false || !form.elements[c.key]) continue;
     const input = form.elements[c.key];
     if (c.type === 'checkbox') { data[c.key] = input.checked; continue; }
     const v = input.value.trim();
@@ -519,15 +563,21 @@ function openForm(cfg, row, onDone) {
   guardSubmit(form, async (e) => {
     const data = readForm(cfg, form);
     cfg.beforeSave?.(data);
+    // Pull the side-table (money) values out of the main row.
+    const side = {};
+    for (const c of cfg.columns.filter((x) => x.side && x.key in data)) { (side[c.side] ??= {})[c.key] = data[c.key]; delete data[c.key]; }
+    const saveSides = async (id) => { for (const [t, vals] of Object.entries(side)) await q(sb.from(t).upsert({ [cfg.pk]: id, ...vals })); };
     try {
-      if (row) await q(sb.from(cfg.table).update(data).eq(cfg.pk, row[cfg.pk]));
+      if (row) { await q(sb.from(cfg.table).update(data).eq(cfg.pk, row[cfg.pk])); await saveSides(row[cfg.pk]); }
       else if (cfg.reopenAfterCreate) {
         const created = await q(sb.from(cfg.table).insert(data).select().single());
+        await saveSides(created[cfg.pk]);
         if (cfg.refreshRefs) await loadRefs();
         toast(cfg.reopenAfterCreate);
         onDone();
-        return openForm(cfg, created, onDone);
-      } else await q(sb.from(cfg.table).insert(data));
+        return openForm(cfg, { ...created, ...Object.assign({}, ...Object.values(side)) }, onDone);
+      } else if (Object.keys(side).length) await saveSides((await q(sb.from(cfg.table).insert(data).select(cfg.pk).single()))[cfg.pk]);
+      else await q(sb.from(cfg.table).insert(data));
       await finish('Saved');
     } catch { /* error already shown */ }
   });
@@ -1188,7 +1238,7 @@ async function drawSchedule(box, reload) {
   items.forEach((it) => { const k = it.date < today ? 'Overdue' : it.date; const g = groups.find((x) => x.k === k); if (g) g.items.push(it); else groups.push({ k, label: day(it.date), items: [it] }); });
   box.innerHTML = groups.map((g) => `<div class="group"><h4 class="${g.k === 'Overdue' ? 'overdue' : ''}">${esc(g.label)}</h4><ul class="list">${g.items.map((it) => `<li>
     <span class="li-name"><b>${esc(it.where ?? fieldName(it.field))}</b> ${esc(it.what)}${it.kind === 'chem' ? ` <span class="badge up">${it.running ? 'Running' : 'Chem'}</span>` : ''}${it.custom ? ' <span class="badge up">Custom</span>' : ''}${it.sub ? `<span class="muted small">${esc(it.sub)}${g.k === 'Overdue' ? ' · ' + esc(fmtDay(it.date)) : ''}</span>` : ''}</span>
-    <span class="li-value">${it.run ?? ''}<button class="small" data-sched="${it.kind}:${it.id}">Open</button></span></li>`).join('')}</ul></div>`).join('');
+    <span class="li-value">${it.run ?? ''}${it.kind === 'chem' && !isStaff() ? '' : `<button class="small" data-sched="${it.kind}:${it.id}">Open</button>`}</span></li>`).join('')}</ul></div>`).join('');
   wireChemRun(box, (id) => cRes.data.find((c) => c.event_id === Number(id)), reload);
   $$('[data-sched]', box).forEach((b) => (b.onclick = async () => {
     const [kind, id] = b.dataset.sched.split(':');
@@ -1506,6 +1556,7 @@ async function openFieldHistory(fieldId, onChange) {
 
 async function openCropYear(row, defaults, onDone) {
   const v = row ?? { sequence: 1, status: (defaults?.season ?? 0) > new Date().getFullYear() ? 'planned' : 'planted', ...defaults };
+  const curContract = row ? contractFor(row.crop_year_id) : null;
   // Every variety used before, grouped by crop, for the suggestions list.
   const used = await q(sb.from('crop_years').select('crop_id, variety').not('variety', 'is', null));
   const varietiesFor = (cropId) => [...new Map(used
@@ -1558,24 +1609,28 @@ async function openCropYear(row, defaults, onDone) {
         <option value="mi" ${Number(v.isolation_ft) >= 5280 ? 'selected' : ''}>miles</option>
       </select></label>
     </div>
-    <fieldset id="contract" class="contract">
-      <legend>Contract <span class="muted small">(optional)</span></legend>
-      <div class="row2">
-        <label>Company<input name="contract_company" value="${esc(v.contract_company ?? '')}"></label>
-        <label>Contract #<input name="contract_number" value="${esc(v.contract_number ?? '')}"></label>
+    ${isStaff() ? `<fieldset id="contract" class="contract">
+      <legend>Contract <span class="muted small">(optional; admins and managers only)</span></legend>
+      <label>Contract<select name="contract_id"><option value="">None</option>
+        ${refs.contracts.map((c) => `<option value="${c.contract_id}" ${c.contract_id === curContract?.contract_id ? 'selected' : ''}>${esc(contractLabel(c))}</option>`).join('')}
+        <option value="new">+ New contract…</option></select></label>
+      <div data-newcontract hidden>
+        <div class="row2">
+          <label>Company<input name="contract_company"></label>
+          <label>Contract #<input name="contract_number"></label>
+        </div>
+        <div class="row2">
+          <label>Price<input type="number" name="contract_price" step="any" min="0"></label>
+          <label>Bonus<input type="number" name="contract_bonus" step="any" min="0"></label>
+        </div>
+        <div class="row2">
+          <label>Per<select name="contract_unit">${['lb', 'bu', 'cwt', 'ton', 'acre'].map((u) => `<option value="${u}">${u}</option>`).join('')}</select></label>
+          <label>Minimum<input type="number" name="contract_minimum" step="any" min="0"></label>
+        </div>
+        <label>Overage terms<input name="contract_overage"></label>
       </div>
-      <div class="row2">
-        <label>Price<input type="number" name="contract_price" step="any" min="0" value="${esc(v.contract_price ?? '')}"></label>
-        <label>Bonus<input type="number" name="contract_bonus" step="any" min="0" value="${esc(v.contract_bonus ?? '')}"></label>
-      </div>
-      <div class="row2">
-        <label>Per<select name="contract_unit">
-          ${['lb', 'bu', 'cwt', 'ton', 'acre'].map((u) => `<option value="${u}" ${(v.contract_unit ?? 'lb') === u ? 'selected' : ''}>${u}</option>`).join('')}
-        </select></label>
-        <label>Minimum<input type="number" name="contract_minimum" step="any" min="0" value="${esc(v.contract_minimum ?? '')}"></label>
-      </div>
-      <label>Overage terms<input name="contract_overage" value="${esc(v.contract_overage ?? '')}"></label>
-    </fieldset>
+      <p class="muted small">Contracts are kept under Setup → Contracts. One contract can cover several fields; farmhands never see them.</p>
+    </fieldset>` : ''}
     <div id="rot-box"></div>
     ${row ? '<div id="planting-box"></div>' : ''}
     <label>Notes<textarea name="notes" rows="2">${esc(v.notes ?? '')}</textarea></label>
@@ -1627,8 +1682,9 @@ async function openCropYear(row, defaults, onDone) {
   const syncStatus = () => {
     const planned = el.status.value === 'planned';
     $('#pdate-wrap', dlg).hidden = planned;
-    $('#contract', dlg).hidden = planned || !$('#leased-out', dlg).hidden;
+    if ($('#contract', dlg)) $('#contract', dlg).hidden = planned || !$('#leased-out', dlg).hidden;
   };
+  if (el.contract_id) el.contract_id.onchange = () => { $('[data-newcontract]', dlg).hidden = el.contract_id.value !== 'new'; };
   el.status.onchange = syncStatus;
   const syncLeasedOut = () => {
     const lease = el.field_id.value && el.season.value ? leasedOutIn(Number(el.field_id.value), Number(el.season.value)) : null;
@@ -1668,11 +1724,16 @@ async function openCropYear(row, defaults, onDone) {
       status: el.status.value,
       isolation_ft: val('iso') === '' ? null : Number(val('iso')) * (el.iso_unit.value === 'mi' ? 5280 : 1),
     };
-    const contractFields = ['contract_company', 'contract_number', 'contract_price', 'contract_bonus', 'contract_unit', 'contract_minimum', 'contract_overage'];
-    const numeric = ['contract_price', 'contract_bonus', 'contract_minimum'];
-    const contractOn = $('#contract', dlg).hidden === false;
-    for (const k of contractFields) data[k] = contractOn && val(k) !== '' ? (numeric.includes(k) ? Number(val(k)) : val(k)) : null;
-    if (!data.contract_company && !data.contract_number && data.contract_price == null) data.contract_unit = null;
+    // Contract: its own record (sql/money_tables.sql), linked to this crop year.
+    const contractOn = !!$('#contract', dlg) && $('#contract', dlg).hidden === false;
+    const pick = contractOn ? el.contract_id.value : '';
+    let newContract = null;
+    if (pick === 'new') {
+      const n = (k) => (val(k) === '' ? null : Number(val(k)));
+      newContract = { company: val('contract_company') || null, contract_number: val('contract_number') || null, price: n('contract_price'), bonus: n('contract_bonus'),
+        unit: el.contract_unit.value, minimum: n('contract_minimum'), overage: val('contract_overage') || null, crop_id: data.crop_id, season: data.season };
+      if (!newContract.company && !newContract.contract_number) return toast('Enter the contract company or number', true);
+    }
     if (data.status === 'planned') data.planting_date = null;
     if (!$('#leased-out', dlg).hidden) {
       data.grown_by = val('grown_by') || null;
@@ -1685,8 +1746,17 @@ async function openCropYear(row, defaults, onDone) {
       if (match) data.variety = match;
     }
     try {
-      if (row) await q(sb.from('crop_years').update(data).eq('crop_year_id', row.crop_year_id));
-      else await q(sb.from('crop_years').insert(data));
+      let id = row?.crop_year_id;
+      if (row) await q(sb.from('crop_years').update(data).eq('crop_year_id', id));
+      else id = (await q(sb.from('crop_years').insert(data).select('crop_year_id').single())).crop_year_id;
+      if (isStaff() && $('#contract', dlg)) {
+        const contractId = newContract ? (await q(sb.from('contracts').insert(newContract).select('contract_id').single())).contract_id : pick ? Number(pick) : null;
+        if (contractId !== (curContract?.contract_id ?? null)) {
+          if (curContract) await q(sb.from('contract_crop_years').delete().match({ contract_id: curContract.contract_id, crop_year_id: id }));
+          if (contractId) await q(sb.from('contract_crop_years').insert({ contract_id: contractId, crop_year_id: id }));
+          await loadRefs();
+        }
+      }
       dlg.close();
       toast('Saved');
       onDone();
@@ -2333,11 +2403,12 @@ const rateFmt = (n, unit) => (n == null ? '' : `${Number(n).toLocaleString(undef
 async function renderWork(el) {
   const s = workState;
   if (s.view === 'harvest') return renderHarvest(el);
-  const { data, error } = await sb.from('work_events')
-    .select('*, planting_details(*), crop_years(crop_id, variety)')
+  const res = await sb.from('work_events')
+    .select(`*, planting_details(*), crop_years(crop_id, variety)${isStaff() ? ', work_costs(*)' : ''}`)
     .gte('performed_on', `${s.season}-01-01`).lte('performed_on', `${s.season}-12-31`)
     .order('performed_on', { ascending: false }).order('event_id', { ascending: false });
-  if (error) { el.innerHTML = `<div class="empty">Work records aren't set up yet. Run <b>work_records.sql</b> in Supabase first.</div>`; return; }
+  if (res.error) { el.innerHTML = `<div class="empty">Work records aren't set up yet. Run <b>work_records.sql</b> and <b>money_tables.sql</b> in Supabase first.</div>`; return; }
+  const data = res.data.map((r) => flatMoney(r, 'work_costs'));
   const term = s.q.trim().toLowerCase();
   // Crops for automatic charging (tillage can land on next year's crop).
   const cys = (await sb.from('crop_years').select('crop_year_id, field_id, crop_id, variety, season, sequence, planting_date, multi_year, end_season')
@@ -2399,7 +2470,7 @@ const patText = (r, d) => {
 // opts: { eventId } to edit, or { operation, fieldId, cropYearId } for a new record
 async function openWorkForm(opts, onDone) {
   let ev = null;
-  if (opts.eventId) [ev] = await q(sb.from('work_events').select('*, planting_details(*)').eq('event_id', opts.eventId));
+  if (opts.eventId) [ev] = (await q(sb.from('work_events').select(`*, planting_details(*)${isStaff() ? ', work_costs(*)' : ''}`).eq('event_id', opts.eventId))).map((r) => flatMoney(r, 'work_costs'));
   const d = (Array.isArray(ev?.planting_details) ? ev.planting_details[0] : ev?.planting_details) ?? {};
   const multi = !ev && (opts.fieldIds?.length ?? 0) > 1;   // several fields from the map: one record each
   const v = ev ? { ...ev } : { operation: opts.operation ?? (multi || opts.fieldIds ? 'tillage' : 'planting'), performed_on: localDate(), field_id: opts.fieldId ?? opts.fieldIds?.[0] ?? null,
@@ -2425,16 +2496,16 @@ async function openWorkForm(opts, onDone) {
       <button type="button" data-ground="custom" class="${custom ? 'on' : ''}">Custom work<small>for another farmer</small></button></div>`}
     <div class="custom-box" data-custom>
       <div class="row2">
-        <label>Customer *<select name="customer_id"><option value="">Choose…</option>${refs.customers.filter((c) => c.active || c.customer_id === v.customer_id).map((c) => `<option value="${c.customer_id}" ${c.customer_id === v.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}<option value="new">+ New customer…</option></select></label>
+        <label>Customer *<select name="customer_id"><option value="">Choose…</option>${refs.customers.filter((c) => c.active || c.customer_id === v.customer_id).map((c) => `<option value="${c.customer_id}" ${c.customer_id === v.customer_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}${isStaff() ? '<option value="new">+ New customer…</option>' : ''}</select></label>
         <label data-newcust hidden>New customer name<input name="new_customer"></label>
       </div>
       <label>Location (their field)<input name="location" value="${esc(v.location ?? '')}" placeholder="e.g. Rd 7 & M, north circle"></label>
       <div class="row gps-row"><button type="button" class="small" data-act="gps">📍 Use my location</button><span class="muted small" id="gps-text">${v.lat != null ? `${Number(v.lat).toFixed(5)}, ${Number(v.lng).toFixed(5)}` : ''}</span></div>
       <div class="row2">
         <label>Acres *<input type="number" inputmode="decimal" step="any" min="0" name="c_acres" value="${esc(v.acres ?? '')}"></label>
-        <label>Rate charged ($/acre)<input type="number" inputmode="decimal" step="0.01" min="0" name="custom_rate" value="${esc(v.custom_rate ?? '')}"></label>
+        <label class="staff-only">Rate charged ($/acre)<input type="number" inputmode="decimal" step="0.01" min="0" name="custom_rate" value="${esc(v.custom_rate ?? '')}"></label>
       </div>
-      <p class="cost-line" id="custom-total"></p>
+      <p class="cost-line staff-only" id="custom-total"></p>
     </div>
     <div class="row2">
       <label>Work *<select name="operation" required>${types.map((w) => `<option value="${esc(w.operation)}" ${w.operation === v.operation ? 'selected' : ''}>${esc(workLabel(w.operation))}</option>`).join('')}</select></label>
@@ -2457,7 +2528,7 @@ async function openWorkForm(opts, onDone) {
       <label>Operator<select name="performed_by"><option value="">—</option>${refs.operators.filter((o) => o.active || o.operator_id === v.performed_by).map((o) => `<option value="${o.operator_id}" ${o.operator_id === v.performed_by ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></label>
       <label ${multi ? 'hidden' : ''} data-ours>Acres<input type="number" step="any" min="0" name="acres" value="${esc(v.acres ?? '')}"></label>
     </div>
-    <p class="cost-line" id="cost-line"></p>
+    <p class="cost-line staff-only" id="cost-line"></p>
     <div class="row2 pattern-row">
       <label>Pattern<select name="pattern"><option value="">—</option>
         <option value="straight" ${pat === 'straight' ? 'selected' : ''}>Straight lines</option>
@@ -2609,8 +2680,8 @@ async function openWorkForm(opts, onDone) {
   $$('[data-ground]', dlg).forEach((b) => (b.onclick = () => { custom = b.dataset.ground === 'custom'; $$('[data-ground]', dlg).forEach((x) => x.classList.toggle('on', x === b)); sync(); }));
   el.customer_id.onchange = () => {
     $('[data-newcust]', dlg).hidden = el.customer_id.value !== 'new';
-    const c = refs.customers.find((x) => x.customer_id === Number(el.customer_id.value));
-    if (c?.default_rate != null && !el.custom_rate.value) { el.custom_rate.value = c.default_rate; showCustom(); }
+    const r = rateOf('customer', Number(el.customer_id.value));
+    if (r != null && !el.custom_rate.value) { el.custom_rate.value = r; showCustom(); }
     if (el.customer_id.value === 'new') el.new_customer.focus();
   };
   el.c_acres.oninput = () => { showCustom(); showCost(); };
@@ -2645,18 +2716,16 @@ async function openWorkForm(opts, onDone) {
     openChemForm({ event: cev }, () => { onDone?.(); reopen(); });
   }));
 
-  // Several fields from the map: one record per field, each with its own acres and cost.
+  // Several fields from the map: one record per field, each with its own acres (the database prices each).
   const saveMany = async () => {
     const g = (k) => (el[k] ? String(el[k].value).trim() : '');
     const n = (k) => (g(k) === '' ? null : Number(g(k)));
-    const cr = workRate(op(), n('equipment_id'));
     const rows = opts.fieldIds.map((fid) => {
       const ac = fieldById(fid)?.acres != null ? Number(fieldById(fid).acres) : null;
       return { operation: op(), field_id: fid, performed_on: g('performed_on'), end_date: g('end_date') || null, status,
         tractor_id: n('tractor_id'), equipment_id: n('equipment_id'), performed_by: n('performed_by'), acres: ac, notes: g('notes') || null,
         pattern: g('pattern') || null, heading_deg: g('pattern') === 'straight' ? n('heading_deg') : null,
-        ...(op() === 'harvest' ? { harvest_stage: g('harvest_stage') || null } : {}),
-        cost_per_acre: cr.rate, cost_basis: cr.basis, cost_total: cr.rate != null && ac != null ? Math.round(cr.rate * ac * 100) / 100 : null };
+        ...(op() === 'harvest' ? { harvest_stage: g('harvest_stage') || null } : {}) };
     });
     const btn = $('button[type=submit]', form); btn.disabled = true;
     try {
@@ -2689,13 +2758,12 @@ async function openWorkForm(opts, onDone) {
       pattern: val('pattern') || null, heading_deg: val('pattern') === 'straight' ? numOrNull('heading_deg') : null,
       ...(op() === 'harvest' || ev?.harvest_stage ? { harvest_stage: op() === 'harvest' ? val('harvest_stage') || null : null } : {}),
       status,
-      ...(custom ? { field_id: null, customer_id: Number(val('customer_id')), location: val('location') || null, lat: gps?.lat ?? null, lng: gps?.lng ?? null,
-        custom_rate: numOrNull('custom_rate'), custom_total: numOrNull('custom_rate') != null && numOrNull('c_acres') != null ? Math.round(numOrNull('custom_rate') * numOrNull('c_acres') * 100) / 100 : null }
-        : (ev?.customer_id ? { customer_id: null, location: null, lat: null, lng: null, custom_rate: null, custom_total: null } : {})),
+      ...(custom ? { field_id: null, customer_id: Number(val('customer_id')), location: val('location') || null, lat: gps?.lat ?? null, lng: gps?.lng ?? null }
+        : (ev?.customer_id ? { customer_id: null, location: null, lat: null, lng: null } : {})),
     };
-    // Freeze the cost with today's rate.
-    const cr = workRate(row.operation, row.equipment_id);
-    Object.assign(row, { cost_per_acre: cr.rate, cost_basis: cr.basis, cost_total: cr.rate != null && row.acres != null ? Math.round(cr.rate * row.acres * 100) / 100 : null });
+    // The database freezes the cost with today's rate when this saves (work_costs). The charge to a
+    // custom-work customer is staff-only: it's saved separately below, and defaults to the customer's rate.
+    const customRate = custom && isStaff() ? numOrNull('custom_rate') : undefined;
     const det = {
       planting_label: el.staggered.checked ? val('planting_label') : null, row_spacing_in: numOrNull('row_spacing_in'),
       seed_lot: val('seed_lot') || null, target_rate: numOrNull('target_rate'), target_unit: val('target_unit'),
@@ -2718,17 +2786,14 @@ async function openWorkForm(opts, onDone) {
         delete row.harvest_stage; res = await write(row);
         if (!res.error) toast('Saved, but the harvest pass needs harvest.sql run in Supabase', true);
       }
-      if (res.error && /cost_per_acre|cost_total|cost_basis/.test(res.error.message ?? '')) {
-        const { cost_per_acre, cost_total, cost_basis, ...rest } = row;
-        res = await write(rest);
-      }
       if (res.error && /pattern|heading_deg/.test(res.error.message ?? '')) {
-        const { pattern, heading_deg, cost_per_acre, cost_total, cost_basis, ...rest } = row;
+        const { pattern, heading_deg, ...rest } = row;
         res = await write(rest);
         if (!res.error && !planting && pattern) toast('Saved, but the heading needs work_pattern.sql run in Supabase', true);
       }
       if (res.error) { toast(res.error.message, true); throw res.error; }
       if (!ev) id = res.data.event_id;
+      if (customRate != null || (customRate === null && ev?.custom_rate != null)) await q(sb.from('work_costs').upsert({ event_id: id, custom_rate: customRate }));
       if (planting && !custom) {
         await q(sb.from('planting_details').upsert({ event_id: id, ...det }));
         await syncPlantingDate(row.crop_year_id);
@@ -3262,8 +3327,10 @@ function chemRunInfo(e) {
   const end = plannedEnd(e);
   return `Started ${clock(e.started_at)}${end ? ` · ends ${clock(end)}` : ''}`;
 }
+// Staff run any planned record; a licensed applicator runs the ones assigned to them (sql/user_roles.sql).
+const canRunChem = (e) => isStaff() || (me.canApply && me.operatorId != null && e.performed_by === me.operatorId);
 function chemRunBtn(e) {
-  if (e.status !== 'planned' || e.load_id) return '';
+  if (e.status !== 'planned' || e.load_id || !canRunChem(e)) return '';
   return isRunning(e) ? `<button class="small danger" data-cstop="${e.event_id}">Stop</button> `
     : `<button class="small primary" data-cstart="${e.event_id}">Start</button> `;
 }
@@ -3344,7 +3411,7 @@ async function checkChemRuns() {
       .not('started_at', 'is', null).is('stopped_at', null).not('runtime_hr', 'is', null).order('started_at');
     if (error) return;
     const now = Date.now();
-    const due = (data ?? []).find((e) => !e.split_of && plannedEnd(e) && new Date(plannedEnd(e)) <= now && !(finishSnooze.get(e.event_id) > now));
+    const due = (data ?? []).find((e) => !e.split_of && canRunChem(e) && plannedEnd(e) && new Date(plannedEnd(e)) <= now && !(finishSnooze.get(e.event_id) > now));
     if (due && !$('dialog[open]')) await openChemFinish(due, true, () => show(currentView));
   } finally { chemRunChecking = false; }
 }
@@ -3375,10 +3442,10 @@ async function renderChem(el) {
         <button data-season="-1" aria-label="Previous year">‹</button>
         <strong class="season">${s.season}</strong>
         <button data-season="1" aria-label="Next year">›</button>
-        <button data-act="load">Start a load</button>
-        <button class="primary" data-act="add">Add record</button>
+        ${isStaff() ? `<button data-act="load">Start a load</button>
+        <button class="primary" data-act="add">Add record</button>` : ''}
       </div></div>
-    ${openLoads.length ? `<section class="card loads-card"><h3>Loads in progress</h3><ul class="list">${openLoads.map((l) => {
+    ${openLoads.length && isStaff() ? `<section class="card loads-card"><h3>Loads in progress</h3><ul class="list">${openLoads.map((l) => {
       const evs = l.chemical_events; const done = evs.filter((e) => e.status === 'done').length;
       const running = evs.some((e) => e.started_at && !e.stopped_at);
       return `<li><span class="li-name"><b>${esc(l.name || methodName(l.method) + ' load')}</b> <span class="muted small">${esc(fmtDate(l.applied_on))}</span></span>
@@ -3404,13 +3471,13 @@ async function renderChem(el) {
           return `<span class="prod"><span class="type-dot t-${esc(c?.type ?? 'other')}"></span>${esc(c?.name ?? '?')} <span class="muted">${esc(rateText(l))}</span></span>`;
         }).join('')}</div></td>
         <td class="c-by">${esc(operatorName(r.performed_by))}</td>
-        <td class="r nowrap">${chemRunBtn(r)}<button class="small" data-edit="${r.event_id}">Edit</button></td></tr>`).join('')}
+        <td class="r nowrap">${chemRunBtn(r)}${isStaff() ? `<button class="small" data-edit="${r.event_id}">Edit</button>` : ''}</td></tr>`).join('')}
       </tbody></table></div>` : `<div class="empty">No chemical records${rows.length ? ' match these filters' : ` for ${s.season}`}.</div>`}`;
 
   const reload = () => renderChem(el);
   $$('[data-season]', el).forEach((b) => (b.onclick = () => { s.season += Number(b.dataset.season); reload(); }));
-  $('[data-act=add]', el).onclick = () => openChemForm({ fieldIds: [] }, reload);
-  $('[data-act=load]', el).onclick = () => openChemForm({ fieldIds: [], asLoad: true }, reload);
+  $('[data-act=add]', el)?.addEventListener('click', () => openChemForm({ fieldIds: [] }, reload));
+  $('[data-act=load]', el)?.addEventListener('click', () => openChemForm({ fieldIds: [], asLoad: true }, reload));
   $$('[data-load]', el).forEach((b) => (b.onclick = () => openLoad(Number(b.dataset.load), reload)));
   $$('[data-edit]', el).forEach((b) => (b.onclick = () => openChemForm({ event: rows.find((r) => r.event_id === Number(b.dataset.edit)) }, reload)));
   wireChemRun(el, (id) => rows.find((r) => r.event_id === Number(id)), reload);
@@ -3664,7 +3731,6 @@ async function openChemForm(opts, onDone) {
       applied_on: val('applied_on'), status, method,
       performed_by: val('performed_by') ? Number(val('performed_by')) : null,
       carrier_gpa: ['spray', 'aerial'].includes(method) ? numOrNull('carrier_gpa') : null,
-      ...(refs.appRates.length ? (() => { const r = appRate(method, method === 'spray' ? val('sprayer_id') : null); return { app_cost_per_acre: r.rate, app_cost_basis: r.basis }; })() : {}),
       hours: ['spray', 'aerial'].includes(method) ? numOrNull('hours') : null,
       pivot_speed_pct: method === 'chemigation' ? numOrNull('pivot_speed_pct') : null,
       water_in: method === 'chemigation' ? numOrNull('water_in') : null,
@@ -3700,11 +3766,11 @@ async function openChemForm(opts, onDone) {
           await q(sb.from('chemical_event_products').delete().eq('event_id', ev.event_id));
           eventId = ev.event_id;
         } else if (groups.length > 1) {
-          // One record per group. The first carries the application cost; the rest point back to it
-          // with split_of, so cost isn't counted twice and the tank mix can be traced.
+          // One record per group. The first carries the application cost (priced by the database); the rest
+          // point back to it with split_of, so cost isn't counted twice and the tank mix can be traced.
           let first = null;
           for (const g of groups) {
-            const part = { ...row, ...(first ? { split_of: first, app_cost_per_acre: null, app_cost_basis: 'split' } : {}) };
+            const part = { ...row, ...(first ? { split_of: first } : {}) };
             const id = (await q(sb.from('chemical_events').insert(part).select('event_id').single())).event_id;
             first ??= id;
             await q(sb.from('chemical_event_products').insert(lineRows(id, used.filter((l) => Number(l.grp) === g))));
@@ -3864,7 +3930,6 @@ function addFieldsToLoad(load, evs, mix, onDone) {
           method: load.method, performed_by: load.performed_by, carrier_gpa: load.carrier_gpa, notes: load.notes, sprayer_id: load.sprayer_id ?? null,
           hours: null, pivot_speed_pct: tmpl.pivot_speed_pct ?? null, water_in: tmpl.water_in ?? null,
           acres_treated: fieldById(fid)?.acres ?? null, crop_year_id: crops[0]?.crop_year_id ?? null,
-          ...(refs.appRates.length ? (() => { const r = appRate(load.method, load.sprayer_id); return { app_cost_per_acre: r.rate, app_cost_basis: r.basis }; })() : {}),
         }).select('event_id').single())).event_id;
         if (mix.length) await q(sb.from('chemical_event_products').insert(mix.map((l) => ({
           event_id: ev, chemical_id: l.chemical_id, position: l.position, rate: l.rate, rate_unit: l.rate_unit,
@@ -4186,7 +4251,6 @@ const TYPE_FIELDS = [
   [/pivot/i, ['towers', 'corner_arm', 'full_lap_hr']],
   [/pump/i, ['hp', 'frame_size', 'meter_no', 'vfd']],
   [/planter|drill/i, ['planting_settings']],
-  [/disk|ripper|plough|plow|rototill|packer|skewtread|shredder|harrow|planter|drill|cultivat|corrugat|dammer|toolbar|bedder|bean cutter|header|digger|combine|swather|windrower|sprayer|implement/i, ['cost_per_acre']],
   [ENGINE_RE, ['hours', 'hours_date', 'engine_serial']],
   [/pickup|truck|trailer/i, ['license_plate']],
 ];
@@ -4361,14 +4425,14 @@ async function renderMaint(el) {
   const s = maintState;
   if (s.view === 'tasks') return renderSeasonal(el);
   const [jobsRes, ivRes, stRes] = await Promise.all([
-    sb.from('maint_jobs').select('*, maint_photos(photo_id, kind)').order('reported_on', { ascending: false }).order('job_id', { ascending: false }),
+    sb.from('maint_jobs').select(`*, maint_photos(photo_id, kind)${isStaff() ? ', maint_job_costs(cost)' : ''}`).order('reported_on', { ascending: false }).order('job_id', { ascending: false }),
     sb.from('service_intervals').select('*').eq('active', true),
     s.view === 'history' ? sb.from('procedure_tasks').select('task_id, equipment_id, completed_on, procedure_runs(procedure_id, season, procedures(*))').eq('status', 'done')
       .gte('completed_on', `${s.season}-01-01`).lte('completed_on', `${s.season}-12-31`) : Promise.resolve({ data: [] }),
   ]);
   if (jobsRes.error) { el.innerHTML = '<div class="empty">Maintenance isn’t set up yet. Run <b>maintenance.sql</b> in Supabase first.</div>'; return; }
   await loadRefs();
-  const jobs = jobsRes.data, ivs = ivRes.data ?? [];
+  const jobs = jobsRes.data.map((j) => flatMoney(j, 'maint_job_costs')), ivs = ivRes.data ?? [];
   const eqById = (id) => refs.equipment.find((e) => e.equipment_id === id);
   const term = s.q.trim().toLowerCase();
   const eqOf = (id) => refs.equipment.find((e) => e.equipment_id === id);
@@ -4414,13 +4478,13 @@ async function renderMaint(el) {
         <span class="li-value"><button class="small" data-iv="${iv.interval_id}">Edit</button> <button class="small primary" data-svc="${iv.interval_id}">Done</button></span></li>`).join('')}</ul>`
       : '<div class="empty">No service intervals yet. Add one with <b>+ Interval</b>, or from a machine under Setup → Equipment.</div>') : ''}
     ${s.view === 'history' ? (histRows.length ? `<p class="muted small">${done.length} job(s)${stDone.length ? ` · ${stDone.length} seasonal checklist(s)` : ''} in ${s.season}${done.some((j) => j.cost != null) ? ` · total <b>${money(done.reduce((n, j) => n + Number(j.cost || 0), 0))}</b>` : ''}</p>
-      <div class="card table-wrap"><table class="m-cards"><thead><tr><th>Date</th><th>Equipment</th><th>Job</th><th class="r">Hours</th><th class="r">Cost</th><th></th></tr></thead><tbody>
+      <div class="card table-wrap"><table class="m-cards"><thead><tr><th>Date</th><th>Equipment</th><th>Job</th><th class="r">Hours</th><th class="r staff-only">Cost</th><th></th></tr></thead><tbody>
       ${histRows.map(({ j, t }) => t ? `<tr><td class="nowrap">${fmtDateY(t.completed_on)}</td><td>${esc(eqOf(t.equipment_id) ? eqLabel(eqOf(t.equipment_id)) : '')}</td>
-        <td>${esc(t.procedure_runs.procedures.name)} <span class="muted small">seasonal task</span></td><td class="r"></td><td class="r"></td>
+        <td>${esc(t.procedure_runs.procedures.name)} <span class="muted small">seasonal task</span></td><td class="r"></td><td class="r staff-only"></td>
         <td class="r"><button class="small" data-stask="${t.task_id}">Open</button></td></tr>`
       : `<tr><td class="nowrap">${fmtDateY(j.completed_on ?? j.reported_on)}</td><td>${esc(eqOf(j.equipment_id) ? eqLabel(eqOf(j.equipment_id)) : '')}</td>
         <td>${esc(j.title)} <span class="muted small">${j.kind === 'service' ? 'service' : 'repair'}${photoN(j, 'invoice') ? ' · 🧾' : ''}</span></td>
-        <td class="r">${j.hours_at != null ? num(j.hours_at, 0) : ''}</td><td class="r">${money(j.cost)}</td>
+        <td class="r">${j.hours_at != null ? num(j.hours_at, 0) : ''}</td><td class="r staff-only">${money(j.cost)}</td>
         <td class="r"><button class="small" data-job="${j.job_id}">Open</button></td></tr>`).join('')}</tbody></table></div>` : `<div class="empty">Nothing finished in ${s.season}.</div>`) : ''}`;
   const reload = () => renderMaint(el);
   wireMaintTabs(el);
@@ -4445,7 +4509,7 @@ async function renderMaint(el) {
 // opts: { jobId } to edit; or { equipmentId, kind, status, intervalId, title } for a new job
 async function openJob(opts, onDone) {
   let j = null;
-  if (opts.jobId) [j] = await q(sb.from('maint_jobs').select('*').eq('job_id', opts.jobId));
+  if (opts.jobId) [j] = (await q(sb.from('maint_jobs').select(isStaff() ? '*, maint_job_costs(cost)' : '*').eq('job_id', opts.jobId))).map((x) => flatMoney(x, 'maint_job_costs'));
   const v = j ?? { kind: opts.kind ?? 'repair', status: opts.status ?? 'open', equipment_id: opts.equipmentId ?? null, interval_id: opts.intervalId ?? null,
     title: opts.title ?? '', description: opts.description ?? null, reported_on: localDate(), completed_on: opts.status === 'done' ? localDate() : null, down: false };
   const ivs = (await sb.from('service_intervals').select('*').eq('active', true)).data ?? [];
@@ -4478,7 +4542,7 @@ async function openJob(opts, onDone) {
         <label>Machine hours<input type="number" inputmode="decimal" step="0.1" min="0" name="hours_at" value="${esc(v.hours_at ?? '')}"></label>
       </div>
       <div class="row2">
-        <label>Total cost ($)<input type="number" inputmode="decimal" step="0.01" min="0" name="cost" value="${esc(v.cost ?? '')}"></label>
+        <label class="staff-only">Total cost ($)<input type="number" inputmode="decimal" step="0.01" min="0" name="cost" value="${esc(v.cost ?? '')}"></label>
         <label>Vendor<input name="vendor" value="${esc(v.vendor ?? '')}"></label>
       </div>
       <label>Invoice #<input name="invoice_no" value="${esc(v.invoice_no ?? '')}"></label>
@@ -4521,7 +4585,7 @@ async function openJob(opts, onDone) {
       equipment_id: Number(val('equipment_id')), kind: val('kind'), interval_id: val('kind') === 'service' ? n('interval_id') : null,
       title: val('title'), description: val('description') || null, down: isDone ? false : el.down.checked, status: val('status'),
       ...(j ? {} : { reported_by: me?.operator_id ?? null, reported_by_email: myEmail || null, ...(opts.link ?? {}) }), reported_on: val('reported_on') || localDate(), completed_on: isDone ? val('completed_on') || localDate() : null,
-      done_by: isDone ? val('done_by') || null : null, hours_at: isDone ? n('hours_at') : null, cost: isDone ? n('cost') : null,
+      done_by: isDone ? val('done_by') || null : null, hours_at: isDone ? n('hours_at') : null,
       vendor: isDone ? val('vendor') || null : null, invoice_no: isDone ? val('invoice_no') || null : null, notes: val('notes') || null,
       updated_at: new Date().toISOString(),
     };
@@ -4535,6 +4599,8 @@ async function openJob(opts, onDone) {
         if (r.error) { toast(r.error.message, true); throw r.error; }
         id = r.data.job_id;
       }
+      // The cost is staff-only (maint_job_costs).
+      if (isStaff() && (isDone ? n('cost') : null) !== (j?.cost ?? null)) await q(sb.from('maint_job_costs').upsert({ job_id: id, cost: isDone ? n('cost') : null }));
       // Newer hours reading → update the machine's hours.
       const eq = refs.equipment.find((x) => x.equipment_id === row.equipment_id);
       if (row.hours_at != null && (eq?.hours == null || row.hours_at > Number(eq.hours))) {
@@ -5616,63 +5682,108 @@ async function openEquipCard(id) {
 }
 
 async function renderSetup(el) {
-  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'costs', 'customers', 'leases'];
+  if (!isStaff()) { el.innerHTML = '<div class="empty">Setup is for admins and managers.</div>'; return; }
+  const tabs = ['riders', 'turnouts', 'crops', 'operators', 'chemicals', 'equipment', 'worktypes', 'costs', 'contracts', 'customers', 'leases', ...(isAdmin() ? ['users'] : [])];
+  if (!tabs.includes(setupTab)) setupTab = tabs[0];
+  const tabName = (t) => ({ costs: 'Cost rates', users: 'Users' })[t] ?? CRUD[t].title;
   el.innerHTML = `<div class="subtabs">${tabs.map((t) =>
-    `<button data-tab="${t}" class="${t === setupTab ? 'active' : ''}">${esc(t === 'costs' ? 'Cost rates' : CRUD[t].title)}</button>`).join('')}</div>
+    `<button data-tab="${t}" class="${t === setupTab ? 'active' : ''}">${esc(tabName(t))}</button>`).join('')}</div>
     <div id="setup-body"><p class="muted">Loading…</p></div>`;
   $$('[data-tab]', el).forEach((b) => (b.onclick = () => { setupTab = b.dataset.tab; renderSetup(el); }));
   if (setupTab === 'costs') return renderCostRates($('#setup-body', el));
+  if (setupTab === 'users') return renderUsers($('#setup-body', el));
   await renderCrud(CRUD[setupTab], $('#setup-body', el));
 }
 
-// Setup -> Cost rates: one $/acre per work type and per application method; machine overrides live on Equipment.
+// Setup -> Cost rates: the one rate card ($/acre). Machine rates override the work type or method.
+// Only admins and managers can read or change it (sql/money_tables.sql).
 async function renderCostRates(el) {
   await loadRefs();
-  const ready = refs.workTypes.length && 'cost_per_acre' in refs.workTypes[0];
-  if (!ready || !refs.appRates.length) { el.innerHTML = '<div class="empty">Cost rates aren’t set up yet. Run <b>work_costs.sql</b> in Supabase first.</div>'; return; }
-  const overrides = refs.equipment.filter((e) => e.cost_per_acre != null);
+  const res = await sb.from('rates').select('kind').limit(1);
+  if (res.error) { el.innerHTML = '<div class="empty">Cost rates aren’t set up yet. Run <b>money_tables.sql</b> in Supabase first.</div>'; return; }
   const yr = new Date().getFullYear();
+  const input = (kind, ref) => `<span class="money-in"><span>$</span><input type="number" inputmode="decimal" step="0.01" min="0" data-kind="${kind}" data-ref="${esc(ref)}" value="${rateOf(kind, ref) ?? ''}"><span class="muted">/ac</span></span>`;
+  const machines = refs.rates.filter((r) => r.kind === 'equipment' && r.cost_per_acre != null)
+    .map((r) => refs.equipment.find((e) => String(e.equipment_id) === r.ref)).filter(Boolean).sort(eqSort);
+  const customers = refs.customers.filter((c) => c.active || rateOf('customer', c.customer_id) != null);
   el.innerHTML = `
+    <div class="section-head"><h2>Cost rates</h2></div>
+    <p class="muted small">Every rate lives here. Change it once and every new record uses it. Only admins and managers can see these numbers.</p>
     <div class="card"><h3>Work passes ($/acre)</h3>
-      <p class="muted small">Used for every pass of that work type unless the implement or machine has its own rate (Setup → Equipment).</p>
-      <div class="rate-grid">${refs.workTypes.filter((w) => w.active || w.cost_per_acre != null).map((w) => `<label>${esc(workLabel(w.operation))}
-        <span class="money-in"><span>$</span><input type="number" inputmode="decimal" step="0.01" min="0" data-op="${esc(w.operation)}" value="${w.cost_per_acre ?? ''}"><span class="muted">/ac</span></span></label>`).join('')}</div></div>
+      <p class="muted small">Used for every pass of that work type unless the machine has its own rate below.</p>
+      <div class="rate-grid">${refs.workTypes.filter((w) => w.active || rateOf('work_type', w.operation) != null).map((w) => `<label>${esc(workLabel(w.operation))}
+        ${input('work_type', w.operation)}</label>`).join('')}</div></div>
     <div class="card"><h3>Chemical applications ($/acre)</h3>
       <p class="muted small">Application cost only (the pass, not the product). Ground spray uses the sprayer's own rate if it has one.</p>
-      <div class="rate-grid">${METHODS.map(([m, label]) => { const r = refs.appRates.find((x) => x.method === m); return `<label>${esc(label)}
-        <span class="money-in"><span>$</span><input type="number" inputmode="decimal" step="0.01" min="0" data-method="${m}" value="${r?.cost_per_acre ?? ''}"><span class="muted">/ac</span></span></label>`; }).join('')}</div></div>
-    <div class="card"><h3>Machine overrides</h3>
-      ${overrides.length ? `<ul class="list">${overrides.map((e) => `<li><span class="li-name">${esc(e.name)} <span class="muted small">${esc((e.equipment_work_types ?? []).map((x) => workLabel(x.operation)).join(', '))}</span></span><span class="li-value">${money(e.cost_per_acre)}/ac</span></li>`).join('')}</ul>`
-        : '<p class="muted small">None. Set one on an implement or machine under Setup → Equipment when it costs more or less than its work type (a ripper vs. a disk, say).</p>'}</div>
+      <div class="rate-grid">${METHODS.map(([m, label]) => `<label>${esc(label)}${input('method', m)}</label>`).join('')}</div></div>
+    <div class="card"><h3>Machine rates</h3>
+      <p class="muted small">For an implement or machine that costs more or less than its work type (a ripper vs. a disk, say). Clear a rate to remove it.</p>
+      ${machines.length ? `<div class="rate-grid">${machines.map((e) => `<label>${esc(e.name)}${input('equipment', e.equipment_id)}</label>`).join('')}</div>` : ''}
+      <div class="row"><select id="add-machine"><option value="">Add a machine rate…</option>${refs.equipment.filter((e) => e.active && !machines.includes(e)).sort(eqSort)
+        .map((e) => `<option value="${e.equipment_id}">${esc(e.name)}</option>`).join('')}</select></div></div>
+    <div class="card"><h3>Custom work customers ($/acre charged)</h3>
+      <p class="muted small">Fills in the rate on custom work for that customer. It can be changed on the record.</p>
+      ${customers.length ? `<div class="rate-grid">${customers.map((c) => `<label>${esc(c.name)}${input('customer', c.customer_id)}</label>`).join('')}</div>` : '<p class="muted small">No customers yet (Setup → Customers).</p>'}</div>
     <div class="card"><h3>Recalculate a season</h3>
       <p class="muted small">Each record keeps the rate it was saved with, so changing a rate here doesn't change past records. To apply today's rates to a whole season, recalculate it.</p>
       <div class="row"><select id="recalc-yr">${[yr + 1, yr, yr - 1, yr - 2, yr - 3].map((y) => `<option ${y === yr ? 'selected' : ''}>${y}</option>`).join('')}</select>
         <button type="button" data-act="recalc">Recalculate costs</button></div>
       <p class="muted small" id="recalc-msg"></p></div>`;
-  const saveRate = async (inp, table, key, id) => {
-    const v = inp.value === '' ? null : Number(inp.value);
-    try { await q(sb.from(table).update({ cost_per_acre: v }).eq(key, id)); toast('Rate saved'); await loadRefs(); } catch { /* shown */ }
+  $$('[data-kind]', el).forEach((i) => (i.onchange = async () => {
+    const row = { kind: i.dataset.kind, ref: i.dataset.ref };
+    try {
+      if (i.value === '') await q(sb.from('rates').delete().match(row));
+      else await q(sb.from('rates').upsert({ ...row, cost_per_acre: Number(i.value), updated_at: new Date().toISOString() }));
+      toast('Rate saved'); await loadRefs();
+    } catch { /* shown */ }
+  }));
+  $('#add-machine', el).onchange = async (e) => {
+    if (!e.target.value) return;
+    const v = prompt(`$/acre for ${equipName(Number(e.target.value))}`);
+    if (v == null || v.trim() === '' || !(Number(v) >= 0)) { e.target.value = ''; return; }
+    try { await q(sb.from('rates').upsert({ kind: 'equipment', ref: e.target.value, cost_per_acre: Number(v), updated_at: new Date().toISOString() })); toast('Rate saved'); renderCostRates(el); } catch { /* shown */ }
   };
-  $$('[data-op]', el).forEach((i) => (i.onchange = () => saveRate(i, 'operation_types', 'operation', i.dataset.op)));
-  $$('[data-method]', el).forEach((i) => (i.onchange = () => saveRate(i, 'application_rates', 'method', i.dataset.method)));
   $('[data-act=recalc]', el).onclick = async () => {
     const y = $('#recalc-yr', el).value;
     if (!confirm(`Replace the saved costs on every ${y} work and chemical record with today's rates?`)) return;
     const msg = $('#recalc-msg', el); msg.textContent = 'Working…';
     try {
-      const works = await q(sb.from('work_events').select('event_id, operation, equipment_id, acres').gte('performed_on', `${y}-01-01`).lte('performed_on', `${y}-12-31`));
-      for (const w of works) {
-        const r = workRate(w.operation, w.equipment_id);
-        await q(sb.from('work_events').update({ cost_per_acre: r.rate, cost_basis: r.basis, cost_total: r.rate != null && w.acres != null ? Math.round(r.rate * w.acres * 100) / 100 : null }).eq('event_id', w.event_id));
-      }
-      const chems = await q(sb.from('chemical_events').select('event_id, method, sprayer_id').gte('applied_on', `${y}-01-01`).lte('applied_on', `${y}-12-31`));
-      for (const c of chems) {
-        const r = appRate(c.method, c.sprayer_id);
-        await q(sb.from('chemical_events').update({ app_cost_per_acre: r.rate, app_cost_basis: r.basis }).eq('event_id', c.event_id));
-      }
-      msg.textContent = `Updated ${works.length} work and ${chems.length} chemical record(s) for ${y}.`;
-    } catch { msg.textContent = 'Stopped on an error; some records may not be updated.'; }
+      const n = await q(sb.rpc('reprice_costs', { p_from: `${y}-01-01`, p_to: `${y}-12-31` }));
+      msg.textContent = `Updated ${n} work and chemical record(s) for ${y}.`;
+    } catch { msg.textContent = 'That didn’t work; nothing was changed.'; }
   };
+}
+
+// Setup -> Users (admins only): who can sign in and what they can do.
+// New logins are invited from the Supabase dashboard (sign-ups stay off) and start with no access.
+const ROLES = [['admin', 'Admin', 'Everything, including this page'], ['manager', 'Manager', 'Everything except assigning roles; sees money'],
+  ['employee', 'Farmhand', 'Farm records, no money; logs work, repairs, harvest loads and checklists; views chemical records; can’t delete'],
+  ['none', 'No access', 'Sees nothing until you pick a role']];
+async function renderUsers(el) {
+  const users = await q(sb.from('profiles').select('*').order('created_at'));
+  const opFor = (u) => refs.operators.find((o) => (o.login_email ?? '').trim().toLowerCase() === (u.email ?? '').toLowerCase());
+  el.innerHTML = `
+    <div class="section-head"><h2>Users</h2></div>
+    <p class="muted small">To add someone, invite their email from the Supabase dashboard (Authentication → Users → Invite). They show up here with no access until you give them a role.
+      Link them to their person under Setup → Operators (sign-in email) so their work, checklists and loads are theirs.</p>
+    <div class="card"><ul class="list">${ROLES.map(([, l, d]) => `<li><span class="li-name"><b>${l}</b></span><span class="li-value muted small">${esc(d)}</span></li>`).join('')}
+      <li><span class="li-name"><b>Can apply</b></span><span class="li-value muted small">A farmhand who records the application on chemical loads assigned to them (not products or rates)</span></li></ul></div>
+    <div class="card table-wrap"><table class="m-cards">
+      <thead><tr><th>Email</th><th>Name</th><th>Person</th><th>Role</th><th>Applicator</th></tr></thead>
+      <tbody>${users.map((u) => { const o = opFor(u); return `<tr>
+        <td>${esc(u.email)}${u.user_id === me.userId ? ' <span class="muted small">(you)</span>' : ''}</td>
+        <td><input data-name="${u.user_id}" value="${esc(u.name ?? '')}" placeholder="Name"></td>
+        <td>${o ? esc(o.name) : '<span class="muted small">not linked</span>'}</td>
+        <td><select data-role="${u.user_id}">${ROLES.map(([k, l]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
+        <td><label class="check"><input type="checkbox" data-apply="${u.user_id}" ${u.can_apply ? 'checked' : ''}> Can apply</label>
+          ${u.can_apply && !o?.license_no ? '<div class="muted small">No license no. on their person</div>' : ''}</td></tr>`; }).join('')}</tbody></table></div>`;
+  const save = async (id, patch, msg) => { try { await q(sb.from('profiles').update(patch).eq('user_id', id)); toast(msg); } catch { /* shown */ } renderUsers(el); };
+  $$('[data-role]', el).forEach((s) => (s.onchange = () => {
+    if (s.dataset.role === me.userId && s.value !== 'admin' && !confirm('Take admin away from yourself? You won’t be able to change roles after this.')) return renderUsers(el);
+    save(s.dataset.role, { role: s.value }, 'Role saved');
+  }));
+  $$('[data-apply]', el).forEach((c) => (c.onchange = () => save(c.dataset.apply, { can_apply: c.checked }, c.checked ? 'Marked as a licensed applicator' : 'Applicator removed')));
+  $$('[data-name]', el).forEach((i) => (i.onchange = () => save(i.dataset.name, { name: i.value.trim() || null }, 'Name saved')));
 }
 
 // =====================================================================
@@ -5834,9 +5945,9 @@ async function loadReportData(s) {
     d.crops = await byIds('crop_year_summary', '*');
   })());
   if (want('work')) jobs.push((async () => {
-    const parts = await Promise.all(chunk(ids, 100).map((part) => fetchAll(() => sb.from('work_events').select('*').in('field_id', part)
+    const parts = await Promise.all(chunk(ids, 100).map((part) => fetchAll(() => sb.from('work_events').select(isStaff() ? '*, work_costs(*)' : '*').in('field_id', part)
       .lte('performed_on', s.to).order('performed_on').order('event_id'))));
-    d.work = parts.flat().filter((r) => (r.end_date ?? r.performed_on) >= s.from && (s.planned || r.status !== 'planned'));
+    d.work = parts.flat().map((r) => flatMoney(r, 'work_costs')).filter((r) => (r.end_date ?? r.performed_on) >= s.from && (s.planned || r.status !== 'planned'));
   })());
   if (want('water')) jobs.push((async () => {
     const orders = await fetchAll(() => sb.from('water_orders').select('order_id, order_date, status').gte('order_date', s.from).lte('order_date', s.to).order('order_date'));
@@ -5853,10 +5964,10 @@ async function loadReportData(s) {
     if (want('irrigation') && eqIds.length) jobs.push((async () => {
       const [tasks, mj] = await Promise.all([
         byIds('procedure_tasks', 'task_id, equipment_id, status, completed_on, notes, procedure_runs(season, started_on, due_on, procedures(name)), procedure_checks(count)', 'equipment_id', eqIds),
-        byIds('maint_jobs', '*', 'equipment_id', eqIds),
+        byIds('maint_jobs', isStaff() ? '*, maint_job_costs(cost)' : '*', 'equipment_id', eqIds),
       ]);
       d.tasks = tasks.filter((t) => t.procedure_runs && t.procedure_runs.season >= y0 && t.procedure_runs.season <= y1);
-      d.jobs = mj.filter((j) => (j.reported_on <= s.to && (j.completed_on ?? s.to) >= s.from) || (j.completed_on && j.completed_on >= s.from && j.completed_on <= s.to));
+      d.jobs = mj.map((j) => flatMoney(j, 'maint_job_costs')).filter((j) => (j.reported_on <= s.to && (j.completed_on ?? s.to) >= s.from) || (j.completed_on && j.completed_on >= s.from && j.completed_on <= s.to));
     })());
   }
   await Promise.all(jobs);
@@ -5998,7 +6109,7 @@ async function buildReportPdf(s, d) {
         `${seasonSpan(c)}${c.multi_year && c.end_season == null ? ' (still in)' : ''}${c.sequence > 1 ? ` ${SEQ[c.sequence] ?? ''}` : ''}`,
         cropName(c.crop_id), c.variety ?? '', fmtDateYr(c.planting_date), c.acres != null ? num(c.acres, 1) : '',
         [c.grown_by ? `Grown by ${c.grown_by}` : '', c.status === 'planned' ? 'Planned' : '', leasedOutIn(c.field_id, c.season) ? 'Leased out' : ''].filter(Boolean).join(', '),
-        [c.contract_company, c.contract_number].filter(Boolean).join(' #'),
+        [contractFor(c.crop_year_id)?.company, contractFor(c.crop_year_id)?.contract_number].filter(Boolean).join(' #'),
         c.total_yield != null ? `${amtFmt(Number(c.total_yield))} ${c.yield_unit ?? ''}` : '',
         c.notes ?? '']), { columnStyles: { [subs ? 5 : 4]: { halign: 'right' }, [subs ? 9 : 8]: { cellWidth: 150 } } });
     }
@@ -6054,13 +6165,13 @@ async function buildReportPdf(s, d) {
       const rows = d.work.filter((r) => ids.includes(r.field_id));
       anySub(rows);
       if (!rows.length) note('No field work recorded in this period.');
-      else table([...(subs ? ['Sub-field'] : []), 'Date', 'Work', 'Equipment', 'Crop', 'Acres', 'Operator', 'Hours', '$/acre', 'Total $', 'Notes'], rows.map((r) => [
+      else table([...(subs ? ['Sub-field'] : []), 'Date', 'Work', 'Equipment', 'Crop', 'Acres', 'Operator', 'Hours', ...(isStaff() ? ['$/acre', 'Total $'] : []), 'Notes'], rows.map((r) => [
         ...(subs ? [subName(r.field_id)] : []),
         `${fmtDateYr(r.performed_on)}${r.end_date && r.end_date !== r.performed_on ? " – " + fmtDateYr(r.end_date) : ""}${r.status === 'planned' ? '\nPLANNED' : ''}`,
         `${workLabel(r.operation)}${r.harvest_stage ? ` – ${stageName(r.harvest_stage)}` : ''}${r.pattern ? `\n${r.pattern}` : ''}`,
         [r.tractor_id ? equipName(r.tractor_id) : '', r.equipment_id ? equipName(r.equipment_id) : ''].filter(Boolean).join(' + '),
         cyName(d.crops.find((c) => c.crop_year_id === r.crop_year_id)), r.acres != null ? num(r.acres, 1) : '', operatorName(r.performed_by),
-        r.hours != null ? num(r.hours, 1) : '', r.cost_per_acre != null ? money(r.cost_per_acre) : '', r.cost_total != null ? money(r.cost_total) : '', r.notes ?? '']),
+        r.hours != null ? num(r.hours, 1) : '', ...(isStaff() ? [r.cost_per_acre != null ? money(r.cost_per_acre) : '', r.cost_total != null ? money(r.cost_total) : ''] : []), r.notes ?? '']),
       { columnStyles: Object.fromEntries([4, 6, 7, 8].map((c) => [c + (subs ? 1 : 0), { halign: 'right' }])) });
     }
 
@@ -6110,9 +6221,9 @@ async function buildReportPdf(s, d) {
         const jobs = d.jobs.filter((j) => eqIds.includes(j.equipment_id)).sort((a, b) => a.reported_on.localeCompare(b.reported_on));
         const h3 = (t) => { ensure(40); doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(60, 60, 60); text(t, M, y + 8); y += 13; };
         if (jobs.length) h3('Repairs and service');
-        if (jobs.length) table(['Reported', 'Equipment', 'Type', 'Problem / work', 'Status', 'Completed', 'Done by', 'Cost', 'Notes'], jobs.map((j) => [
+        if (jobs.length) table(['Reported', 'Equipment', 'Type', 'Problem / work', 'Status', 'Completed', 'Done by', ...(isStaff() ? ['Cost'] : []), 'Notes'], jobs.map((j) => [
           fmtDateYr(j.reported_on), equipName(j.equipment_id), j.kind === 'service' ? 'Service' : 'Repair', `${j.title}${j.down ? ' (DOWN)' : ''}${j.description ? `\n${j.description}` : ''}`,
-          jobStatusName(j.status), fmtDateYr(j.completed_on), j.done_by ?? j.vendor ?? '', j.cost != null ? money(j.cost) : '', j.notes ?? '']),
+          jobStatusName(j.status), fmtDateYr(j.completed_on), j.done_by ?? j.vendor ?? '', ...(isStaff() ? [j.cost != null ? money(j.cost) : ''] : []), j.notes ?? '']),
         { columnStyles: { 3: { cellWidth: 190 }, 7: { halign: 'right' } } });
         else note('No repairs or service on this equipment in this period.');
       }
@@ -7536,6 +7647,14 @@ async function show(view) {
 async function startApp() {
   $('#login').hidden = true;
   $('#app').hidden = false;
+  try { await loadMe(); } catch { return; }
+  if (me.role === 'none') {
+    $('#view').innerHTML = `<div class="empty"><h2>Waiting for access</h2>
+      <p>You're signed in as <b>${esc(me.email)}</b>, but a partner hasn't given you access yet.</p>
+      <p class="muted small">Ask them to set your role under Setup → Users, then reopen the app.</p></div>`;
+    return;
+  }
+  if (!isStaff() && currentView === 'setup') currentView = 'home';
   try { await loadRefs(); } catch { return; }
   await show(currentView);
   openFromHash();
