@@ -109,6 +109,7 @@ create policy "profiles: admin delete" on public.profiles for delete to authenti
 -- 4. Farm tables. Three kinds:
 --    read    : members read, staff add/edit/delete (setup lists, fields, crops, water, chemical, templates)
 --    entry   : members read/add/edit, staff delete (day-to-day records employees fill in)
+--    tick    : like entry, and members can also remove (checklist ticks and notes, which untick by deleting)
 --    anything else in public (incl. tables added later and the money tables) : staff only
 create or replace function public.apply_role_policies(t text, kind text)
 returns void language plpgsql as $$
@@ -119,13 +120,17 @@ begin
   execute format('drop policy if exists "members: read" on public.%I', t);
   execute format('drop policy if exists "members: add" on public.%I', t);
   execute format('drop policy if exists "members: edit" on public.%I', t);
+  execute format('drop policy if exists "members: remove" on public.%I', t);
   execute format('create policy "staff: all" on public.%I for all to authenticated using (public.is_staff()) with check (public.is_staff())', t);
-  if kind in ('read', 'entry') then
+  if kind in ('read', 'entry', 'tick') then
     execute format('create policy "members: read" on public.%I for select to authenticated using (public.is_member())', t);
   end if;
-  if kind = 'entry' then
+  if kind in ('entry', 'tick') then
     execute format('create policy "members: add" on public.%I for insert to authenticated with check (public.is_member())', t);
     execute format('create policy "members: edit" on public.%I for update to authenticated using (public.is_member()) with check (public.is_member())', t);
+  end if;
+  if kind = 'tick' then
+    execute format('create policy "members: remove" on public.%I for delete to authenticated using (public.is_member())', t);
   end if;
 end $$;
 revoke execute on function public.apply_role_policies(text, text) from public, anon, authenticated;
@@ -134,24 +139,27 @@ do $$
 declare
   t text;
   read_tables text[] := array[
-    'ditch_riders', 'turnouts', 'fields', 'field_lineage', 'leases', 'crops', 'crop_years', 'operators',
-    'operation_types', 'equipment', 'equipment_fields', 'equipment_work_types', 'customers',
+    'ditch_riders', 'turnouts', 'fields', 'field_lineage', 'leases', 'crops', 'operators',
+    'operation_types', 'equipment_fields', 'equipment_work_types', 'customers',
     'chemicals', 'chemical_rotation_rules', 'chemical_events', 'chemical_event_products', 'chemical_loads',
     'water_orders', 'water_order_lines', 'water_order_subunits', 'water_events', 'irrigation_seasons',
     'procedures', 'procedure_steps', 'service_intervals',
-    'bee_rooms', 'bee_lots', 'bee_plans', 'bee_run_plans', 'bee_incubation_runs', 'bee_run_lots',
+    'bee_rooms', 'bee_lots', 'bee_plans', 'bee_run_plans', 'bee_run_lots',
     'bee_shelters', 'bee_storage'];
   entry_tables text[] := array[
-    'work_events', 'planting_details', 'harvest_records', 'planter_cal_tests',
+    'work_events', 'harvest_records', 'planter_cal_tests',
+    'crop_years',                -- planting dates and harvest notes follow logged work; no money here
+    'equipment',                 -- hours readings, walk-around checks; no money here
+    'bee_incubation_runs',
     'maint_jobs', 'maint_photos', 'maintenance_records', 'equipment_photos', 'equipment_nameplates',
-    'procedure_runs', 'procedure_tasks', 'procedure_checks', 'procedure_step_notes', 'procedure_step_photos',
-    'water_change_checks',
+    'procedure_runs', 'procedure_tasks', 'procedure_step_photos',
     'bee_room_readings', 'bee_run_events', 'bee_samples', 'bee_shelter_checks', 'bee_releases',
     'bee_recoveries', 'bee_placements', 'bee_fumigations'];
+  tick_tables text[] := array['procedure_checks', 'procedure_step_notes', 'water_change_checks', 'planting_details'];
 begin
   for t in select tablename from pg_tables where schemaname = 'public' and tablename <> 'profiles' loop
     perform public.apply_role_policies(t,
-      case when t = any(entry_tables) then 'entry' when t = any(read_tables) then 'read' else 'staff' end);
+      case when t = any(tick_tables) then 'tick' when t = any(entry_tables) then 'entry' when t = any(read_tables) then 'read' else 'staff' end);
   end loop;
 end $$;
 
