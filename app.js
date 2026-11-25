@@ -5726,7 +5726,7 @@ async function renderCostRates(el) {
       ${customers.length ? `<div class="rate-grid">${customers.map((c) => `<label>${esc(c.name)}${input('customer', c.customer_id)}</label>`).join('')}</div>` : '<p class="muted small">No customers yet (Setup → Customers).</p>'}</div>
     <div class="card"><h3>Recalculate a season</h3>
       <p class="muted small">Each record keeps the rate it was saved with, so changing a rate here doesn't change past records. To apply today's rates to a whole season, recalculate it.</p>
-      <div class="row"><select id="recalc-yr">${[yr + 1, yr, yr - 1, yr - 2, yr - 3].map((y) => `<option ${y === yr ? 'selected' : ''}>${y}</option>`).join('')}</select>
+      <div class="row recalc-row"><select id="recalc-yr">${[yr + 1, yr, yr - 1, yr - 2, yr - 3].map((y) => `<option ${y === yr ? 'selected' : ''}>${y}</option>`).join('')}</select>
         <button type="button" data-act="recalc">Recalculate costs</button></div>
       <p class="muted small" id="recalc-msg"></p></div>`;
   $$('[data-kind]', el).forEach((i) => (i.onchange = async () => {
@@ -5766,17 +5766,17 @@ async function renderUsers(el) {
     <div class="section-head"><h2>Users</h2></div>
     <p class="muted small">To add someone, invite their email from the Supabase dashboard (Authentication → Users → Invite). They show up here with no access until you give them a role.
       Link them to their person under Setup → Operators (sign-in email) so their work, checklists and loads are theirs.</p>
-    <div class="card"><ul class="list">${ROLES.map(([, l, d]) => `<li><span class="li-name"><b>${l}</b></span><span class="li-value muted small">${esc(d)}</span></li>`).join('')}
-      <li><span class="li-name"><b>Can apply</b></span><span class="li-value muted small">A farmhand who records the application on chemical loads assigned to them (not products or rates)</span></li></ul></div>
-    <div class="card table-wrap"><table class="m-cards">
-      <thead><tr><th>Email</th><th>Name</th><th>Person</th><th>Role</th><th>Applicator</th></tr></thead>
-      <tbody>${users.map((u) => { const o = opFor(u); return `<tr>
-        <td>${esc(u.email)}${u.user_id === me.userId ? ' <span class="muted small">(you)</span>' : ''}</td>
-        <td><input data-name="${u.user_id}" value="${esc(u.name ?? '')}" placeholder="Name"></td>
-        <td>${o ? esc(o.name) : '<span class="muted small">not linked</span>'}</td>
-        <td><select data-role="${u.user_id}">${ROLES.map(([k, l]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
-        <td><label class="check"><input type="checkbox" data-apply="${u.user_id}" ${u.can_apply ? 'checked' : ''}> Can apply</label>
-          ${u.can_apply && !o?.license_no ? '<div class="muted small">No license no. on their person</div>' : ''}</td></tr>`; }).join('')}</tbody></table></div>`;
+    <div class="card user-list">${users.map((u) => { const o = opFor(u); return `<div class="user-row">
+        <div class="user-head"><b>${esc(u.email)}</b>${u.user_id === me.userId ? ' <span class="muted small">(you)</span>' : ''}
+          <div class="muted small">${o ? `Person: ${esc(o.name)}` : 'Not linked to a person yet'}</div></div>
+        <div class="user-fields">
+          <label>Name<input data-name="${u.user_id}" value="${esc(u.name ?? '')}" placeholder="Name"></label>
+          <label>Role<select data-role="${u.user_id}">${ROLES.map(([k, l]) => `<option value="${k}" ${u.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          <label class="check"><input type="checkbox" data-apply="${u.user_id}" ${u.can_apply ? 'checked' : ''}> Can apply</label>
+        </div>
+        ${u.can_apply && !o?.license_no ? '<div class="muted small warn-line">No license no. on their person (Setup → Operators)</div>' : ''}</div>`; }).join('')}</div>
+    <div class="card"><h3>What each role can do</h3><dl class="role-help">${ROLES.map(([, l, d]) => `<dt>${l}</dt><dd>${esc(d)}</dd>`).join('')}
+      <dt>Can apply</dt><dd>A farmhand who records the application on chemical loads assigned to them (not products or rates)</dd></dl></div>`;
   const save = async (id, patch, msg) => { try { await q(sb.from('profiles').update(patch).eq('user_id', id)); toast(msg); } catch { /* shown */ } renderUsers(el); };
   $$('[data-role]', el).forEach((s) => (s.onchange = () => {
     if (s.dataset.role === me.userId && s.value !== 'admin' && !confirm('Take admin away from yourself? You won’t be able to change roles after this.')) return renderUsers(el);

@@ -568,6 +568,21 @@ a.button-like { text-decoration: none; }
 .rate-grid label { display: flex; flex-direction: column; gap: .25rem; font-weight: 600; min-width: 0; }
 .money-in { display: flex; align-items: center; gap: .3rem; font-weight: 400; }
 .money-in input { width: 100%; min-width: 0; }
+.rate-grid label { justify-content: space-between; }
+.recalc-row { flex-wrap: wrap; }
+.recalc-row select { width: auto; flex: 0 1 8rem; }
+.recalc-row button { white-space: nowrap; }
+.user-row { display: flex; flex-direction: column; gap: .5rem; padding: .8rem 0; border-bottom: 1px solid var(--border); }
+.user-row:first-child { padding-top: 0; }
+.user-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.user-head b { overflow-wrap: anywhere; }
+.user-fields { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto; gap: .6rem; align-items: end; }
+.user-fields > label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: var(--muted); min-width: 0; }
+.user-fields > label.check { flex-direction: row; align-items: center; gap: .45rem; font-size: 1rem; color: var(--text); min-height: 40px; }
+.warn-line { color: var(--danger); }
+.role-help { display: grid; grid-template-columns: max-content 1fr; gap: .45rem 1rem; margin: 0; }
+.role-help dt { font-weight: 600; }
+.role-help dd { margin: 0; color: var(--muted); font-size: .9rem; }
 .harvest-table td, .harvest-table th { white-space: nowrap; }
 .tickets { width: 100%; }
 .tickets input { width: 100%; min-width: 0; box-sizing: border-box; }
@@ -664,6 +679,17 @@ h4.overdue { color: var(--danger); }
   .section-head { align-items: center; }
   .section-head .row { flex: 1 1 auto; }
   .row4 { grid-template-columns: 1fr 1fr; }
+  /* Setup → Cost rates: one rate per line, name left, box right */
+  .rate-grid { grid-template-columns: 1fr; gap: 0; }
+  .rate-grid label { flex-direction: row; align-items: center; gap: .6rem; padding: .45rem 0; border-bottom: 1px solid var(--border); font-weight: 500; }
+  .rate-grid label:last-child { border-bottom: 0; }
+  .rate-grid .money-in { flex: 0 0 8.5rem; }
+  .recalc-row select { flex: 1 1 6rem; }
+  /* Setup → Users: name full width, role and Can apply share the next line */
+  .user-fields { grid-template-columns: minmax(0, 1fr) auto; }
+  .user-fields > label:first-child { grid-column: 1 / -1; }
+  .role-help { grid-template-columns: 1fr; gap: .1rem; }
+  .role-help dd { margin-bottom: .5rem; }
 
   /* Lists become tappable cards: the first three facts, a chevron, tap to open */
   .table-wrap:has(table.m-cards) { overflow-x: visible; }
